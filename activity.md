@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 17
-**Current Task:** Task 18: グローバルポジション制約の実装
+**Tasks Completed:** 18
+**Current Task:** Task 19: OTC市場対応Execution Gatewayの実装
 
 ---
 
@@ -362,3 +362,28 @@
 - **ユニットテスト**: 35新規テスト全て通過
   - 全クリア(1), MTM警告(3: active/at_threshold/just_below), 日次実現(2: breached/at_threshold), 週次(2: breached/at_threshold), 月次(2: breached/at_threshold), 優先順位(3: monthly>weekly>daily), validate_order(2: ok/rejected), is_halted(5: false/4variants), compute_limit_state(5: all_clear/mtm/realized/weekly/monthly), Q閾値(4: not_limited/high/low/sell), 正PnL(1), カスタムconfig(1), CloseReason(1), ハルトフラグ(1), 全限界(1), ゼロPnL(1)
 - **検証**: cargo build, cargo test (582 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 18: グローバルポジション制約の実装
+- **完了**: `crates/risk/src/global_position.rs` 作成
+- **完了**: GlobalPositionConfig — 戦略別最大ポジション(HashMap<StrategyId, f64>)、相関係数、FLOOR_CORRELATION(1.5)、ロット単位サイズ、最小ロット
+- **完了**: GlobalPositionChecker — ステートレスな制約チェッカー
+  - compute_global_limit: P_max^global = Σ P_max^i / max(correlation_factor, FLOOR_CORRELATION)
+  - validate_order: Direction(Buy/Sell)パラメータによる符号付きポジションデルタ計算、ハード制約|Σp_i+δ|≤P_max^globalチェック
+  - check_direction_feasibility: Buy/Sell方向の実行可能性判定
+  - compute_priority_lot_factor: ランク別ロット削減(0→1.0, 1→0.5, 2→0.25, ...)
+  - validate_full: グローバルポジション + 階層的リミットの統合バリデーション
+- **完了**: 戦略間優先度: |Q-value|による戦略ランキング、下位戦略のロット削減（min_lot_size未満でブロック）
+- **完了**: PositionCheckResult — effective_lot, global_limit, current_global_position, priority_rank, total_strategies
+- **完了**: lib.rsにpub mod global_position追加
+- **完了**: ゼロロットのショートサーキット（常時許可）対応
+- **ユニットテスト**: 38新規テスト全て通過
+  - compute_global_limit(6): basic/high_correlation/floor_correlation/custom_floor/asymmetric/zero_floor
+  - hard constraint(8): zero_pos/within_limit/blocked_at/blocked_beyond/sell_ok/sell_blocked/multi_lot/multi_lot_blocked
+  - priority(5): rank0/rank1/rank2/blocked_below_min/negative_q_ranking/equal_q
+  - direction_feasibility(4): both/buy_blocked/sell_blocked/tight_limit
+  - lot_factor(4): rank0/rank1/rank2/rank3
+  - validate_full(3): ok/global_blocked/limits_blocked
+  - metadata(1): global_limit/current_pos/total_strategies
+  - edge cases(4): unknown_strategy/zero_lot/negative_existing/negative_sell_exceeds
+  - stress(2): tight_limit/correlation_reduction
+- **検証**: cargo build, cargo test (620 passed), cargo clippy, cargo fmt --check 全て通過
