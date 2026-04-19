@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 3
-**Current Task:** Task 4: Event Busコア実装（パーティション分割ストリーム）
+**Tasks Completed:** 4
+**Current Task:** Task 5: Tiered Event Store実装
 
 ---
 
@@ -40,3 +40,12 @@
 - **完了**: .venv作成、pip bootstrap経由で依存パッケージインストール
 - **完了**: pytest 3テスト全て通過（依存import確認、パッケージ構造確認、onnx_export確認）
 - **検証**: cargo build, cargo test, cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 4: Event Busコア実装（パーティション分割ストリーム）
+- **完了**: Event trait + GenericEvent実装（crates/events/src/event.rs）
+- **完了**: PartitionedEventBus: tokio::broadcastベースの4ストリーム（Market, Strategy, Execution, State）パーティション分割イベントバス
+- **完了**: EventPublisher: ストリームへのイベント発行、RwLockベースのアトミック・シーケンスID採番
+- **完了**: EventSubscriber: 複数ストリーム購読、StreamIdフィルタリング（recv/recv_from）
+- **完了**: 冪等性処理: HashSet<UUID>によるevent_id重複スキップ
+- **ユニットテスト**: 8テスト全て通過（発行・購読・シーケンス増分・マルチストリーム分離・冪等性・recv_from・サブスクライバなし発行・ストリーム別シーケンスカウンタ）
+- **検証**: cargo build, cargo test (8 passed), cargo clippy, cargo fmt --check 全て通過
