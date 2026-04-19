@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 24
-**Current Task:** Task 25: Observability（Pre-Failure Signature）の実装
+**Tasks Completed:** 25
+**Current Task:** Task 26: バックテストフレームワークの実装
 
 ---
 
@@ -591,3 +591,48 @@
   - Serde(2): stats_serde/status_serde
   - 並行アクセス(1): concurrent_access
 - **検証**: cargo build, cargo test (867 passed), cargo clippy (clean), cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 25: Observability（Pre-Failure Signature）の実装
+- **完了**: `crates/core/src/observability.rs` 全面実装
+- **完了**: PreFailureMetrics構造体 — §8.2の全19指標を網羅
+  - rolling_variance_latency, feature_distribution_kl_divergence, q_value_adjustment_frequency
+  - execution_drift_trend, latency_risk_trend, self_impact_ratio
+  - liquidity_evolvement, policy_entropy, regime_posterior_entropy
+  - hidden_liquidity_sigma, position_constraint_saturation_rate
+  - last_look_rejection_rate, dynamic_cost_estimate_error, lp_adversarial_score
+  - daily_pnl_vs_limit, weekly_pnl_vs_limit, monthly_pnl_vs_limit
+  - lp_recalibration_progress, bayesian_posterior_drift
+- **完了**: RollingStats — VecDequeベースのスライディングウィンドウ統計（mean/variance/std）、正確な再計算でWelford removalの数値不安定性を回避
+- **完了**: AlertSeverity列挙型 (Warning/Critical)、AnomalyAlert構造体（metric_name, value, threshold, severity, timestamp_ns）
+- **完了**: AnomalyThreshold — warning/critical二段階閾値
+- **完了**: AnomalyConfig — 17指標のデフォルト閾値設定 + debounce_ticks（デフォルト3）
+  - モデル崩壊系: q_value_adjustment_frequency, bayesian_posterior_drift, feature_distribution_kl_divergence
+  - 実行品質系: last_look_rejection_rate, lp_adversarial_score, dynamic_cost_estimate_error
+  - レイテンシ: rolling_variance_latency, latency_risk_trend
+  - ポリシー/レジーム: policy_entropy, regime_posterior_entropy
+  - 流動性: liquidity_evolvement, hidden_liquidity_sigma, self_impact_ratio
+  - リスクリミット: daily/weekly/monthly_pnl_vs_limit（絶対値チェック対応）
+  - ポジション制約: position_constraint_saturation_rate
+- **完了**: AnomalyDetector — デバウンス付き閾値ベース異常検知
+  - 直値+絶対値の二重閾値チェック（負のPnL比にも対応）
+  - デバウンス: 連続anomaly回数 >= debounce_ticks でアラート発火
+  - 非anomaly時の自動カウンタリセット
+  - per-metric RollingStatsによるトレンド追跡
+- **完了**: ObservabilityManager — メインインターフェース
+  - tick(): メトリクス受信 → 構造化ログ出力(tracing::info) → 異常検知 → アラートログ(tracing::warn/error)
+  - total_ticks/total_critical_alerts/total_warning_alerts の集計
+  - last_metrics/last_alerts の保持
+  - reset()による全状態クリア
+- **完了**: lib.rsにpub mod observability追加
+- **ユニットテスト**: 44新規テスト全て通過
+  - PreFailureMetrics(4): default/slice_length/names_count/serde
+  - RollingStats(9): single/two/window_trimming/reset/variance_stability/zero_window/large_window/empty/variance_after_trim
+  - AnomalyAlert(2): fields/serde
+  - AnomalyConfig(2): has_thresholds/covers_metrics
+  - AnomalyDetector(10): no_alert/debounce/warning/reset_consecutive/multiple_anomalies/monitored/rolling_stats/unknown/reset/absolute_value/all_zero
+  - ObservabilityManager(9): new/tick_increments/last_metrics/no_alert/critical_counts/warning_counts/detector_access/reset/multiple_ticks/last_alerts_persist
+  - AlertSeverity(1): equality
+  - AnomalyThreshold(2): ordering/serde
+  - Config(1): serde_roundtrip
+  - Edge(2): nan/infinity
+- **検証**: cargo build, cargo test (911 passed), cargo clippy (clean), cargo fmt --check 全て通過
