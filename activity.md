@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 15
-**Current Task:** Task 16: Dynamic Risk Barrierの実装
+**Tasks Completed:** 16
+**Current Task:** Task 17: 階層的損失リミットの実装（日次二段階+週次+月次）
 
 ---
 
@@ -317,3 +317,28 @@
   - Drift(6): zero-prev/decay/weighted/shape/multi-regime/wrong-dim-panic
   - RegimeCache(17): new/update/unknown-detection/normalization/update-drift/drift-accumulation/update-from-weights/reset/config-max/config-custom/kl-stored/kl-uniform/multiple-updates/boundary-threshold/just-below/wrong-length-panic/wrong-rows-panic
 - **検証**: cargo build, cargo test (513 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 16: Dynamic Risk Barrierの実装
+- **完了**: `crates/risk/src/barrier.rs` 全面実装
+- **完了**: DynamicRiskBarrierConfig: staleness_threshold_ms(5000), warning_threshold_ratio(0.4), min_lot_multiplier(0.01), default/max/min_lot_size
+- **完了**: BarrierStatus列挙型: Normal/Warning/Degraded/Halted の4段階
+- **完了**: DynamicRiskBarrier: ステートレスなコマンド通過型設計（同期待機なし）
+  - compute_lot_multiplier: 二次関数ペナルティ max(0, 1 - (staleness/threshold)²)
+  - compute_status: 4段階ステータス判定（Normal→Warning→Degraded→Halted）
+  - evaluate: 完全なバリア評価（allowed判定 + 構造化ログ出力）
+  - compute_effective_lot: default_lot × multiplier、min_lot_multiplier未満で0
+  - validate_order: Result<StalenessInfo, RiskError> でバリデーション（Halted/Degradedエラー）
+  - staleness_info: 情報取得のみ（エラーなし）
+- **完了**: StalenessInfo拡張: staleness_ms, lot_multiplier, status, effective_lot_size
+- **完了**: BarrierResult: allowed, staleness_ms, lot_multiplier, status, effective_lot_size
+- **完了**: RiskErrorにStalenessHalted/StalenessDegraded追加 (crates/risk/src/limits.rs)
+- **ユニットテスト**: 34新規テスト全て通過
+  - lot_multiplier(8): zero/quadratic/half/at/beyond/monotonic/non-negative/custom threshold
+  - status(7): normal/warning/degraded/halted×3
+  - evaluate(7): normal/degraded/halted/effective_lot_scaled/max_clamp/below_min_lot
+  - effective_lot(3): zero/full/half
+  - validate_order(5): normal/halted_error/degraded_error/degraded_ok/no_market_data
+  - staleness_info(1)
+  - config(3): default/warning_threshold/custom_config
+  - penalty_curve(2): shape/convexity
+- **検証**: cargo build, cargo test (547 passed), cargo clippy, cargo fmt --check 全て通過
