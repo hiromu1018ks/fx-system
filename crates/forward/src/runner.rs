@@ -367,6 +367,7 @@ mod tests {
     use crate::config::*;
     use crate::feed::DataSourceConfig;
     use std::collections::VecDeque;
+    use std::time::Duration;
 
     struct StubFeed {
         ticks: VecDeque<TickData>,

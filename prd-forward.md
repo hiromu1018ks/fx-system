@@ -231,7 +231,7 @@ enum DataSourceConfig {
       "PerformanceSnapshot: 任意時点のパフォーマンススナップショット",
       "ユニットテスト: PnL計算、Rolling Sharpe、DD、戦略別内訳、drift追跡"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

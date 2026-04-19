@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 5
-**Current Task:** Task 6 — Performance Tracker
+**Tasks Completed:** 6
+**Current Task:** Task 7 — Risk Alert System
 
 ---
 
@@ -59,3 +59,10 @@
 - **完了**: 戦略選択ロジック（enabled_strategies に基づくA/B/C個別有効化）
 - **完了**: テスト5件（ティック処理/空フィード/戦略フィルタ/期間制限/再現性）
 - **確認**: `cargo test`（30テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 6: Performance Tracker
+- **完了**: PerformanceTracker 完全実装（累積PnL, Rolling Sharpe, 最大DD, 勝率, Execution Drift）
+- **完了**: スライディングウィンドウベースの年率化Sharpe計算
+- **完了**: Execution Drift統計（平均/標準偏差のオンライン計算）
+- **完了**: テスト7件（初期状態/PnL更新/DD追跡/トレード記録/Sharpe/drift/ウィンドウ排除）
+- **確認**: `cargo test`（37テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
