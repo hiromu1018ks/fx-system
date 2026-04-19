@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 14
-**Current Task:** Task 15: HDP-HMM Regime管理の実装
+**Tasks Completed:** 15
+**Current Task:** Task 16: Dynamic Risk Barrierの実装
 
 ---
 
@@ -288,3 +288,32 @@
   - MAX_HOLD_TIME(1): forced close
   - Config access(2): active episode/config values
 - **検証**: cargo build, cargo test (475 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 15: HDP-HMM Regime管理の実装
+- **完了**: `research/models/hdp_hmm.py` 作成 — Python側HDP-HMM推論エンジン
+  - HdpHmmParams: n_regimes, feature_dim, weights, bias, transition_matrix, concentration parameters
+  - compute_regime_posterior: softmax(w_k^T x + b_k) による事後確率計算
+  - compute_regime_entropy: Shannon entropy H(p) = -sum(p * log(p))
+  - compute_regime_kl_divergence: KL(p || q)、デフォルトは一様分布を参照
+  - compute_drift: AR(1)減衰 + regime posterior加重、drift_t = sum_k(posterior_k * ar_coeff * prev_drift)
+  - initialize_hdp_hmm_params: 楽観的初期化 + sticky transition matrix
+  - train_hdp_hmm_online: オンライン勾配上昇による学習（簡易版）
+  - export_hdp_hmm_to_onnx: ONNXエクスポート (softmax graph: features → regime_posterior)
+- **完了**: `research/tests/test_hdp_hmm.py` 作成 — 28テスト (全カテゴリ: params, posterior, entropy, KL, drift, init, train, ONNX export)
+- **完了**: `crates/strategy/src/regime.rs` 作成 — Rust側軽量オンラインRegime指標
+  - RegimeConfig: n_regimes=4, unknown_regime_entropy_threshold=1.8, regime_ar_coeff=0.9, feature_dim=34
+  - RegimeState: posterior, entropy, kl_divergence, drift, is_unknown, last_update_ns, initialized
+  - RegimeCache: update(posterior), update_drift(features), update_from_weights(features, weights, bias), reset()
+  - compute_entropy: ゼロ確率を無視する安全なShannon entropy
+  - compute_kl_divergence: 一様分布またはカスタム参照分布に対するKL divergence
+  - compute_posterior_from_weights: softmax with numerical stability (max subtraction)
+  - compute_drift: regime加重AR(1)減衰モデル
+  - 未知Regime検出: entropy > threshold → is_unknown フラグ
+- **完了**: lib.rsにpub mod regime追加
+- **ユニットテスト**: 38新規Rustテスト全て通過
+  - Entropy(5): uniform/deterministic/skewed/single/zero-prob
+  - KL divergence(4): identical/from-uniform/with-reference/non-negative
+  - Posterior(6): sums-to-one/non-negative/dominant/equal/shape/four-regimes
+  - Drift(6): zero-prev/decay/weighted/shape/multi-regime/wrong-dim-panic
+  - RegimeCache(17): new/update/unknown-detection/normalization/update-drift/drift-accumulation/update-from-weights/reset/config-max/config-custom/kl-stored/kl-uniform/multiple-updates/boundary-threshold/just-below/wrong-length-panic/wrong-rows-panic
+- **検証**: cargo build, cargo test (513 passed), cargo clippy, cargo fmt --check 全て通過
