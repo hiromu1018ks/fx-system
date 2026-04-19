@@ -4,4 +4,5 @@ pub mod features;
 pub mod policy;
 pub mod strategy_a;
 pub mod strategy_b;
+pub mod strategy_c;
 pub mod thompson_sampling;

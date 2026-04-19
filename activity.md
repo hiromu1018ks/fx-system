@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 12
-**Current Task:** Task 13: 戦略C: Session Structural Bias の実装
+**Tasks Completed:** 13
+**Current Task:** Task 14: On-policy Monte Carlo評価の実装
 
 ---
 
@@ -213,3 +213,34 @@
   - エピソードライフサイクル(2): full/remaining time
   - p_continue_b詳細(3): signal weights/intensity scaled/no decay no signal
 - **検証**: cargo build, cargo test (278 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 13: 戦略C: Session Structural Bias の実装
+- **完了**: `crates/strategy/src/strategy_c.rs` 作成
+- **完了**: StrategyC構造体 — 独自のQFunction(39次元) + エピソード管理 + Thompson Sampling意思決定パイプライン
+- **完了**: StrategyCConfig — トリガー閾値(session_active=0.5, obi_significance=0.05, max_session_open=3.6M ms, regime_kl=1.0), MAX_HOLD_TIME=600s(10分), decay_rate_c=0.00005
+- **完了**: トリガー条件実装: session_active ∧ |OBI| > θ ∧ time_since_open < θ ∧ regime_kl < θ
+- **完了**: 戦略C固有特徴量(5次元追加):
+  - session×OBI (支配的セッションで加重されたOBI)
+  - depth_change×queue_position (range_break×liquidity_resiliency)
+  - p_trend_c: OBI信号(0.4) + session信号(0.35) + time_weight(0.25) の重み付き [0,1]（セッション開始直後が最強）
+  - time_decay_C: exp(-0.00005 × holding_time_ms) (10分スケール、最も遅い減衰)
+  - OBI×time_since_open (セッション成熟度で変調されたオーダーフロー強度、60分で頭打ち)
+- **完了**: エピソード管理: Idle/Active状態、MAX_HOLD_TIME超過で強制クローズ、外部ポジションクローズの同期
+- **完了**: decide()パイプライン: エピソードタイムアウト→ポジション同期→トリガーチェック→特徴量抽出→Thompson Sampling→ペナルティ→整合性→グローバル制約→ロット sizing→Hold退化監視
+- **完了**: EpisodeStateC列挙型(Idle/Active)、StrategyCDecision構造体
+- **完了**: lib.rsにpub mod strategy_c追加
+- **ユニットテスト**: 97新規テスト全て通過
+  - トリガー(10): 全条件/各閾値不足/no conditions/カスタム閾値/Tokyo/NY/負OBI/time境界
+  - 特徴量抽出(14): 次元/ベース保存/session×OBI/range_break×liquidity/p_trend_c(3)/time_decay_c(3)/OBI×time(2)/全有限
+  - エピソード管理(10): 初期/開始/終了/境界内/境界/超過/残り時間(4)/ゼロ
+  - 決定パイプライン(12): idle skip/triggered/explore/timeout long/short/no position/外部同期/active bypass/entry starts/global buy/sell blocks/low lot
+  - Q関数(4): 次元/楽観バイアス/update/extended features
+  - 設定(2): デフォルト/定数
+  - ロット(4): full/half/max clamp/zero
+  - 整合性(4): both close/far/one negative/both negative
+  - アクション選択(5): argmax buy/sell/hold/buy blocked/both blocked
+  - Hold退化(3): detected/not detected/early
+  - リセット(2): tracker/Q function
+  - エピソードライフサイクル(2): full/remaining time
+  - p_trend_c詳細(3): signal weights/session scaled/late session decay
+- **検証**: cargo build, cargo test (435 passed), cargo clippy, cargo fmt --check 全て通過
