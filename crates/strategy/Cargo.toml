@@ -17,3 +17,5 @@ rand = { workspace = true }
 rand_distr = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+prost = { workspace = true }
+uuid = { workspace = true }

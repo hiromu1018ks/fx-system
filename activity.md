@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 7
-**Current Task:** Task 8: 特徴量抽出パイプライン φ(s) の実装
+**Tasks Completed:** 8
+**Current Task:** Task 9: Q関数（ベイズ線形回帰）の実装
 
 ---
 
@@ -91,3 +91,22 @@
 - **完了**: build.rs に gap_event.proto 追加
 - **ユニットテスト**: 20新規テスト全て通過（正常ティック, 1/2/3/5ティック欠損, min_samples前シーケンスベース検出, z-score検出, 連続シーケンス正常, 小分散正常, 統計更新後, GapInfoフィールド確認, 初回ティック, 逆方向タイムスタンプ無視, Strategy Stream発行Minor/Severe, 正常ティック非発行, 複数ギャップ連続, 回復, 平均・標準偏差収束）
 - **検証**: cargo build, cargo test (80 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 8: 特徴量抽出パイプライン φ(s) の実装
+- **完了**: FeatureVector構造体（34次元）の定義とflattened()/from_flattened()ラウンドトリップ対応
+- **完了**: FeatureExtractor実装 (crates/strategy/src/extractor.rs)
+  - マイクロ構造特徴量: spread, spread_zscore (RollingWindow z-score), OBI, ΔOBI, depth_change_rate, queue_position
+  - ボラティリティ特徴量: realized_volatility (log-return std), volatility_ratio (short/long), volatility_decay_rate
+  - 時間系特徴量: session (one-hot: Tokyo/London/NY/Sydney), time_since_open, time_since_last_spike, holding_time
+  - ポジション状態特徴量: position_size, direction, entry_price, pnl_unrealized (StateSnapshot由来)
+  - オーダーフロー/実行系特徴量: trade_intensity, signed_volume, recent_fill_rate (EMA), recent_slippage (EMA)
+  - 非線形変換項: self_impact (Kyle's lambda簡易版), time_decay (exp(-λt)), dynamic_cost (spread+OBI+vol premium), P(revert), P(continue), P(trend)
+  - 交互作用項: spread_z×vol, OBI×session, depth_drop×vol_spike, position_size×vol
+- **完了**: 情報リーク防止の実装
+  - 実行系データ (fill_rate, slippage) にfirst_execution_nsベースの強制ラグ適用
+  - pnl_unrealizedはStateProjectorが計算した値（前回mid-price基準、本質的に1ティックラグ付き）
+  - LaggedExecutionStats: EMA更新 + ウィンドウベース集計 + first_execution_ns追跡
+- **完了**: 内部ユーティリティ: RollingWindow (online mean/var/z-score), VolatilityState (log-return vol), Session列挙型
+- **追加依存**: prost, uuid (fx-strategy)
+- **ユニットテスト**: 66新規テスト全て通過（マイクロ構造: 6, ボラティリティ: 4, 時間: 6, ポジション: 4, 実行系: 6, 非線形: 5, 交互作用: 4, 情報リーク: 3, エッジケース: 4, RollingWindow: 5, LaggedExec: 2, VolState: 2, FeatureVector: 4, セッション: 3, 統合: 2, デコードエラー: 3, gap_hold: 1）
+- **検証**: cargo build, cargo test (146 passed), cargo clippy, cargo fmt --check 全て通過
