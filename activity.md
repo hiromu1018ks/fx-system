@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 26
-**Current Task:** Task 27: 統計的検証パイプラインの実装（Python）
+**Tasks Completed:** 27
+**Current Task:** Task 28: 統合テスト: エンドツーエンド取引フロー
 
 ---
 
@@ -666,3 +666,50 @@
   - engine(12): make_market_event, generate_synthetic_ticks(3), empty_store, loads_from_store, from_events, config_default, result_fields, reproducible_with_seed, store_replay_filtering, price_bounds, gateway_accessible
   - stats(28): empty_summary, from_trades_empty, single_trade, mixed_trades, profit_factor(4), max_drawdown(3), sharpe_ratio(3), sortino_ratio(2), avg_slippage, avg_fill_probability, consecutive_streaks(3), avg_trade_duration(2), equity_curve(2), max_drawdown_duration(2), strategy_breakdown(2)
 - **検証**: cargo build, cargo test (40 passed for fx-backtest), cargo clippy (clean), cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 27: 統計的検証パイプラインの実装（Python）
+- **完了**: `research/analysis/cpcv.py` 作成 — CPCV (Combinatorial Purged Cross-Validation)
+  - generate_cpcv_splits: n_groups分割の全C(n_groups, n_test_groups)組み合わせ生成
+  - purge/embargo barsによるtrain/test境界付近の情報リーク防止
+  - run_cpcv: 戦略関数を適用して全スプリットのOOS性能を集計
+  - CpcvResult: mean/std/min/max score, failure_rateの統計集計
+- **完了**: `research/analysis/pbo.py` 作成 — Probability of Backtest Overfitting
+  - compute_pbo: 複数戦略のIS/OOS性能からPBO計算
+  - IS最適戦略のOOSランク分布追跡、中央値以下の割合がPBO
+  - PBO > 0.1で破棄判定
+- **完了**: `research/analysis/dsr.py` 作成 — Deflated Sharpe Ratio
+  - compute_dsr: Sharpe観測値を複数試行補正・歪度・尖度で調整
+  - log(P) + (N-1)*log(1-P) 公式によるDSR計算
+  - DSR >= 0.95で戦略採用判定
+  - 数値安定性: cdf clippingでlog domain error防止
+- **完了**: `research/analysis/validation.py` 作成 — Sharpe天井・複雑度ペナルティ・Live Degradation
+  - check_sharpe_ceiling: 年率Sharpe > 1.5で強制破棄
+  - compute_complexity_penalty: Adjusted Sharpe = Sharpe / sqrt(num_features)
+  - check_live_degradation: OOS Sharpe低下30%以内を要求
+- **完了**: `research/analysis/leakage.py` 作成 — 情報リーク検証
+  - verify_information_leakage: ラグ有無での性能比較
+  - 相対改善率 > threshold(20%)でリーク検出
+  - カスタムメトリック関数対応
+- **完了**: `research/analysis/sensitivity.py` 作成 — 報酬関数感度分析
+  - analyze_reward_sensitivity: λ_risk, λ_dd, DD_capの独立摂動
+  - 全摂動でbase_performanceの50%以上を維持でrobust判定
+  - デフォルト摂動因子: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+- **完了**: `research/analysis/pipeline.py` 作成 — 統合パイプライン
+  - run_validation_pipeline: 全検証チェックの一括実行
+  - PipelineConfig: 全閾値のカスタマイズ対応
+  - PipelineResult: all_passed, n_passed/n_failed集計
+  - 8チェック: Sharpe Ceiling, DSR, Complexity Penalty, CPCV, PBO, Live Degradation, Leakage, Sensitivity
+- **完了**: `research/analysis/__init__.py` 更新 — 全モジュールのpublic API export
+- **ユニットテスト**: 68新規テスト全て通過
+  - CPCV(14): 分割生成(11), 実行(3)
+  - PBO(5): 基本(3), エラー(2)
+  - DSR(6): 基本(4), エッジ(2)
+  - Sharpe Ceiling(6): 通過/失敗/カスタム/ゼロ/負/短
+  - Complexity Penalty(5): ペナルティ/特徴量数/単一/ゼロ/負
+  - Live Degradation(5): 類似/大劣化/ゼロ/改善/カスタム
+  - Information Leakage(6): 正常/検出/カスタム/ゼロ/両方ゼロ/閾値
+  - Sensitivity(5): 基本/robust/因子/名前/敏感
+  - Pipeline(8): 最小/フル/カスタム/構造/全通過/不通過/設定/負
+  - CpcvResult(3): 空/単一/混合
+  - Edge Cases(5): NaN/Inf/一定/小サンプル/ゼロSharpe
+- **検証**: pytest 68 passed, cargo build/test/clippy/fmt 全て通過
