@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 18
-**Current Task:** Task 19: OTC市場対応Execution Gatewayの実装
+**Tasks Completed:** 19
+**Current Task:** Task 20: LP切り替え再校正プロトコルの実装
 
 ---
 
@@ -387,3 +387,30 @@
   - edge cases(4): unknown_strategy/zero_lot/negative_existing/negative_sell_exceeds
   - stress(2): tight_limit/correlation_reduction
 - **検証**: cargo build, cargo test (620 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 19: OTC市場対応Execution Gatewayの実装
+- **完了**: `crates/execution/src/otc_model.rs` 全面実装
+  - BetaParams: Beta-Binomial共役事前分布によるP(not_rejected)推定 (alpha/beta + update)
+  - LastLookModel: LP別Last-Look拒否確率推定 + ボラティリティペナルティ調整
+  - FillProbabilityModel: P(fill_requested) × P(not_rejected) + ε_hidden（Student's t分布）
+  - SlippageModel: direction/size/vol依存スリッページ + LP別Welfordオンライン統計更新
+  - OrderTypeSelector: Expected_Profitとfill_effectiveに基づくLimit/Market選択 + 緊急度オーバーライド
+- **完了**: `crates/execution/src/lp_monitor.rs` 作成
+  - LpRiskMonitor: EMAベースのfill_rate監視 + consecutive rejection検知
+  - 二段階adversarial検出: fill_rate_ema < threshold OR consecutive >= max
+  - LP自動切替: 円周サーチで非adversarial LPを選択、adversarial LPをスキップ
+  - 回復検知: fill_rate_ema >= recovery_thresholdでis_adversarial解除
+- **完了**: `crates/execution/src/gateway.rs` 作成 — ExecutionGateway
+  - evaluate(): Last-Look → OrderType → FillProb → Slippage の評価パイプライン
+  - simulate_execution(): バックテスト用の乱数ベース約定/拒否シミュレーション
+  - process_fill/process_rejection: 全モデル（Last-Look, Slippage, LP Monitor）の一括更新
+  - check_lp_switch(): adversarial検知 → LP切替シグナル生成
+  - build_execution_event(): ExecutionEventPayload proto生成 + roundtrip検証
+- **完了**: `crates/execution/src/order.rs` 拡張 — strategy_id, order_type, limit_price, timestamp_ns追加
+- **完了**: `crates/execution/src/lib.rs` にgateway, lp_monitorモジュール追加
+- **追加依存**: uuid, prost (fx-execution)
+- **ユニットテスト**: 77新規テスト全て通過
+  - otc_model(40): BetaParams(5), LastLook(11), FillProbability(11), Slippage(9), OrderType(8) — 個別
+  - lp_monitor(20): 初期化/空LP panic, fill/rejection記録, consecutive reset, EMA収束(high/low), adversarial検出(fill_rate/consecutive), min_obs未満, 単一LP, 回復, set_active, skip_adversarial, per_lp独立
+  - gateway(17): evaluate(ok/zero_lot/buy_positive/sell_lower/urgent), simulate(result/fill_updates/fields/rejection_updates), process(fill/rejection), LP switch, no_switch_single, proto(Filled/Rejected/roundtrip), order_ids_unique
+- **検証**: cargo build, cargo test (697 passed), cargo clippy, cargo fmt --check 全て通過
