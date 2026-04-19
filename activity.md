@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 19
-**Current Task:** Task 20: LP切り替え再校正プロトコルの実装
+**Tasks Completed:** 20
+**Current Task:** Task 21: Market Gateway実装（WebSocket/FIX Handler）
 
 ---
 
@@ -414,3 +414,37 @@
   - lp_monitor(20): 初期化/空LP panic, fill/rejection記録, consecutive reset, EMA収束(high/low), adversarial検出(fill_rate/consecutive), min_obs未満, 単一LP, 回復, set_active, skip_adversarial, per_lp独立
   - gateway(17): evaluate(ok/zero_lot/buy_positive/sell_lower/urgent), simulate(result/fill_updates/fields/rejection_updates), process(fill/rejection), LP switch, no_switch_single, proto(Filled/Rejected/roundtrip), order_ids_unique
 - **検証**: cargo build, cargo test (697 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 20: LP切り替え再校正プロトコルの実装
+- **完了**: `crates/execution/src/lp_recalibration.rs` 全面実装
+- **完了**: RecalibrationConfig — safe_mode_lot_multiplier(0.25), safe_mode_sigma_multiplier(2.0), min_recalibration_observations(30), slippage_error_threshold(0.0002), fill_rate_error_threshold(0.1), max_recalibration_duration_ns(5分)
+- **完了**: RecalibrationStatus列挙型 (Idle/SafeMode/Completed)
+- **完了**: LpRecalibrationManager — LP切り替え後の安全モード移行とパラメータ再校正
+  - enter_safe_mode: LP切替シグナル受信時、baseline fill rate/slippageを記録し安全モード開始
+  - record_fill: 約定観測記録（observed/predicted slippage追跡）
+  - record_rejection: 拒否観測記録
+  - lot_multiplier: 安全モード中は0.25（25%制限）
+  - sigma_multiplier: 安全モード中は2.0（σ_execution暫定値2倍）
+  - check_completion: 統計的収束（slippage error + fill rate errorが閾値以下）または最大時間到達で完了
+  - compute_slippage_error: |observed_mean - predicted_mean| / max(|observed_mean|, |predicted_mean|, epsilon)
+  - compute_fill_rate_error: |observed_fill_rate - baseline_fill_rate|
+- **完了**: RecalibrationSnapshot — 現在の再校正状態スナップショット（観測数、slippage統計、fill rate、エラー等）
+- **完了**: ExecutionGatewayへの統合
+  - ExecutionGatewayConfigにrecalibrationフィールド追加
+  - check_lp_switch内で自動的にenter_safe_modeを呼び出し
+  - process_fill_with_prediction: slippage予測値付きfill記録（再校正用）
+  - process_rejection_with_timestamp: タイムスタンプ付きrejection記録（再校正用）
+  - check_recalibration: 定期呼び出しで完了判定→自動リセット
+  - recalibration_lot_multiplier/sigma_multiplier/is_recalibrating/recalibration_status アクセサ
+- **完了**: lib.rsにpub mod lp_recalibration追加
+- **ユニットテスト**: 28新規テスト全て通過
+  - ライフサイクル(3): idle/enter_safe_mode/safe_mode_multipliers
+  - 観測記録(4): fill/rejection/ignored_when_idle/ignored_wrong_lp
+  - 完了判定(5): insufficient_obs/statistical_convergence/max_duration/no_obs/completed_status
+  - リセット(1): clear_state
+  - スナップショット(2): safe_mode/idle_empty
+  - 統計計算(4): slippage_variance/error/fill_rate_error/fill_rate_convergence
+  - エッジケース(5): zero_fills_stats/infinity_no_fills/infinity_no_obs/start_timestamp/completion_already_done
+  - 設定(1): config_access
+  - 追加(3): snapshot_elapsed_no_start/single_fill_variance/consecutive_recalibrations
+- **検証**: cargo build, cargo test (725 passed), cargo clippy, cargo fmt --check 全て通過

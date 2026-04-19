@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::lp_monitor::{LpMonitorConfig, LpRiskMonitor, LpSwitchSignal};
+use crate::lp_recalibration::{LpRecalibrationManager, RecalibrationConfig, RecalibrationStatus};
 use crate::otc_model::*;
 
 // ============================================================
@@ -84,6 +85,7 @@ pub struct ExecutionGatewayConfig {
     pub slippage: SlippageConfig,
     pub order_type: OrderTypeConfig,
     pub lp_monitor: LpMonitorConfig,
+    pub recalibration: RecalibrationConfig,
 }
 
 impl Default for ExecutionGatewayConfig {
@@ -96,6 +98,7 @@ impl Default for ExecutionGatewayConfig {
             slippage: SlippageConfig::default(),
             order_type: OrderTypeConfig::default(),
             lp_monitor: LpMonitorConfig::default(),
+            recalibration: RecalibrationConfig::default(),
         }
     }
 }
@@ -112,12 +115,14 @@ pub struct ExecutionGateway {
     slippage_model: SlippageModel,
     order_type_selector: OrderTypeSelector,
     lp_monitor: LpRiskMonitor,
+    recalibration_manager: LpRecalibrationManager,
     order_counter: u64,
 }
 
 impl ExecutionGateway {
     pub fn new(config: ExecutionGatewayConfig) -> Self {
         let known_lps = config.known_lps.clone();
+        let recalibration = config.recalibration.clone();
         Self {
             _config: config,
             last_look_model: LastLookModel::new(LastLookConfig::default()),
@@ -125,6 +130,7 @@ impl ExecutionGateway {
             slippage_model: SlippageModel::new(SlippageConfig::default()),
             order_type_selector: OrderTypeSelector::new(OrderTypeConfig::default()),
             lp_monitor: LpRiskMonitor::new(LpMonitorConfig::default(), known_lps),
+            recalibration_manager: LpRecalibrationManager::new(recalibration),
             order_counter: 0,
         }
     }
@@ -301,9 +307,40 @@ impl ExecutionGateway {
         self.lp_monitor.record_fill(lp_id);
     }
 
+    pub fn process_fill_with_prediction(
+        &mut self,
+        lp_id: &str,
+        observed_slippage: f64,
+        predicted_slippage: f64,
+        timestamp_ns: u64,
+    ) {
+        self.last_look_model.update_fill(lp_id);
+        self.slippage_model
+            .update_observation(lp_id, observed_slippage);
+        self.lp_monitor.record_fill(lp_id);
+        self.recalibration_manager.record_fill(
+            lp_id,
+            observed_slippage,
+            predicted_slippage,
+            timestamp_ns,
+        );
+    }
+
     pub fn process_rejection(&mut self, lp_id: &str, _reason: &str) {
         self.last_look_model.update_rejection(lp_id);
         self.lp_monitor.record_rejection(lp_id);
+    }
+
+    pub fn process_rejection_with_timestamp(
+        &mut self,
+        lp_id: &str,
+        _reason: &str,
+        timestamp_ns: u64,
+    ) {
+        self.last_look_model.update_rejection(lp_id);
+        self.lp_monitor.record_rejection(lp_id);
+        self.recalibration_manager
+            .record_rejection(lp_id, timestamp_ns);
     }
 
     pub fn check_lp_switch(&mut self) -> Option<LpSwitchSignal> {
@@ -315,7 +352,51 @@ impl ExecutionGateway {
             "LP switch triggered"
         );
         info!(new_lp = %signal.to_lp_id, "Entering safe mode: lot 25%");
+        let new_lp_id = &signal.to_lp_id;
+        let baseline_fill_rate = self.last_look_model.fill_probability(new_lp_id, 0.1);
+        let baseline_slippage = self
+            .slippage_model
+            .get_lp_stats(new_lp_id)
+            .map(|s| s.mean)
+            .unwrap_or(0.0);
+        self.recalibration_manager
+            .enter_safe_mode(&signal, baseline_fill_rate, baseline_slippage);
         Some(signal)
+    }
+
+    /// Check if recalibration should complete. Call periodically with current timestamp.
+    pub fn check_recalibration(&mut self, timestamp_ns: u64) -> bool {
+        if self.recalibration_manager.check_completion(timestamp_ns) {
+            self.recalibration_manager.reset();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get the current recalibration lot multiplier. During safe mode, returns reduced value.
+    pub fn recalibration_lot_multiplier(&self) -> f64 {
+        self.recalibration_manager.lot_multiplier()
+    }
+
+    /// Get the current σ_execution multiplier. During safe mode, returns doubled value.
+    pub fn recalibration_sigma_multiplier(&self) -> f64 {
+        self.recalibration_manager.sigma_multiplier()
+    }
+
+    /// Check if the gateway is currently in recalibration safe mode.
+    pub fn is_recalibrating(&self) -> bool {
+        self.recalibration_manager.is_safe_mode()
+    }
+
+    /// Get the recalibration status.
+    pub fn recalibration_status(&self) -> &RecalibrationStatus {
+        self.recalibration_manager.status()
+    }
+
+    /// Get the recalibration manager (for advanced use).
+    pub fn recalibration_manager(&self) -> &LpRecalibrationManager {
+        &self.recalibration_manager
     }
 
     // --- Proto Conversion ---
