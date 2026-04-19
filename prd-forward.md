@@ -173,7 +173,7 @@ enum DataSourceConfig {
       "時間範囲フィルタリング: start_time/end_timeによる録音データの部分再生",
       "ユニットテスト: trait実装確認、再生速度制御、時間範囲フィルタ、イベント終端処理"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
