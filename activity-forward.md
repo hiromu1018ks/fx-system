@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 6
-**Current Task:** Task 7 — Risk Alert System
+**Tasks Completed:** 7
+**Current Task:** Task 8 — Backtest-Forward Comparison Engine
 
 ---
 
@@ -66,3 +66,11 @@
 - **完了**: Execution Drift統計（平均/標準偏差のオンライン計算）
 - **完了**: テスト7件（初期状態/PnL更新/DD追跡/トレード記録/Sharpe/drift/ウィンドウ排除）
 - **確認**: `cargo test`（37テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 7: Risk Alert System
+- **完了**: AlertChannel trait + LogAlertChannel（tracing warn/error） + WebhookAlertChannel（HTTP POST）
+- **完了**: AlertEvaluator（閾値ベース評価: リスク制限/実行ドリフト/Sharpe低下/キルスイッチ/戦略淘汰/フィード異常）
+- **完了**: デバウンス機能（同一アラートの連続発火防止）
+- **完了**: AlertSystem（複数チャネル管理）
+- **完了**: テスト10件（各チャネル/閾値評価/デバウンス/critical判定/system送信）
+- **確認**: `cargo test`（47テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過

@@ -247,7 +247,7 @@ enum DataSourceConfig {
       "デバウンス: 同一アラートの連続発火防止",
       "ユニットテスト: 各チャネル送信、閾値評価、デバウンス、設定確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
