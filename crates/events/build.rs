@@ -12,6 +12,7 @@ fn main() -> Result<()> {
         "state_snapshot.proto",
         "policy_command.proto",
         "trade_skip_event.proto",
+        "gap_event.proto",
     ];
 
     let proto_paths: Vec<String> = proto_files

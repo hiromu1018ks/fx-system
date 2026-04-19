@@ -103,6 +103,7 @@ impl Default for PartitionedEventBus {
     }
 }
 
+#[derive(Clone)]
 pub struct EventPublisher {
     stream_id: StreamId,
     tx: broadcast::Sender<GenericEvent>,

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+enum GapSeverity {
+  GAP_SEVERITY_UNSPECIFIED = 0;
+  MINOR = 1;     // 1-2 ticks missing: Warning + feature hold
+  SEVERE = 2;    // 3+ ticks missing: Trading halt + event replay
+}
+
+message GapEventPayload {
+  EventHeader header = 1;
+
+  uint64 detected_at_ns = 10;
+  uint64 expected_timestamp_ns = 11;
+  uint64 actual_timestamp_ns = 12;
+  uint64 missed_ticks = 13;
+  GapSeverity severity = 14;
+  double interval_ns = 20;
+  double mean_interval_ns = 21;
+  double std_interval_ns = 22;
+  double z_score = 23;
+  string description = 24;
+}

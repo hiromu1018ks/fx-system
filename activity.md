@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 6
-**Current Task:** Task 7: Gap Detection Engine実装
+**Tasks Completed:** 7
+**Current Task:** Task 8: 特徴量抽出パイプライン φ(s) の実装
 
 ---
 
@@ -77,3 +77,17 @@
 - **完了**: 外部インターフェース: update_limit_state, set_lot_multiplier, process_execution_for_strategy
 - **ユニットテスト**: 26新規テスト全て通過（初期状態, タイムスタンプ更新, unrealized PnL, ポジション開設/決済/部分決済/追加/ショート, 拒否無視, version増分, hash整合性/変更/決定性, staleness計算, lot_multiplier, 戦略追跡, snapshot発行, イベント系列復元, limit_state更新, proto roundtrip, lot_multiplier clamp, holding_time_ms, 複数戦略独立, ゼロfill無視）
 - **検証**: cargo build, cargo test (60 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 7: Gap Detection Engine実装
+- **完了**: proto/gap_event.proto 作成 (GapSeverity enum: MINOR/SEVERE, GapEventPayload message)
+- **完了**: GapDetector実装 (crates/events/src/gap_detector.rs)
+  - ティック到着間隔の統計的監視: Welfordオンラインアルゴリズム + EMA追跡
+  - 軽微ギャップ検出: 1-2ティック欠損 → GapLevel::Minor (Warning + 特徴量ホールド)
+  - 深刻ギャップ検出: 3ティック以上 → GapLevel::Severe (取引停止 + Event Replay)
+  - z-scoreベース検出: min_samples以上のデータがある場合、z >= 3.0 でMinor検出
+  - GapEventのStrategy Streamへの自動発行 (Tier1Critical)
+  - 構造化ログ出力 (tracing: warn for Minor, error for Severe)
+- **完了**: EventPublisher に Clone derive 追加 (bus.rs)
+- **完了**: build.rs に gap_event.proto 追加
+- **ユニットテスト**: 20新規テスト全て通過（正常ティック, 1/2/3/5ティック欠損, min_samples前シーケンスベース検出, z-score検出, 連続シーケンス正常, 小分散正常, 統計更新後, GapInfoフィールド確認, 初回ティック, 逆方向タイムスタンプ無視, Strategy Stream発行Minor/Severe, 正常ティック非発行, 複数ギャップ連続, 回復, 平均・標準偏差収束）
+- **検証**: cargo build, cargo test (80 passed), cargo clippy, cargo fmt --check 全て通過

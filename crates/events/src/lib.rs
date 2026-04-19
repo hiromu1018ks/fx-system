@@ -1,5 +1,6 @@
 pub mod bus;
 pub mod event;
+pub mod gap_detector;
 pub mod header;
 pub mod projector;
 pub mod store;
