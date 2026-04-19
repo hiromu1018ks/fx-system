@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 25
-**Current Task:** Task 26: バックテストフレームワークの実装
+**Tasks Completed:** 26
+**Current Task:** Task 27: 統計的検証パイプラインの実装（Python）
 
 ---
 
@@ -636,3 +636,33 @@
   - Config(1): serde_roundtrip
   - Edge(2): nan/infinity
 - **検証**: cargo build, cargo test (911 passed), cargo clippy (clean), cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 26: バックテストフレームワークの実装
+- **完了**: `crates/backtest/src/engine.rs` 全面実装
+  - BacktestConfig: start/end_time_ns, replay_speed(0=max speed), symbol, global_position_limit, default_lot_size, rng_seed(再現性)
+  - BacktestEngine: EventStoreまたはイベントスライスから履歴MarketEventをロードして時間圧縮リプレイ
+  - run(): EventStore trait実装からMarket Streamをreplayし、時間範囲フィルタリング後リプレイ実行
+  - run_from_events(): GenericEventスライスから直接バックテスト実行（EventStore不要）
+  - run_inner(): 共通リプレイループ — StateProjectorで状態追跡、MAX_HOLD_TIME超過で強制クローズ、終了時に残ポジションクローズ
+  - simulate_order(): ExecutionGateway::simulate_execution経由でOTC約定シミュレーション（Last-Look, slippage, fill prob）
+  - process_execution_result(): ExecutionEvent proto生成 → StateProjectorに反映
+  - PositionSnapshot: 借用競合回避のためポジションデータを事前収集
+  - 時間圧縮リプレイ: replay_speed倍率でスリープ制御（0=最大速度）
+- **完了**: `crates/backtest/src/stats.rs` 全面実装
+  - TradeRecord: timestamp_ns, strategy_id, direction, lots, fill_price, slippage, pnl, fill_probability, latency_ms, close_reason
+  - TradeSummary: 18指標の集計（total_pnl, win_rate, avg_win/loss, profit_factor, max_drawdown, sharpe_ratio, sortino_ratio, avg_slippage/fill_prob/latency, max_consecutive_wins/losses, avg_trade_duration_ns）
+  - TradeSummary::from_trades(): トレードリストから全統計を一括計算
+  - compute_sharpe_ratio(): per-trade mean/stdベース、年率化（~864K trades/year想定）
+  - compute_sortino_ratio(): 下側偏差のみ使用したSortino ratio
+  - compute_max_drawdown_duration(): エクイティカーブのピーク〜回復までの期間測定
+  - compute_consecutive_streaks(): 最大連勝/連敗数
+  - compute_equity_curve(): エクイティポイント系列（equity + drawdown）
+  - compute_strategy_breakdown(): 戦略別PnL/勝率/平均PnL内訳
+- **完了**: テストユーティリティ
+  - make_market_event(): GenericEvent構築ヘルパー
+  - generate_synthetic_ticks(): 乱数ウォーク+平均回帰による合成ティックデータ生成（決定的）
+- **追加依存**: prost, uuid, rand (features=["small_rng"]), tempfile (fx-backtest)
+- **ユニットテスト**: 40新規テスト全て通過
+  - engine(12): make_market_event, generate_synthetic_ticks(3), empty_store, loads_from_store, from_events, config_default, result_fields, reproducible_with_seed, store_replay_filtering, price_bounds, gateway_accessible
+  - stats(28): empty_summary, from_trades_empty, single_trade, mixed_trades, profit_factor(4), max_drawdown(3), sharpe_ratio(3), sortino_ratio(2), avg_slippage, avg_fill_probability, consecutive_streaks(3), avg_trade_duration(2), equity_curve(2), max_drawdown_duration(2), strategy_breakdown(2)
+- **検証**: cargo build, cargo test (40 passed for fx-backtest), cargo clippy (clean), cargo fmt --check 全て通過

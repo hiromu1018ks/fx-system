@@ -17,3 +17,7 @@ chrono = { workspace = true }
 ndarray = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+prost = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+tempfile = { workspace = true }
