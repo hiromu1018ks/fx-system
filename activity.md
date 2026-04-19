@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 22
-**Current Task:** Task 23: Lifecycle Manager（自動淘汰）の実装
+**Tasks Completed:** 23
+**Current Task:** Task 24: ハードウェア級Kill Switchの実装
 
 ---
 
@@ -521,3 +521,40 @@
   - Aggregate(1): monitoring_mode
   - Error(2): wrong_dimension, feature_out_of_range
 - **検証**: cargo build, cargo test (799 passed), cargo clippy (clean), cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 23: Lifecycle Manager（自動淘汰）の実装
+- **完了**: `crates/risk/src/lifecycle.rs` 全面実装
+- **完了**: LifecycleConfig — rolling_window(50), min_episodes_for_eval(20), death_sharpe_threshold(-0.5), consecutive_death_windows(3), sharpe_annualization_factor(252.0), strict_unknown_regime, unknown_regime_sharpe_multiplier(1.5), auto_close_culled_positions
+- **完了**: DeathReason列挙型 (LowSharpe, RegimePnlBreached) — 淘汰理由の記録
+- **完了**: StrategyLifecycle — alive, rolling_sharpe, total_episodes, consecutive_bad_windows, death_reason, death_timestamp_ns, rolling_mean/std_return, regime_pnl, regime_episode_count
+- **完了**: LifecycleManager — 戦略別パフォーマンス監視と自動淘汰エンジン
+  - Rolling Sharpe計算: Welfordオンラインアルゴリズムによる累積mean/var更新 + 年率化Sharpe (std_floor=1e-10でゼロ分散保護)
+  - 死の閾値評価: min_episodes_for_eval以上のエピソードがある場合、rolling_sharpe < effective_thresholdでconsecutive_bad_windowsインクリメント
+  - 新規エントリーハードブロック: is_alive()快速事前チェック + validate_order()によるResult<_, LifecycleError>バリデーション
+  - Regime別PnL監視: regime_pnl累積 + compute_regime_pnl_limit (日次MTM制限の50%をregime上限とする)
+  - 未知Regime厳格評価: strict_unknown_regime=true時、death_sharpe_threshold × unknown_regime_sharpe_multiplierで閾値引き上げ
+  - 自動クローズ: alive→culled遷移時にCloseCommand生成（direction/lots/reason）、close_commands_for_culledで全culled戦略の一括クローズ
+  - Revive: revive()で手動復活（オペレータ操作）、reset_all()で全戦略リセット
+  - Regime追跡リセット: reset_regime_tracking() / reset_regime_tracking_for()
+- **完了**: EpisodeSummary — 外部入力用のエピソード要約 (strategy_id, total_reward, return_g0, duration_ns)
+- **完了**: CloseCommand — 自動クローズ指示 (strategy_id, direction, lots, reason)
+- **完了**: LifecycleError — StrategyCulledエラー型
+- **完了**: lib.rsにpub mod lifecycle追加
+- **ユニットテスト**: 38新規テスト全て通過
+  - 作成/初期状態/設定(3): 全戦略alive/default config
+  - Rolling Sharpe(5): positive/negative/zero_std/episode_count/independent
+  - 死の閾値(3): no_cull_before_min/cull_after_consecutive/reset_on_good
+  - 新規エントリブロック(3): alive/culled/other_strategy_ok
+  - 自動クローズ(4): on_cull/disabled/short_position/no_close_for_closed
+  - Regime PnL(4): tracking/breach_culls/reset/reset_for_strategy
+  - 未知Regime(2): stricter_threshold/disabled
+  - Revive(2): culled_strategy/preserves_episode_count
+  - Reset(1): reset_all
+  - 複数Culled(1): multiple_culled
+  - 表示/エラー(2): death_reason_display/lifecycle_error_display
+  - アクセサ(2): status_mut/none_for_unknown
+  - 統合(3): record_episode_close/regime_pnl_limit/no_daily_limit/with_daily_limit
+  - 正Sharpe(1): positive_sharpe_no_cull
+  - Rolling統計(1): mean_std_converge
+  - 単一bad window(1): single_bad_window_no_cull
+- **検証**: cargo build, cargo test (836 passed), cargo clippy (clean), cargo fmt --check 全て通過
