@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 2
-**Current Task:** Task 3: Python研究環境のセットアップ
+**Tasks Completed:** 3
+**Current Task:** Task 4: Event Busコア実装（パーティション分割ストリーム）
 
 ---
 
@@ -30,4 +30,13 @@
 - **完了**: lib.rsで生成されたコードを`pub mod proto`として公開
 - **修正**: OrderType enumの`MARKET`/`LIMIT`を`ORDER_MARKET`/`ORDER_LIMIT`にリネーム（StreamId::MARKETとの名前衝突解消）
 - **追加依存**: protoc-bin-vendored = "3" (protocバンドル版、システムprotoc不要)
+- **検証**: cargo build, cargo test, cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 3: Python研究環境のセットアップ
+- **完了**: pyproject.toml作成（numpy, pandas, scipy, matplotlib, jupyterlab, scikit-learn, onnx, onnxruntime, skl2onnx等）
+- **完了**: mise.tomlにpython 3.12, uv latestを追加
+- **完了**: research/ ディレクトリ構造作成（features/, models/, backtest/, analysis/, tests/）
+- **完了**: ONNXエクスポートユーティリティ（research/models/onnx_export.py）作成：Bayesian LR Q関数のONNXエクスポート、バリデーション機能
+- **完了**: .venv作成、pip bootstrap経由で依存パッケージインストール
+- **完了**: pytest 3テスト全て通過（依存import確認、パッケージ構造確認、onnx_export確認）
 - **検証**: cargo build, cargo test, cargo clippy, cargo fmt --check 全て通過
