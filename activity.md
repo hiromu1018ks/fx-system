@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 23
-**Current Task:** Task 24: ハードウェア級Kill Switchの実装
+**Tasks Completed:** 24
+**Current Task:** Task 25: Observability（Pre-Failure Signature）の実装
 
 ---
 
@@ -558,3 +558,36 @@
   - Rolling統計(1): mean_std_converge
   - 単一bad window(1): single_bad_window_no_cull
 - **検証**: cargo build, cargo test (836 passed), cargo clippy (clean), cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 24: ハードウェア級Kill Switchの実装
+- **完了**: `crates/risk/src/kill_switch.rs` 全面実装
+- **完了**: KillSwitchConfig — min_samples(100), z_score_threshold(3.0), max_history(2000), mask_duration_ms(50), enabled
+- **完了**: KillSwitchStatus列挙型 (Active/Masked/Disabled)
+- **完了**: IntervalStats — Welfordオンラインアルゴリズムによるティック間隔のmean/variance/std/min/max追跡
+- **完了**: AnomalyEvent — 検出結果(interval_ns, mean, std, z_score, timestamp, mask_duration)
+- **完了**: KillSwitch — スレッドセーフなハードウェア級Kill Switch
+  - ティック到着間隔の統計監視: Welfordオンラインアルゴリズム + z-score検出 (mean ± 3σ)
+  - 異常検出時の即座発注マスク: AtomicBoolによるロックフリー・ホットパス + 設定可能マスク期間(10-50ms)
+  - FIFO履歴管理: VecDeque + 近似減分Welford更新によるバウンスド統計
+  - 事前チェックbefore統計更新: 異常値がベースライン汚染を防ぐ（z-score計算後にstats.update）
+  - validate_order(): AtomicBool高速パス → マスク期限チェック → RiskError::KillSwitchMasked返却
+  - 手動トリガー(trigger) / リセット(reset) / 統計リセット(reset_stats)
+  - KillSwitchHandle: Arc共有のクローン可能ハンドル（マルチタスク対応）
+  - KillSwitchStats: 監視用スナップショット（全統計 + 最後の異常イベント）
+- **完了**: kill_switch_signal_handler — tokio::signalによるSIGINT/SIGTERM非同期ハンドリング
+- **完了**: RiskError::KillSwitchMasked追加 (crates/risk/src/limits.rs)
+- **完了**: lib.rsにpub mod kill_switch追加
+- **ユニットテスト**: 31新規テスト全て通過
+  - 作成/設定(2): creation/default_config
+  - ティック記録(4): first_tick/second_tick/no_anomaly_before_min_samples/anomaly_detection
+  - マスク動作(4): activates_mask/blocked_when_masked/mask_expires/disabled_allows_all
+  - 手動操作(3): manual_trigger/manual_reset/reset_stats_preserves_mask
+  - 複数異常(1): multiple_anomalies
+  - ステータス/統計(3): stats_snapshot/config_serde/status_serde
+  - ハンドル(2): handle_clone/handle_validate_order
+  - エッジケース(5): reverse_timestamp/same_timestamp/zero_variance/z_score_custom/history_trimming
+  - 統計(3): welford/min_max/reset
+  - AnomalyEvent(1): fields
+  - Serde(2): stats_serde/status_serde
+  - 並行アクセス(1): concurrent_access
+- **検証**: cargo build, cargo test (867 passed), cargo clippy (clean), cargo fmt --check 全て通過

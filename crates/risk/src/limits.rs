@@ -30,6 +30,8 @@ pub enum RiskError {
         effective_lot_size: u64,
         min_lot_size: u64,
     },
+    #[error("kill switch active: order masked, remaining {remaining_ms}ms")]
+    KillSwitchMasked { remaining_ms: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, RiskError>;
