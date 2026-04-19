@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 16
-**Current Task:** Task 17: 階層的損失リミットの実装（日次二段階+週次+月次）
+**Tasks Completed:** 17
+**Current Task:** Task 18: グローバルポジション制約の実装
 
 ---
 
@@ -342,3 +342,23 @@
   - config(3): default/warning_threshold/custom_config
   - penalty_curve(2): shape/convexity
 - **検証**: cargo build, cargo test (547 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 17: 階層的損失リミットの実装（日次二段階+週次+月次）
+- **完了**: `crates/risk/src/limits.rs` に階層的損失リミット全面実装
+- **完了**: RiskLimitsConfig — 閾値設定（日次MTM=-500, 日次実現=-1000, 週次=-2500, 月次=-5000, MTM時ロット25%, Q閾値0.01）
+- **完了**: LimitCheckResult — 制限結果（daily_mtm_limited, lot_multiplier, q_threshold）
+- **完了**: CloseReason列挙型（DailyRealizedHalt, WeeklyHalt, MonthlyHalt）
+- **完了**: HierarchicalRiskLimiter — ステートレスチェッカー、Q値評価より前に全段階チェック
+  - 月次 → 週次 → 日次実現(hard-stop) → 日次MTM(warning) の優先順位
+  - evaluate(): 全段階評価 + CloseReason返却
+  - validate_order(): Result<LimitCheckResult, RiskError> でバリデーション統合
+  - is_halted(): フラグベースの高速事前チェック
+  - compute_limit_state(): PnL値からLimitStateDataのハルトフラグ導出
+  - passes_q_threshold(): MTM警告時のQ閾値ゲート
+- **完了**: 日次第一段階（MTM警戒）: MTM PnL < 閾値 → ロット25%制限 + Q閾値0.01制限
+- **完了**: 日次第二段階（実現損益ハードストップ）: realized PnL < 閾値 → RiskError::DailyRealizedLimit + CloseReason
+- **完了**: 週次ハードリミット: weekly PnL < 閾値 → RiskError::WeeklyLimit + CloseReason::WeeklyHalt
+- **完了**: 月次ハードリミット: monthly PnL < 閾値 → RiskError::MonthlyLimit + CloseReason::MonthlyHalt
+- **ユニットテスト**: 35新規テスト全て通過
+  - 全クリア(1), MTM警告(3: active/at_threshold/just_below), 日次実現(2: breached/at_threshold), 週次(2: breached/at_threshold), 月次(2: breached/at_threshold), 優先順位(3: monthly>weekly>daily), validate_order(2: ok/rejected), is_halted(5: false/4variants), compute_limit_state(5: all_clear/mtm/realized/weekly/monthly), Q閾値(4: not_limited/high/low/sell), 正PnL(1), カスタムconfig(1), CloseReason(1), ハルトフラグ(1), 全限界(1), ゼロPnL(1)
+- **検証**: cargo build, cargo test (582 passed), cargo clippy, cargo fmt --check 全て通過
