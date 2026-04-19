@@ -6,15 +6,19 @@ First read activity.md to see what was recently accomplished.
 
 ## Start the Application
 
-<!-- START_COMMAND_PLACEHOLDER: Update this section after creating your PRD -->
-Start the site locally. Use the appropriate command for your tech stack:
-- `npm run dev` (for Next.js, Vite, or similar)
-- `pnpm dev` (if using pnpm)
-- `bun dev` (if using Bun)
-- `python3 -m http.server 8000 --bind 127.0.0.1` (for static HTML)
+### Rust (Core Execution Platform)
+- **Build**: `cargo build`
+- **Test**: `cargo test`
+- **Lint**: `cargo clippy`
+- **Format**: `cargo fmt --check`
+- **Run**: `cargo run` (or `cargo run --bin <binary-name>` for specific binaries)
 
-If the port is taken, try another port.
-<!-- END_START_COMMAND_PLACEHOLDER -->
+### Python (Research & ML)
+- **Install**: `uv pip install -e .` or `pip install -e .`
+- **Test**: `pytest research/tests/`
+- **Jupyter**: `jupyter lab` (for research notebooks)
+
+If a port is taken, try another port.
 
 ## Work on Tasks
 
@@ -23,43 +27,26 @@ Open prd.md and find the single highest priority task where `"passes": false`.
 Work on exactly ONE task:
 1. Implement the change according to the task steps
 2. Run any available checks:
-   - `npm run lint` (if available)
-   - `npm run typecheck` (if available)
-   - `npm run build` (if available)
+   - `cargo build` (ensure compilation)
+   - `cargo test` (run tests)
+   - `cargo clippy` (lint)
+   - `cargo fmt --check` (format check)
+   - `pytest research/tests/` (Python tests, if applicable)
 
-## Verify in Browser
+## Verify
 
-After implementing, use agent-browser to verify your work:
+After implementing, verify your work:
 
-1. Open the local server URL:
-   ```
-   agent-browser open http://localhost:3000
-   ```
-
-2. Take a snapshot to see the page structure:
-   ```
-   agent-browser snapshot -i -c
-   ```
-
-3. Take a screenshot for visual verification:
-   ```
-   agent-browser screenshot screenshots/[task-name].png
-   ```
-
-4. Check for any console errors or layout issues
-
-5. If the task involves interactive elements, test them:
-   ```
-   agent-browser click "[selector]"
-   agent-browser fill "[selector]" "test value"
-   ```
+1. Ensure `cargo build` completes without errors
+2. Run `cargo test` and confirm all tests pass
+3. For Python changes, run `pytest research/tests/` if applicable
+4. Check that new files are in the correct module/crate
 
 ## Log Progress
 
 Append a dated progress entry to activity.md describing:
 - What you changed
 - What commands you ran
-- The screenshot filename
 - Any issues encountered and how you resolved them
 
 ## Update Task Status
@@ -76,10 +63,20 @@ git commit -m "feat: [brief description of what was implemented]"
 
 Do NOT run `git init`, do NOT change git remotes, and do NOT push.
 
+## Project-Specific Rules
+
+- **Rust**: All invariant checks use `assert!` or `Result<_, RiskError>`, NEVER `debug_assert!` (removed in release builds)
+- **Information leakage**: Execution-related features and `position_pnl_unrealized` MUST have enforced lag
+- **OTC market**: Do NOT assume exchange-like order book behavior. Model Last-Look and Internalization
+- **Hard limits**: Loss limits fire regardless of Q-values. They are checked BEFORE Q-value evaluation
+- **Thompson Sampling**: σ_model is ONLY reflected through posterior sampling. NEVER include σ_model in point estimates
+- **Strategy-separated rewards**: Each strategy's reward is independent. No cross-strategy reward coupling
+- **ONNX**: Python-trained models are exported via ONNX for Rust-side inference
+
 ## Important Rules
 
 - ONLY work on a SINGLE task per iteration
-- Always verify in browser before marking a task as passing
+- Always verify with tests before marking a task as passing
 - Always log your progress in activity.md
 - Always commit after completing a task
 
