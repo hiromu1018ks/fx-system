@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 7
-**Current Task:** Task 8 — Backtest-Forward Comparison Engine
+**Tasks Completed:** 9
+**Current Task:** Task 10 — External API Data Feed Adapter
 
 ---
 
@@ -74,3 +74,18 @@
 - **完了**: AlertSystem（複数チャネル管理）
 - **完了**: テスト10件（各チャネル/閾値評価/デバウンス/critical判定/system送信）
 - **確認**: `cargo test`（47テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 8: Backtest-Forward Comparison Engine
+- **完了**: ComparisonEngine（指標比較: PnL/勝率/Sharpe/DD/fill rate/slippage）
+- **完了**: PnL差分分解（Execution/Latency/Impact/Residual成分）
+- **完了**: 設定可能閾値（ComparisonThresholds）と一貫性判定（overall_pass）
+- **完了**: テスト6件（類似/同一/乖離/分解/相対差分/カスタム閾値）
+- **確認**: `cargo test`（57テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 9: Report Generator
+- **完了**: ReportGenerator（JSON/CSV/Both フォーマット対応）
+- **完了**: セッションサマリーJSON出力（SessionReport: テスト結果/パフォーマンス/比較）
+- **完了**: パフォーマンス指標CSV出力（total_ticks/decisions/trades/PnL/Sharpe/DD/win_rate）
+- **完了**: トレード履歴CSV出力（TradeRecord: ID/時刻/シンボル/サイド/lots/価格/slippage/PnL/戦略）
+- **完了**: テスト4件（JSON/CSV/Both/トレードCSV）
+- **確認**: `cargo test`（57テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過

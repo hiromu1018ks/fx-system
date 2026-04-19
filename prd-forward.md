@@ -261,7 +261,7 @@ enum DataSourceConfig {
       "ComparisonReport: 比較結果の構造化レポート（overall_pass, per_metric_details）",
       "ユニットテスト: 指標比較、差分分解、レポート生成、一貫性判定"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
@@ -277,7 +277,7 @@ enum DataSourceConfig {
       "CSV出力: トレード履歴・指標の時系列出力",
       "ユニットテスト: 各フォーマットでの出力確認、内容検証"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
