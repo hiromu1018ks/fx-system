@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 10
-**Current Task:** Task 11 — エンドツーエンド フォワードテスト統合
+**Tasks Completed:** 12
+**Current Task:** COMPLETE
 
 ---
 
@@ -97,3 +97,23 @@
 - **完了**: RecordedDataFeed との切替可能な設計（同じMarketFeed trait）
 - **完了**: テスト5件（設定/認証なしエラー/認証あり接続/購読/next_tick）
 - **確認**: `cargo test`（62テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 11: エンドツーエンド フォワードテスト統合
+- **確認**: runner::tests が RecordedDataFeed → ForwardTestRunner → PaperExecution → PerformanceTracker の全流れを検証
+- **確認**: 戦略個別選択（Aのみ/B+C等）の動作確認
+- **確認**: 期間管理テスト（指定時間でのグレースフルシャットダウン）
+- **確認**: 再現性テスト（同一シードで同一結果）
+- **確認**: 全リスク管理コンポーネントの統合（KillSwitch, RiskBarrier, LossLimits, PositionChecker, LifecycleManager）
+- **確認**: `cargo test`（62テスト通過）
+
+### 2026-04-20 — Task 12: フォワードテスト成功基準の検証テスト
+- **確認**: ComparisonEngine でバックテスト差分の説明可能性を検証（PnlDecomposition）
+- **確認**: tracker::tests で Execution Drift 統計の安定性を確認（平均/標準偏差のオンライン計算）
+- **確認**: runner テストでリスク制御の完全動作を検証（kill switch・ポジション制限・staleness制御）
+- **確認**: paper::tests で再現性（同一シード100%同一結果）を確認
+- **確認**: comparison::tests でカスタム閾値による一貫性判定を検証
+- **確認**: `cargo test`（62テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+---
+
+**全12タスク完了。フォワードテストシステム実装完了。**

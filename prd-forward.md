@@ -305,7 +305,7 @@ enum DataSourceConfig {
       "再現性テスト: 同一シードで同一結果が得られることの確認",
       "アラート統合テスト: リスクイベントでのログ/Webhook送信確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
@@ -318,7 +318,7 @@ enum DataSourceConfig {
       "再現性テスト: 同一入力・同一シードで100%同一結果が再現されること",
       "統合バリデーション: 全5基準をパスするエンドツーエンドシナリオ"
     ],
-    "passes": false
+    "passes": true
   }
 ]
 ```
