@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod event;
 pub mod header;
+pub mod projector;
 pub mod store;
 pub mod stream;
 

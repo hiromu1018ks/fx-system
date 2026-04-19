@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 5
-**Current Task:** Task 6: State Projector実装
+**Tasks Completed:** 6
+**Current Task:** Task 7: Gap Detection Engine実装
 
 ---
 
@@ -60,3 +60,20 @@
 - **追加依存**: sled (workspace), flate2 = "1", tempfile = "3" (workspace/events)
 - **ユニットテスト**: 26新規テスト全て通過 (tier1: 6, tier2: 7, tier3: 6, schema: 7)
 - **検証**: cargo build, cargo test (34 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 6: State Projector実装（イベント → 状態スナップショット）
+- **完了**: Position構造体（戦略別ポジション追跡: size, entry_price, unrealized/realized PnL, entry_timestamp_ns）
+- **完了**: LimitStateData構造体（日次/週次/月次PnL + リミットフラグ管理）
+- **完了**: StateSnapshot構造体（集約状態: positions, global_position, PnL, limit_state, staleness_ms, state_hash, lot_multiplier）
+- **完了**: StateProjector実装: Market/Strategy/Executionストリームからのイベント射影
+  - MarketEvent → last_market_data_ns更新, staleness_msリセット, unrealized PnL再計算
+  - DecisionEvent → last_active_strategy追跡, staleness再計算
+  - ExecutionEvent → ポジション更新（新規/追加/部分決済/全決済/ショート対応）
+- **完了**: state_version管理（状態変更ごとにインクリメント + ハッシュ再計算）
+- **完了**: staleness_ms計算（イベントタイムスタンプベース、リプレイ安全）
+- **完了**: lot_multiplier導出（二次関数ペナルティ: max(0, 1 - (staleness/5000ms)²)）
+- **完了**: ハッシュ検証（DefaultHasherによる決定的ハッシュ、全状態フィールド涵盖）
+- **完了**: StateSnapshotEvent発行（proto::StateSnapshotPayloadとしてState Streamへpublish）
+- **完了**: 外部インターフェース: update_limit_state, set_lot_multiplier, process_execution_for_strategy
+- **ユニットテスト**: 26新規テスト全て通過（初期状態, タイムスタンプ更新, unrealized PnL, ポジション開設/決済/部分決済/追加/ショート, 拒否無視, version増分, hash整合性/変更/決定性, staleness計算, lot_multiplier, 戦略追跡, snapshot発行, イベント系列復元, limit_state更新, proto roundtrip, lot_multiplier clamp, holding_time_ms, 複数戦略独立, ゼロfill無視）
+- **検証**: cargo build, cargo test (60 passed), cargo clippy, cargo fmt --check 全て通過
