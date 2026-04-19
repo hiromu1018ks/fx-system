@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 27
-**Current Task:** Task 28: 統合テスト: エンドツーエンド取引フロー
+**Tasks Completed:** 28
+**Current Task:** None — All tasks complete
 
 ---
 
@@ -713,3 +713,18 @@
   - CpcvResult(3): 空/単一/混合
   - Edge Cases(5): NaN/Inf/一定/小サンプル/ゼロSharpe
 - **検証**: pytest 68 passed, cargo build/test/clippy/fmt 全て通過
+
+### 2026-04-19 — Task 28: 統合テスト: エンドツーエンド取引フロー
+- **完了**: 40の統合テスト実装 (crates/backtest/tests/integration.rs)
+  - E2Eパイプライン: Market Gateway → Feature Extraction → Strategy → Risk Barrier → Execution
+  - イベントリプレイによる決定再現性確認
+  - 階層的リミット発動テスト (daily MTM/realized, weekly, monthly halt)
+  - OTC約定モデル統合テスト (LPスイッチ, リキャリブレーション, Last-Look拒否, スリッページ追跡)
+  - 複数戦略同時稼働時のグローバルポジション制約テスト
+  - ポジションライフサイクル (open/close/partial close/short)
+  - Kill Switch (異常検出/マスク/リカバリ)
+  - Lifecycle Manager (戦略刈り取り/自動クローズ)
+  - バックテストエンジン決定論的リプレイ
+  - フルシステム統合テスト
+- **修正**: fill_sizeの符号付き処理 (正=Buy/追加, 負=Sell/減少), GlobalPositionChecker単位変換ヘルパー, Kill Switchジッター付きtick間隔
+- **検証**: cargo test 40 passed, cargo clippy, cargo fmt --check 全て通過
