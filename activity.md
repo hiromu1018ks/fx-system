@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 4
-**Current Task:** Task 5: Tiered Event Store実装
+**Tasks Completed:** 5
+**Current Task:** Task 6: State Projector実装
 
 ---
 
@@ -49,3 +49,14 @@
 - **完了**: 冪等性処理: HashSet<UUID>によるevent_id重複スキップ
 - **ユニットテスト**: 8テスト全て通過（発行・購読・シーケンス増分・マルチストリーム分離・冪等性・recv_from・サブスクライバなし発行・ストリーム別シーケンスカウンタ）
 - **検証**: cargo build, cargo test (8 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 5: Tiered Event Store実装
+- **完了**: EventStore trait定義 (store, load, replay, remove メソッド)
+- **完了**: Tier1Store: Sled永続化バックエンド (NVMe SSD向け)、イベント+ストリームインデックスツリー
+- **完了**: Tier2Store: Delta Encoding (XOR) + flate2/Deflate圧縮、定期ベースイベント (デフォルト10イベント間隔) からのデルタチェーン再構築
+- **完了**: Tier3Store: インメモリ + TTL管理 + コールドストレージ (JSON) への自動アーカイブ
+- **完了**: SchemaRegistry: Protobuf不変スキーマ管理、バージョン登録・取得・最新版追跡
+- **完了**: Upcaster: スキーマバージョン間変換チェーン対応、upcast_to_latest で一括最新化
+- **追加依存**: sled (workspace), flate2 = "1", tempfile = "3" (workspace/events)
+- **ユニットテスト**: 26新規テスト全て通過 (tier1: 6, tier2: 7, tier3: 6, schema: 7)
+- **検証**: cargo build, cargo test (34 passed), cargo clippy, cargo fmt --check 全て通過
