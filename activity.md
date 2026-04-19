@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 11
-**Current Task:** Task 12: 戦略B: Volatility Decay Momentum の実装
+**Tasks Completed:** 12
+**Current Task:** Task 13: 戦略C: Session Structural Bias の実装
 
 ---
 
@@ -182,3 +182,34 @@
   - エピソードライフサイクル(2): full/remaining time
   - p_revert_a詳細(3): signal weights/depth scaled/no signal
 - **検証**: cargo build, cargo test (284 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 12: 戦略B: Volatility Decay Momentum の実装
+- **完了**: `crates/strategy/src/strategy_b.rs` 作成
+- **完了**: StrategyB構造体 — 独自のQFunction(39次元) + エピソード管理 + Thompson Sampling意思決定パイプライン
+- **完了**: StrategyBConfig — トリガー閾値(vol_spike=2, vol_decaying=0, obi_alignment=0.1, regime_kl=1.0), MAX_HOLD_TIME=300s(5分), decay_rate_b=0.0001
+- **完了**: トリガー条件実装: vol_ratio > θ ∧ vol_decaying (decay_rate < 0) ∧ |OBI| > θ ∧ regime_kl < θ
+- **完了**: 戦略B固有特徴量(5次元追加):
+  - rv_spike×trend (realized_volatility × OBI)
+  - OFI×intensity (delta_obi × trade_intensity)
+  - p_continue_B: vol_decay_signal(0.4) + obi_signal(0.35) + intensity_signal(0.25) の重み付き [0,1]
+  - time_decay_B: exp(-0.0001 × holding_time_ms) (数分スケール、Aの10倍遅い減衰)
+  - vol_ratio×signed_volume (ボラティリティ・モメンタム交互作用)
+- **完了**: エピソード管理: Idle/Active状態、MAX_HOLD_TIME超過で強制クローズ、外部ポジションクローズの同期
+- **完了**: decide()パイプライン: エピソードタイムアウト→ポジション同期→トリガーチェック→特徴量抽出→Thompson Sampling→ペナルティ→整合性→グローバル制約→ロット sizing→Hold退化監視
+- **完了**: EpisodeStateB列挙型(Idle/Active)、StrategyBDecision構造体
+- **完了**: lib.rsにpub mod strategy_b追加
+- **ユニットテスト**: 94新規テスト全て通過
+  - トリガー(8): 全条件/各閾値不足/カスタム閾値/負OBI/境界
+  - 特徴量抽出(12): 次元/ベース保存/rv_spike×trend/OFI×intensity/p_continue_b(4)/time_decay_b(4)/vol_ratio×signed_volume/全有限
+  - エピソード管理(10): 初期/開始/終了/境界内/境界/超過/残り時間(4)/ゼロ
+  - 決定パイプライン(13): idle skip/triggered/explore/timeout long/short/no position/外部同期/active bypass/entry starts/global buy/sell blocks/low lot
+  - Q関数(4): 次元/楽観バイアス/update/extended features
+  - 設定(2): デフォルト/定数
+  - ロット(4): full/half/max clamp/zero
+  - 整合性(4): both close/far/one negative/both negative
+  - アクション選択(5): argmax buy/sell/hold/buy blocked/both blocked
+  - Hold退化(3): detected/not detected/early
+  - リセット(2): tracker/Q function
+  - エピソードライフサイクル(2): full/remaining time
+  - p_continue_b詳細(3): signal weights/intensity scaled/no decay no signal
+- **検証**: cargo build, cargo test (278 passed), cargo clippy, cargo fmt --check 全て通過
