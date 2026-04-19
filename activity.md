@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 20
-**Current Task:** Task 21: Market Gateway実装（WebSocket/FIX Handler）
+**Tasks Completed:** 21
+**Current Task:** Task 22: Online Change Point Detectionの実装
 
 ---
 
@@ -448,3 +448,39 @@
   - 設定(1): config_access
   - 追加(3): snapshot_elapsed_no_start/single_fill_variance/consecutive_recalibrations
 - **検証**: cargo build, cargo test (725 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 21: Market Gateway実装（WebSocket/FIX Handler）
+- **完了**: `crates/gateway/src/error.rs` 作成 — GatewayError列挙型 (ConnectionFailed, ConnectionLost, ReconnectFailed, FixProtocolError, FixLogonRejected, FixLogoutReceived, HeartbeatTimeout, InvalidMessage, PublishFailed, EncodingError)
+- **完了**: `crates/gateway/src/market.rs` 全面実装
+  - TickData拡張: bid_size, ask_size, bid_levels, ask_levels, latency_ms追加 + mid()/spread()/to_proto()メソッド
+  - ConnectionState列挙型 (Disconnected, Connecting, Connected, Reconnecting, ShuttingDown) + watch::Sender通知
+  - MarketGatewayConfig: symbols, reconnect設定, heartbeat設定, schema_version, include_depth
+  - LatencyStats: count, total_ms, min_ms, max_ms, avg_ms()によるレイテンシ統計追跡
+  - MarketGateway: EventPublisher経由のMarketEvent (Tier3)発行、状態管理、shutdown制御
+    - publish_tick(): TickData → MarketEventPayload proto → encode → EventHeader付与 → publish
+    - state_receiver(): watch::Receiverによる非同期状態監視
+    - tick_count/last_tick_ns/latency_statsによる運用監視API
+  - MarketFeed trait: connect/subscribe/unsubscribe/receive_tick/disconnect/is_connectedの抽象化
+  - FeedManager<F: MarketFeed>: 接続→サブスクリプション→ティック受信→publishループ + 指数バックオフ再接続
+  - ConnectionHealthMonitor: ティック到着間隔監視 + timeout_multiplierによる健全性判定
+- **完了**: `crates/gateway/src/fix.rs` 全面実装
+  - tagモジュール: FIX 4.4/5.0準拠の全タグ定数 (Logon, Logout, Heartbeat, TestRequest, NewOrderSingle, ExecutionReport, MarketData等)
+  - FixSessionConfig: FIXバージョン, heartbeat間隔, タイムアウト, 再接続設定, 暗号化, シーケンスリセット
+  - FixSessionState列挙型 (Disconnected, LoggingOn, LoggedOn, LogoffSent, LogoutReceived, Error)
+  - FixMessage: パース済みFIXメッセージ (msg_type, fields HashMap, raw), get()/get_u64()アクセサ
+  - FixMessageBuilder: BuilderパターンによるFIXメッセージ構築 (body生成 → BodyLength → Checksum計算)
+  - parse_fix_message(): SOH区切りFIX文字列のパーサー
+  - FixSession: FIX接続ライフサイクル管理
+    - connect(): TCP接続 → Logon送信 → Logon応答待機 (sequence reset対応)
+    - disconnect(): バックグラウンドタスクabort + 状態遷移
+    - send_test_request/send_logout/send_resend_request/send_sequence_reset: FIX管理メッセージ送信
+    - send_new_order_single/send_order_cancel_request: 注文メッセージ送信
+    - send_market_data_request: 市場データ購読リクエスト
+    - handle_incoming_message(): Heartbeat/Logout/TestRequest/SequenceReset処理 + シーケンス番号検証 + メッセージコールバック
+    - set_message_callback(): 非Heartbeat/管理メッセージの外部ハンドラ登録
+  - WebSocketConfig: WebSocket接続設定 (URL, ping間隔, メッセージサイズ制限)
+- **追加依存**: uuid (fx-gateway), tokio-tungstenite/futures-util (dev)
+- **ユニットテスト**: 44新規テスト全て通過
+  - market(22): mid/spread, proto_roundtrip, build_tick, publish_tick, tick_count/timestamp, state_transitions, state_watch, latency_stats(4), config_default, connection_state_serde, multiple_ticks_sequence, multiple_symbols, depth_levels_published
+  - fix(22): config(3: new/default/serde), session_state_serde, parse(4: logon/heartbeat/too_few/missing_type), builder(5: logon/heartbeat/new_order/sequence/market_data), checksum, timestamp, session_lifecycle, handle(5: heartbeat/logout/test_request/seq_gap/callback), health_monitor(5: record/healthy/threshold/avg_gap/timeout), websocket_config(2: default/serde), message_fields
+- **検証**: cargo build, cargo test (769 passed), cargo clippy (clean), cargo fmt --check 全て通過
