@@ -201,7 +201,7 @@ enum DataSourceConfig {
       "TOML設定ファイルからの読み込み（serde + toml）",
       "ユニットテスト: 設定の構築/TOML読み込み/デフォルト値/バリデーション"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

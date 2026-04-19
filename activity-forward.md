@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 3
-**Current Task:** Task 4 — Forward Test Configuration
+**Tasks Completed:** 4
+**Current Task:** Task 5 — Forward Test Runner
 
 ---
 
@@ -41,3 +41,11 @@
 - **完了**: `build_execution_event` でExecutionEvent(proto)生成
 - **完了**: テスト7件（約定/再現性/seed差異/イベント生成/LP確認/lot multiplier/複数注文）
 - **確認**: `cargo test`（14テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 4: Forward Test Configuration
+- **完了**: 全設定構造体（ForwardTestConfig, AlertConfig, ReportConfig, ForwardRiskConfig, ComparisonConfig）
+- **完了**: TOML読み込み（`load_from_file`, `load_from_str`）とラウンドトリップ対応
+- **完了**: バリデーション（戦略名、閾値範囲、ポジション制限、データソース検証）
+- **完了**: Duration serde カスタムシリアライザ（秒数↔Duration変換）
+- **完了**: テスト11件（デフォルト/TOML読み込み/バリデーション/ファイルIO）
+- **確認**: `cargo test`（25テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
