@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+message PolicyCommand {
+  EventHeader header = 1;
+
+  oneof command {
+    HaltCommand halt = 10;
+    ResumeCommand resume = 11;
+    ResetStrategyCommand reset_strategy = 12;
+    AdjustRiskCommand adjust_risk = 13;
+    ForceCloseCommand force_close = 14;
+  }
+}
+
+message HaltCommand {
+  string reason = 1;
+}
+
+message ResumeCommand {
+  string reason = 1;
+}
+
+message ResetStrategyCommand {
+  string strategy_id = 1;
+  bool reset_posterior = 2;
+}
+
+message AdjustRiskCommand {
+  double lot_multiplier = 1;
+  double daily_loss_limit = 2;
+}
+
+message ForceCloseCommand {
+  string strategy_id = 1;
+  string reason = 2;
+}

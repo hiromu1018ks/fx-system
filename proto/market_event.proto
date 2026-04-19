@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+message MarketEventPayload {
+  EventHeader header = 1;
+
+  string symbol = 10;
+  double bid = 11;
+  double ask = 12;
+  double bid_size = 13;
+  double ask_size = 14;
+  uint64 timestamp_ns = 15;
+
+  // Order book depth (Level 2)
+  repeated PriceLevel bid_levels = 20;
+  repeated PriceLevel ask_levels = 21;
+
+  // Latency tracking
+  double latency_ms = 30;
+}
+
+message PriceLevel {
+  double price = 1;
+  double size = 2;
+}

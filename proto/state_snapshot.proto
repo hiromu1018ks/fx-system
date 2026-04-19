@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+message PositionState {
+  string strategy_id = 1;
+  double size = 2;
+  double entry_price = 3;
+  double unrealized_pnl = 4;
+  double realized_pnl = 5;
+  uint64 holding_time_ms = 6;
+}
+
+message LimitState {
+  double daily_pnl_mtm = 1;
+  double daily_pnl_realized = 2;
+  double weekly_pnl = 3;
+  double monthly_pnl = 4;
+  bool daily_mtm_limited = 5;
+  bool daily_realized_halted = 6;
+  bool weekly_halted = 7;
+  bool monthly_halted = 8;
+}
+
+message StateSnapshotPayload {
+  EventHeader header = 1;
+
+  // Positions per strategy
+  repeated PositionState positions = 10;
+
+  // Global position
+  double global_position = 20;
+  double global_position_limit = 21;
+
+  // Aggregate PnL
+  double total_unrealized_pnl = 30;
+  double total_realized_pnl = 31;
+
+  // Limit states
+  LimitState limit_state = 40;
+
+  // State integrity
+  uint64 state_version = 50;
+  uint64 staleness_ms = 51;
+  string state_hash = 52;
+
+  // Risk barriers
+  double lot_multiplier = 60;
+
+  // Timestamp of last market data
+  uint64 last_market_data_ns = 70;
+}

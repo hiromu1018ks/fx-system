@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+enum FillStatus {
+  FILL_STATUS_UNSPECIFIED = 0;
+  FILLED = 1;
+  PARTIAL_FILL = 2;
+  REJECTED = 3;
+}
+
+enum RejectReason {
+  REJECT_REASON_UNSPECIFIED = 0;
+  LAST_LOOK = 1;
+  INSUFFICIENT_LIQUIDITY = 2;
+  MARKET_CLOSED = 3;
+  RISK_LIMIT = 4;
+  UNKNOWN = 5;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_MARKET = 1;
+  ORDER_LIMIT = 2;
+}
+
+message ExecutionEventPayload {
+  EventHeader header = 1;
+
+  string order_id = 10;
+  string symbol = 11;
+  OrderType order_type = 12;
+
+  // Fill details
+  FillStatus fill_status = 20;
+  double fill_price = 21;
+  double fill_size = 22;
+  double slippage = 23;
+  double requested_price = 24;
+  double requested_size = 25;
+
+  // Fill probability model
+  double fill_probability = 30;
+  double effective_fill_probability = 31;
+  double price_improvement = 32;
+
+  // Last-Look model
+  double last_look_rejection_prob = 40;
+
+  // LP information
+  string lp_id = 50;
+  double latency_ms = 51;
+
+  // Reject details
+  RejectReason reject_reason = 60;
+  string reject_message = 61;
+}

@@ -1,2 +1,6 @@
 pub mod header;
 pub mod stream;
+
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/fx.events.rs"));
+}

@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package fx.events;
+
+enum EventTier {
+  EVENT_TIER_UNSPECIFIED = 0;
+  TIER1_CRITICAL = 1;
+  TIER2_DERIVED = 2;
+  TIER3_RAW = 3;
+}
+
+enum StreamId {
+  STREAM_ID_UNSPECIFIED = 0;
+  MARKET = 1;
+  STRATEGY = 2;
+  EXECUTION = 3;
+  STATE = 4;
+}
+
+message EventHeader {
+  string event_id = 1;
+  optional string parent_event_id = 2;
+  StreamId stream_id = 3;
+  uint64 sequence_id = 4;
+  uint64 timestamp_ns = 5;
+  uint32 schema_version = 6;
+  EventTier tier = 7;
+}

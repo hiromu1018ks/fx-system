@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+enum StrategyId {
+  STRATEGY_ID_UNSPECIFIED = 0;
+  STRATEGY_A = 1;
+  STRATEGY_B = 2;
+  STRATEGY_C = 3;
+}
+
+enum ActionType {
+  ACTION_TYPE_UNSPECIFIED = 0;
+  BUY = 1;
+  SELL = 2;
+  HOLD = 3;
+}
+
+enum TradeDecision {
+  TRADE_DECISION_UNSPECIFIED = 0;
+  EXECUTE = 1;
+  SKIP = 2;
+}
+
+message DecisionEventPayload {
+  EventHeader header = 1;
+
+  StrategyId strategy_id = 10;
+  ActionType action = 11;
+  uint64 lots = 12;
+  TradeDecision decision = 13;
+
+  // Feature vector (flattened)
+  repeated double feature_vector = 20;
+
+  // Q-value estimates
+  double q_buy = 21;
+  double q_sell = 22;
+  double q_hold = 23;
+  double q_selected = 24;
+
+  // Thompson Sampling statistics
+  double posterior_mean = 30;
+  double posterior_std = 31;
+  double sampled_q = 32;
+
+  // Position state at decision time
+  double position_size = 40;
+  double entry_price = 41;
+  double pnl_unrealized = 42;
+  double holding_time_ms = 43;
+
+  // Risk context
+  double staleness_ms = 50;
+  double lot_multiplier = 51;
+  double daily_pnl = 52;
+
+  // Regime information
+  repeated double regime_posterior = 60;
+  double regime_entropy = 61;
+
+  // Skip reason (if decision == SKIP)
+  string skip_reason = 70;
+}

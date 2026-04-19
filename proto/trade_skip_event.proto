@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package fx.events;
+
+import "event_header.proto";
+
+enum SkipReason {
+  SKIP_REASON_UNSPECIFIED = 0;
+  STALENESS_THRESHOLD = 1;
+  RISK_LIMIT_ACTIVE = 2;
+  GAP_DETECTED = 3;
+  UNKNOWN_REGIME = 4;
+  STRATEGY_HALTED = 5;
+  HOLD_DEGRADATION = 6;
+  INSUFFICIENT_EDGE = 7;
+  POSITION_LIMIT = 8;
+  ADVERSARIAL_LP_SIGNAL = 9;
+}
+
+message TradeSkipEvent {
+  EventHeader header = 1;
+
+  string strategy_id = 10;
+  SkipReason reason = 11;
+  string description = 12;
+
+  // Context at skip time
+  double q_selected = 20;
+  double staleness_ms = 21;
+  double regime_entropy = 22;
+}
