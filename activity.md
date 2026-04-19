@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 8
-**Current Task:** Task 9: Q関数（ベイズ線形回帰）の実装
+**Tasks Completed:** 9
+**Current Task:** Task 10: Thompson Sampling ポリシーの実装
 
 ---
 
@@ -110,3 +110,26 @@
 - **追加依存**: prost, uuid (fx-strategy)
 - **ユニットテスト**: 66新規テスト全て通過（マイクロ構造: 6, ボラティリティ: 4, 時間: 6, ポジション: 4, 実行系: 6, 非線形: 5, 交互作用: 4, 情報リーク: 3, エッジケース: 4, RollingWindow: 5, LaggedExec: 2, VolState: 2, FeatureVector: 4, セッション: 3, 統合: 2, デコードエラー: 3, gap_hold: 1）
 - **検証**: cargo build, cargo test (146 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 9: Q関数（ベイズ線形回帰）の実装
+- **完了**: BayesianLinearRegression構造体 (crates/strategy/src/bayesian_lr.rs)
+  - 事後分布 N(ŵ, Σ̂) の管理: Σ̂ = σ²_noise,t · (Φ^T Φ + λ_reg I)^{-1}
+  - オンライン事後更新: Sherman-Morrison公式による効率的A_inv更新
+  - 適応ノイズ分散: EMA_variance(residuals, halflife=500)、フロア値1e-10で下限保護
+  - Q値計算: Q(s,a) = ŵ^T φ(s) — σ_modelは点推定に含めない（Thompson Samplingのみで反映）
+  - 事後分散: σ_model(s,a) = √(σ²_noise · φ(s)^T A_inv φ(s))
+  - 発散監視: ||w_t|| / ||w_{t-1}|| > 2.0 → 検出（初回5観測はスキップ）
+  - 楽観的初期化: apply_optimistic_bias で b を設定し ŵ = bias·ones を実現
+  - 共分散膨張: inflate_covariance によるhold退化防止機構対応
+  - リセット: reset（ノイズ推定維持）/ reset_full（全初期化）
+- **完了**: QFunctionラッパー (crates/strategy/src/bayesian_lr.rs)
+  - QAction列挙型 (Buy, Sell, Hold) による3行動の独立した事後分布管理
+  - 楽観的初期化: Buy/Sellにのみバイアス適用、Holdはゼロ
+  - On-policy更新: update(action, phi, target) で特定行動のみ更新
+  - Thompson Sampling: sample_weights / sample_q_value による事後サンプリング
+  - 監視用API: q_values / posterior_stds による全行動のQ値・事後std取得
+  - リセット時の楽観的初期化自動復元
+- **ユニットテスト**: 32新規テスト全て通過
+  - BayesianLinearRegression: 作成, ゼロ初期予測, 単一更新, 既知重みへの収束, 事後std減少, 事後std非負, 適応ノイズ分散, 発散検出, 発散誤検出なし, リセット, 完全リセット, 共分散膨張, 膨張係数検証, 下限値パニック, サンプル重み分布, サンプル予測vs点推定, 楽観的初期化, バイアス希釈, Sherman-Morrison等価性, 残差確認
+  - QFunction: 作成と楽観的バイアス検証, 単一行動更新, 全Q値取得, サンプルQ値分散, 事後std取得, 行動リセット, 全体リセット, 完全リセット, 共分散膨張, 点推定等価性, FeatureVector DIM対応, ノイズ分散フロア
+- **検証**: cargo build, cargo test (178 passed), cargo clippy, cargo fmt --check 全て通過
