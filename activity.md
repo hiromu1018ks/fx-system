@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 10
-**Current Task:** Task 11: 戦略A: Liquidity Shock Reversion の実装
+**Tasks Completed:** 11
+**Current Task:** Task 12: 戦略B: Volatility Decay Momentum の実装
 
 ---
 
@@ -151,3 +151,34 @@
 - **ユニットテスト**: 32新規テスト全て通過
   - 作成, 決定, カウンタ増分, 楽観的バイアス探索, グローバル制約(Buy/Sell両方向ブロック), 両方向ブロック→Hold, Buyブロック時選択, argmax選択, 整合性チェック(両正接近/遠隔/片方負/両負), ロット乗数/最大クランプ/低乗数→Hold/ゼロ→Hold, Hold退化検出/十分取引時非検出/早期非チェック/共分散膨張, TradeFrequencyTracker, サンプルQ値変動, Point Q整合性, トラッカーリセット, Config/QFunctionアクセス, レイテンシペナルティ, 整合性フォールバック決定, Sellブロック時選択
 - **検証**: cargo build, cargo test (210 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 11: 戦略A: Liquidity Shock Reversion の実装
+- **完了**: `crates/strategy/src/strategy_a.rs` 作成
+- **完了**: StrategyA構造体 — 独自のQFunction(39次元) + エピソード管理 + Thompson Sampling意思決定パイプライン
+- **完了**: StrategyAConfig — トリガー閾値(spread_z=3, depth_drop=-0.2, vol_spike=3, regime_kl=1.0), MAX_HOLD_TIME=30s, decay_rate_a=0.001
+- **完了**: トリガー条件実装: spread_z > θ ∧ depth_drop < θ ∧ vol_spike > θ ∧ regime_kl < θ
+- **完了**: 戦略A固有特徴量(5次元追加):
+  - spread_z×OBI (交互作用項)
+  - self_impact_A: base self_impact × (1 + min(|depth_change|, 2.0)) (深度変化増幅)
+  - p_revert_A: spread信号(0.4) + depth信号(0.35) + vol信号(0.25) の重み付き [0,1]
+  - time_decay_A: exp(-0.001 × holding_time_ms) (数秒スケール遅い減衰)
+  - depth_drop×realized_vol (連続交互作用項)
+- **完了**: エピソード管理: Idle/Active状態、MAX_HOLD_TIME超過で強制クローズ、外部ポジションクローズの同期
+- **完了**: decide()パイプライン: エピソードタイムアウト→ポジション同期→トリガーチェック→特徴量抽出→Thompson Sampling→ペナルティ→整合性→グローバル制約→ロット sizing→Hold退化監視
+- **完了**: EpisodeState列挙型(Idle/Active)、StrategyADecision構造体
+- **完了**: lib.rsにpub mod strategy_a追加
+- **ユニットテスト**: 74新規テスト全て通過
+  - トリガー(7): 全条件/各閾値不足/カスタム閾値
+  - 特徴量抽出(13): 次元/ベース保存/spread_z×OBI/self_impact_A(3)/p_revert_A(3)/time_decay_A(3)/depth_drop×vol/全有限
+  - エピソード管理(8): 初期/開始/終了/境界内/境界/超過/残り時間(3)/ゼロ
+  - 決定パイプライン(11): idle skip/triggered/explore/timeout long/short/no position/外部同期/active bypass/entry starts/global buy/sell blocks/low lot
+  - Q関数(4): 次元/楽観バイアス/update/extended features
+  - 設定(2): デフォルト/定数
+  - ロット(4): full/half/max clamp/zero
+  - 整合性(4): both close/far/one negative/both negative
+  - アクション選択(6): argmax buy/sell/hold/buy blocked/both blocked
+  - Hold退化(3): detected/not detected/early
+  - リセット(2): tracker/Q function
+  - エピソードライフサイクル(2): full/remaining time
+  - p_revert_a詳細(3): signal weights/depth scaled/no signal
+- **検証**: cargo build, cargo test (284 passed), cargo clippy, cargo fmt --check 全て通過
