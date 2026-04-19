@@ -1,4 +1,5 @@
 pub mod bayesian_lr;
+pub mod change_point;
 pub mod extractor;
 pub mod features;
 pub mod mc_eval;

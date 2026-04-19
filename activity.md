@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 21
-**Current Task:** Task 22: Online Change Point Detectionの実装
+**Tasks Completed:** 22
+**Current Task:** Task 23: Lifecycle Manager（自動淘汰）の実装
 
 ---
 
@@ -484,3 +484,40 @@
   - market(22): mid/spread, proto_roundtrip, build_tick, publish_tick, tick_count/timestamp, state_transitions, state_watch, latency_stats(4), config_default, connection_state_serde, multiple_ticks_sequence, multiple_symbols, depth_levels_published
   - fix(22): config(3: new/default/serde), session_state_serde, parse(4: logon/heartbeat/too_few/missing_type), builder(5: logon/heartbeat/new_order/sequence/market_data), checksum, timestamp, session_lifecycle, handle(5: heartbeat/logout/test_request/seq_gap/callback), health_monitor(5: record/healthy/threshold/avg_gap/timeout), websocket_config(2: default/serde), message_fields
 - **検証**: cargo build, cargo test (769 passed), cargo clippy (clean), cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 22: Online Change Point Detectionの実装
+- **完了**: `crates/strategy/src/change_point.rs` 作成 — ADWINベースOnline Change Point Detection
+- **完了**: ChangePointDetector — Hoeffding boundによる特徴量分布変化検知
+  - ADWINアルゴリズム: スライディングウィンドウ内の最適分割点で左右サブウィンドウの平均差をHoeffding boundと比較
+  - ε = sqrt((1/(2m)) · ln(4/δ))、m = min(n0, n1)
+  - mean_diff > ε でチェンジポイント検出
+- **完了**: ChangePointConfig — delta(0.002), min_window_size(50), max_window_size(5000), grace_period(100), severity閾値(minor=1.0, major=2.5), inflation factor設定
+- **完了**: ChangeSeverity列挙型 (Minor/Major)
+- **完了**: ChangePoint — feature_index, severity, epsilon, mean_diff, timestamp_ns, total_observations
+- **完了**: FeatureAdwin — 特徴量ごとの独立ADWIN検出器、grace period管理、consecutive changes追跡
+- **完了**: 事後分布部分リセットの統合
+  - Minor: QFunction::inflate_covariance(minor_inflation_factor=2.0) — Thompson Sampling探索幅拡大
+  - Major: major_full_reset=trueでQFunction::reset_all_full()、falseでinflate_covariance(5.0)
+- **完了**: オフライン再学習トリガー — consecutive change points >= retraining_trigger_threshold(3) でretraining_triggeredフラグ
+  - clear_retraining_trigger()でフラグクリア
+  - decay_recent_changes()で経時減衰
+- **完了**: per-feature monitoring と aggregate monitoring の2モード対応
+- **完了**: observe() + apply_change_response() の個別呼び出しと observe_and_respond() の統合API
+- **完了**: lib.rsにpub mod change_point追加
+- **ユニットテスト**: 30新規テスト全て通過
+  - SubWindow(3): push_pop, empty, clear
+  - FeatureAdwin(2): push, grace_period
+  - 作成(3): creation, default_config, zero_features_panics
+  - 検出(4): stable(高信頼度), mean_shift, variance_shift, before_min_window
+  - Grace period(1): suppression
+  - Severity(1): classification
+  - レスポンス(3): minor_inflation, major_inflation, major_full_reset
+  - Retraining(3): not_triggered, clear, decay
+  - Reset(2): all, feature
+  - 履歴(2): empty, total_observations
+  - 統合(1): observe_and_respond
+  - Max window(1): trimming
+  - Config(1): access
+  - Aggregate(1): monitoring_mode
+  - Error(2): wrong_dimension, feature_out_of_range
+- **検証**: cargo build, cargo test (799 passed), cargo clippy (clean), cargo fmt --check 全て通過
