@@ -1,0 +1,45 @@
+[package]
+name = "fx-forward"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Internal crates
+fx-core = { path = "../core" }
+fx-events = { path = "../events" }
+fx-strategy = { path = "../strategy" }
+fx-execution = { path = "../execution" }
+fx-risk = { path = "../risk" }
+fx-backtest = { path = "../backtest" }
+fx-gateway = { path = "../gateway" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Observability
+tracing = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Math
+ndarray = { workspace = true }
+
+# HTTP (for webhook alerts)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Error handling
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
