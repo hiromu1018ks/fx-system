@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 13
-**Current Task:** Task 14: On-policy Monte Carlo評価の実装
+**Tasks Completed:** 14
+**Current Task:** Task 15: HDP-HMM Regime管理の実装
 
 ---
 
@@ -244,3 +244,47 @@
   - エピソードライフサイクル(2): full/remaining time
   - p_trend_c詳細(3): signal weights/session scaled/late session decay
 - **検証**: cargo build, cargo test (435 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 14: On-policy Monte Carlo評価の実装
+- **完了**: `crates/strategy/src/mc_eval.rs` 作成
+- **完了**: TerminalReason列挙型 (PositionClosed, MaxHoldTimeExceeded, DailyHardLimit, UnknownRegime)
+- **完了**: EpisodeTransition構造体 (timestamp_ns, action, phi, reward)
+- **完了**: EpisodeBuffer — エピソード内遷移記録、即時報酬計算
+  - 報酬関数: r_t = ΔPnL_t - λ_risk·σ²_i,t - λ_dd·min(DD_t, DD_cap)
+  - ΔPnL: 前回equityからの差分 (realized + unrealized)
+  - σ²_i,t = p²·σ²_price: ポジション分散
+  - DD_t = max(0, equity_peak - equity_t): ピークからのドローダウン
+  - DD_cap: DD項の飽和上限（Q値のPnL成分による回復取引を阻害しない）
+- **完了**: RewardConfig (lambda_risk=0.1, lambda_dd=0.5, dd_cap=100.0, gamma=0.99)
+- **完了**: McEvaluator — エピソードライフサイクル管理 + MCリターン計算 + Q関数更新
+  - start_episode: ポジション非ゼロ化でエピソード開始
+  - record_transition: 各決定ステップで遷移記録 + 報酬計算
+  - end_episode: 終端条件でエピソード終了、割引累積報酬 G_t 計算
+  - end_episode_and_update: エピソード終了 + 即座にQ関数更新
+  - update_from_result: EpisodeResultからQ関数更新 (静的メソッド)
+  - compute_returns: G_t = Σ γ^k·r_{t+k} を逆順O(n)で計算
+- **完了**: EpisodeResult (strategy_id, terminal_reason, num_transitions, total_reward, return_g0, duration_ns, returns, transitions)
+- **完了**: Deadly Triad回避の確認 — On-policy(実行行動のみ記録) + Monte Carlo(全エピソードリターン、ブートストラップなし) + Bayesian正則化(QFunctionに委譲)
+- **完了**: 部分約定の扱い — 全量クローズ時のみエピソード終了、部分クローズはエピソード内イベント
+- **完了**: MAX_HOLD_TIME到達時 — TerminalReason::MaxHoldTimeExceededで強制クローズ、実現PnLを報酬に組み込み
+- **完了**: lib.rsにpub mod mc_eval追加
+- **ユニットテスト**: 40新規テスト全て通過
+  - EpisodeBuffer(8): new/basic reward/components/dd cap/equity peak tracking/dd from peak/negative equity/initial nonzero
+  - compute_returns(6): empty/single/two steps/decay/gamma_1/negative rewards
+  - McEvaluator lifecycle(5): start/double_start_panics/end_without_start_panics/full lifecycle/multi strategy
+  - MC returns(2): end_episode_returns_computed/duration
+  - Q-function update(2): end_episode_and_update/update_from_result
+  - Episode result(2): avg_reward/avg_reward_zero
+  - Terminal reasons(1): all reasons
+  - Partial fill(1): continues episode
+  - Empty episode(1): zero transitions
+  - Completed tracking(1): multi-strategy counting
+  - On-policy(1): only records taken actions
+  - MC vs bootstrap(1): full returns verification
+  - Reward edge cases(3): zero position/no risk, negative equity, initial nonzero
+  - Gamma effect(1): return concentration
+  - Q convergence(2): positive/negative episodes
+  - Full integration(1): risk + DD + update
+  - MAX_HOLD_TIME(1): forced close
+  - Config access(2): active episode/config values
+- **検証**: cargo build, cargo test (475 passed), cargo clippy, cargo fmt --check 全て通過
