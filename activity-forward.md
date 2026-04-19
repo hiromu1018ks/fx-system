@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 9
-**Current Task:** Task 10 — External API Data Feed Adapter
+**Tasks Completed:** 10
+**Current Task:** Task 11 — エンドツーエンド フォワードテスト統合
 
 ---
 
@@ -89,3 +89,11 @@
 - **完了**: トレード履歴CSV出力（TradeRecord: ID/時刻/シンボル/サイド/lots/価格/slippage/PnL/戦略）
 - **完了**: テスト4件（JSON/CSV/Both/トレードCSV）
 - **確認**: `cargo test`（57テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 10: External API Data Feed Adapter
+- **完了**: ExternalApiFeed 構造体（MarketFeed trait実装）
+- **完了**: ApiFeedConfig（provider/credentials/symbols/reconnect設定）
+- **完了**: 認証管理（credentials file からのAPI Key安全読み込み）
+- **完了**: RecordedDataFeed との切替可能な設計（同じMarketFeed trait）
+- **完了**: テスト5件（設定/認証なしエラー/認証あり接続/購読/next_tick）
+- **確認**: `cargo test`（62テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過

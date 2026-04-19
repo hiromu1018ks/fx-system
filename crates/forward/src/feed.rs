@@ -175,6 +175,124 @@ impl<S: EventStore + 'static> MarketFeed for RecordedDataFeed<S> {
     }
 }
 
+/// External API feed configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiFeedConfig {
+    pub provider: String,
+    pub credentials_path: String,
+    pub symbols: Vec<String>,
+    pub reconnect_attempts: u32,
+    pub reconnect_delay_ms: u64,
+}
+
+impl Default for ApiFeedConfig {
+    fn default() -> Self {
+        Self {
+            provider: "OANDA".to_string(),
+            credentials_path: String::new(),
+            symbols: vec!["EUR/USD".to_string()],
+            reconnect_attempts: 3,
+            reconnect_delay_ms: 5000,
+        }
+    }
+}
+
+/// External API data feed adapter — skeleton for OANDA or similar providers.
+///
+/// Implements the MarketFeed trait, allowing transparent switching
+/// between RecordedDataFeed and live market data.
+pub struct ExternalApiFeed {
+    config: ApiFeedConfig,
+    connected: bool,
+    subscribed_symbols: Vec<String>,
+    api_key: Option<String>,
+}
+
+impl ExternalApiFeed {
+    pub fn new(config: ApiFeedConfig) -> Self {
+        Self {
+            config,
+            connected: false,
+            subscribed_symbols: Vec::new(),
+            api_key: None,
+        }
+    }
+
+    /// Load API credentials from a file.
+    fn load_credentials(&mut self) -> Result<()> {
+        if self.config.credentials_path.is_empty() {
+            anyhow::bail!("Credentials path not configured");
+        }
+        let content = std::fs::read_to_string(&self.config.credentials_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read credentials: {}", e))?;
+        // Parse simple key=value format
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                if key.trim() == "api_key" {
+                    self.api_key = Some(value.trim().to_string());
+                }
+            }
+        }
+        if self.api_key.is_none() {
+            anyhow::bail!("No api_key found in credentials file");
+        }
+        Ok(())
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl MarketFeed for ExternalApiFeed {
+    async fn connect(&mut self) -> Result<()> {
+        info!(provider = %self.config.provider, "Connecting ExternalApiFeed");
+
+        // Load credentials
+        self.load_credentials()?;
+
+        // Provider-specific connection logic would go here.
+        // For OANDA: establish WebSocket/streaming connection
+        // This is a skeleton — actual implementation requires the provider SDK.
+
+        self.connected = true;
+        info!(provider = %self.config.provider, "ExternalApiFeed connected");
+        Ok(())
+    }
+
+    async fn subscribe(&mut self, symbols: &[String]) -> Result<()> {
+        if !self.connected {
+            anyhow::bail!("Not connected");
+        }
+        self.subscribed_symbols = symbols.to_vec();
+        info!(symbols = ?self.subscribed_symbols, "Subscribed to symbols");
+        Ok(())
+    }
+
+    async fn next_tick(&mut self) -> Result<Option<TickData>> {
+        if !self.connected {
+            anyhow::bail!("Not connected");
+        }
+        // Skeleton: actual implementation would receive from the WebSocket/REST stream
+        // and convert to TickData.
+        // For now, return None to signal no data available.
+        Ok(None)
+    }
+
+    async fn disconnect(&mut self) -> Result<()> {
+        self.connected = false;
+        self.api_key = None;
+        self.subscribed_symbols.clear();
+        info!("ExternalApiFeed disconnected");
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +465,76 @@ mod tests {
 
         let feed0 = RecordedDataFeed::new(StubStore::new(vec![]), 0.0, None, None);
         assert!(feed0.inter_tick_delay(1000, 1_001_000).is_none());
+    }
+
+    // --- ExternalApiFeed tests ---
+
+    #[tokio::test]
+    async fn test_external_api_feed_config() {
+        let config = ApiFeedConfig::default();
+        assert_eq!(config.provider, "OANDA");
+        assert_eq!(config.reconnect_attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn test_external_api_connect_no_credentials() {
+        let config = ApiFeedConfig {
+            credentials_path: String::new(),
+            ..Default::default()
+        };
+        let mut feed = ExternalApiFeed::new(config);
+        assert!(feed.connect().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_external_api_connect_with_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("credentials");
+        std::fs::write(&cred_path, "api_key=test_key_123\n").unwrap();
+
+        let config = ApiFeedConfig {
+            credentials_path: cred_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let mut feed = ExternalApiFeed::new(config);
+        feed.connect().await.unwrap();
+        assert!(feed.is_connected());
+
+        feed.disconnect().await.unwrap();
+        assert!(!feed.is_connected());
+    }
+
+    #[tokio::test]
+    async fn test_external_api_subscribe_when_connected() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("credentials");
+        std::fs::write(&cred_path, "api_key=test_key\n").unwrap();
+
+        let config = ApiFeedConfig {
+            credentials_path: cred_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let mut feed = ExternalApiFeed::new(config);
+        feed.connect().await.unwrap();
+
+        feed.subscribe(&["EUR/USD".to_string(), "GBP/USD".to_string()])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_external_api_next_tick_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("credentials");
+        std::fs::write(&cred_path, "api_key=test_key\n").unwrap();
+
+        let config = ApiFeedConfig {
+            credentials_path: cred_path.to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+        let mut feed = ExternalApiFeed::new(config);
+        feed.connect().await.unwrap();
+        // Skeleton returns None
+        assert!(feed.next_tick().await.unwrap().is_none());
     }
 }

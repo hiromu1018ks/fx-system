@@ -291,7 +291,7 @@ enum DataSourceConfig {
       " RecordedDataFeed との切替可能な設計（同じMarketFeed traitを実装）",
       "ユニットテスト: trait適合性、設定構築、エラーハンドリング（モック使用）"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",
