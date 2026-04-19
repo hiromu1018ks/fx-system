@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 9
-**Current Task:** Task 10: Thompson Sampling ポリシーの実装
+**Tasks Completed:** 10
+**Current Task:** Task 11: 戦略A: Liquidity Shock Reversion の実装
 
 ---
 
@@ -133,3 +133,21 @@
   - BayesianLinearRegression: 作成, ゼロ初期予測, 単一更新, 既知重みへの収束, 事後std減少, 事後std非負, 適応ノイズ分散, 発散検出, 発散誤検出なし, リセット, 完全リセット, 共分散膨張, 膨張係数検証, 下限値パニック, サンプル重み分布, サンプル予測vs点推定, 楽観的初期化, バイアス希釈, Sherman-Morrison等価性, 残差確認
   - QFunction: 作成と楽観的バイアス検証, 単一行動更新, 全Q値取得, サンプルQ値分散, 事後std取得, 行動リセット, 全体リセット, 完全リセット, 共分散膨張, 点推定等価性, FeatureVector DIM対応, ノイズ分散フロア
 - **検証**: cargo build, cargo test (178 passed), cargo clippy, cargo fmt --check 全て通過
+
+### 2026-04-19 — Task 10: Thompson Sampling ポリシーの実装
+- **完了**: ThompsonSamplingPolicy構造体 (crates/strategy/src/thompson_sampling.rs)
+  - ThompsonSamplingConfig: non_model_uncertainty_k, latency_penalty_k, min_trade_frequency, trade_frequency_window, hold_degeneration_inflation, max_lot_size, min_lot_size, consistency_threshold, default_lot_size
+  - ThompsonDecision: action, q_point, q_sampled, posterior_std, all_sampled_q, all_point_q, hold_degeneration_detected, consistency_fallback
+  - TradeFrequencyTracker: スライディングウィンドウベースの取引頻度監視
+- **完了**: decide()パイプライン実装
+  - 事後分布からの重みサンプリング: QFunction::sample_q_value 経由で w̃ ~ N(ŵ, Σ̂)
+  - Q̃_final計算: w̃_a^T·φ(s) - self_impact - dynamic_cost - k·σ_non_model - latency_penalty（Buy/Sellのみ、Holdはペナルティなし）
+  - グローバルポジション制約フィルタリング: global_position ± 1.0 ≤ global_position_limit でBuy/Sell制限
+  - 行動間整合性チェック: Buy/Sell両方が正かつ相対差 < consistency_threshold → Holdフォールバック
+  - Q_point（点推定）: QFunction::q_values 経由で監視用純粋 ŵ^T·φ を取得
+  - Hold退化防止: TradeFrequencyTrackerで取引頻度監視 → 閾値下回り時にQFunction::inflate_covariance で事後分散膨張
+  - ロットサイズ計算: default_lot_size × lot_multiplier、min_lot_size未満でHold
+- **完了**: lib.rsにpub mod thompson_sampling追加
+- **ユニットテスト**: 32新規テスト全て通過
+  - 作成, 決定, カウンタ増分, 楽観的バイアス探索, グローバル制約(Buy/Sell両方向ブロック), 両方向ブロック→Hold, Buyブロック時選択, argmax選択, 整合性チェック(両正接近/遠隔/片方負/両負), ロット乗数/最大クランプ/低乗数→Hold/ゼロ→Hold, Hold退化検出/十分取引時非検出/早期非チェック/共分散膨張, TradeFrequencyTracker, サンプルQ値変動, Point Q整合性, トラッカーリセット, Config/QFunctionアクセス, レイテンシペナルティ, 整合性フォールバック決定, Sellブロック時選択
+- **検証**: cargo build, cargo test (210 passed), cargo clippy, cargo fmt --check 全て通過
