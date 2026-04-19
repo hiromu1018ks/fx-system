@@ -1,0 +1,19 @@
+[package]
+name = "fx-events"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fx-core = { path = "../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+prost-build = "0.13"

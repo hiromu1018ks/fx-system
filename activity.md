@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-19
-**Tasks Completed:** 0
-**Current Task:** Ready to start — Task 1: Rustプロジェクト初期化とディレクトリ構造の構築
+**Tasks Completed:** 1
+**Current Task:** Task 2: Protobufスキーマ定義（イベント構造）
 
 ---
 
@@ -16,3 +16,10 @@
 - **完了**: activity.mdの初期化
 
 <!-- Agent will append dated entries here -->
+
+### 2026-04-19 — Task 1: Rustプロジェクト初期化とディレクトリ構造の構築
+- **完了**: Cargo workspace構成で7クレート作成 (core, events, strategy, execution, risk, gateway, backtest)
+- **完了**: 各クレートにCargo.toml、lib.rs、スタブモジュール配置
+- **完了**: .gitignoreにRust/Python向け設定追加
+- **完了**: cargo build, cargo test, cargo clippy, cargo fmt全て通過
+- **依存関係**: tokio, serde, prost, tonic, tracing, chrono, ndarray, nalgebra, sled, ort, rand, thiserror等
