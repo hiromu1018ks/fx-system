@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 4
-**Current Task:** Task 5 — Forward Test Runner
+**Tasks Completed:** 5
+**Current Task:** Task 6 — Performance Tracker
 
 ---
 
@@ -49,3 +49,13 @@
 - **完了**: Duration serde カスタムシリアライザ（秒数↔Duration変換）
 - **完了**: テスト11件（デフォルト/TOML読み込み/バリデーション/ファイルIO）
 - **確認**: `cargo test`（25テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 5: Forward Test Runner
+- **完了**: `ForwardTestRunner<F: MarketFeed>` ジェネリック構造体実装
+- **完了**: フルパイプライン: TickData→GenericEvent→StateProjector→FeatureExtractor→ThompsonSamplingPolicy→RiskBarrier→PaperExecution
+- **完了**: 全リスク管理コンポーネント統合（KillSwitch, DynamicRiskBarrier, HierarchicalRiskLimiter, GlobalPositionChecker, LifecycleManager）
+- **完了**: ChangePointDetector による分布変化検知とQ関数リセット
+- **完了**: 期間管理（duration到達時のグレースフルシャットダウン）
+- **完了**: 戦略選択ロジック（enabled_strategies に基づくA/B/C個別有効化）
+- **完了**: テスト5件（ティック処理/空フィード/戦略フィルタ/期間制限/再現性）
+- **確認**: `cargo test`（30テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過

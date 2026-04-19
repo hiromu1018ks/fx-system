@@ -215,7 +215,7 @@ enum DataSourceConfig {
       "ForwardTestResult: 実行サマリー（期間、トレード数、PnL、統計）",
       "ユニットテスト: ランナー作成、戦略フィルタリング、期間管理、グレースフルシャットダウン"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

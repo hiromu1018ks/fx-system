@@ -45,6 +45,19 @@ impl PerformanceTracker {
     pub fn snapshot(&self) -> &PerformanceSnapshot {
         &self.snapshot
     }
+
+    pub fn update(&mut self, timestamp_ns: u64, realized_pnl: f64, unrealized_pnl: f64) {
+        self.snapshot.timestamp_ns = timestamp_ns;
+        self.snapshot.realized_pnl = realized_pnl;
+        self.snapshot.unrealized_pnl = unrealized_pnl;
+        self.snapshot.cumulative_pnl = realized_pnl + unrealized_pnl;
+
+        let peak = self.snapshot.cumulative_pnl.max(0.0);
+        let dd = peak - self.snapshot.cumulative_pnl;
+        if dd > self.snapshot.max_drawdown {
+            self.snapshot.max_drawdown = dd;
+        }
+    }
 }
 
 impl Default for PerformanceTracker {
