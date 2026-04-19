@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 2
-**Current Task:** Task 3 — Paper Execution Engine
+**Tasks Completed:** 3
+**Current Task:** Task 4 — Forward Test Configuration
 
 ---
 
@@ -32,3 +32,12 @@
 - **完了**: 時間範囲フィルタリング（start_time_ns / end_time_ns）
 - **完了**: テスト7件（接続・切断・フィルタ・速度制御・空ストア・未接続エラー・遅延計算）
 - **確認**: `cargo test`, `cargo clippy`, `cargo fmt --check` 全て通過
+
+### 2026-04-20 — Task 3: Paper Execution Engine
+- **完了**: `PaperExecutionEngine` 構造体実装（ExecutionGateway + SmallRng を内包）
+- **完了**: OTCモデル再利用（Last-Look, fill probability, slippage を simulate_execution 経由）
+- **完了**: `PaperOrderResult` に約定価格/slippage/fill確率/拒否理由を記録
+- **完了**: 構造的保証: 実際の発注パス（FIX/WebSocket order）に一切接続しない設計
+- **完了**: `build_execution_event` でExecutionEvent(proto)生成
+- **完了**: テスト7件（約定/再現性/seed差異/イベント生成/LP確認/lot multiplier/複数注文）
+- **確認**: `cargo test`（14テスト通過）, `cargo clippy`, `cargo fmt --check` 全て通過

@@ -41,6 +41,9 @@ reqwest = { version = "0.12", features = ["json"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 
+# Random (for reproducible paper execution)
+rand = { workspace = true }
+
 # UUID
 uuid = { workspace = true }
 

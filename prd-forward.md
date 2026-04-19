@@ -186,7 +186,7 @@ enum DataSourceConfig {
       "ExecutionEvent（proto形式）の生成とEventBus(Execution Stream)への発行",
       "ユニットテスト: ペーパー約定/拒否/slipppage計算、実際の発注が行われないことの確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
