@@ -100,7 +100,7 @@
       "テスト: 初期状態 (n_observations=0) でsample_weightsがパニックしない",
       "テスト: 十分な観測後はCholeskyパスが使われる"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "fix",

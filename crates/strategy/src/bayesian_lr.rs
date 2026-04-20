@@ -146,7 +146,21 @@ impl BayesianLinearRegression {
     }
 
     /// Sample weights from posterior: w̃ ~ N(ŵ, Σ̂)
+    ///
+    /// When `n_observations < dim`, uses diagonal approximation:
+    /// `diag(sqrt(σ² · diag(A_inv))) · z` instead of full Cholesky.
     pub fn sample_weights(&self, rng: &mut impl Rng) -> DVector<f64> {
+        if self.n_observations < self.dim {
+            // Diagonal approximation: independent sampling per dimension
+            let sigma = self.sigma2_noise.sqrt();
+            let mut w_sampled = self.w_hat.clone();
+            for i in 0..self.dim {
+                let std_i = sigma * self.a_inv[(i, i)].sqrt().max(0.0);
+                w_sampled[i] += std_i * sample_standard_normal_scalar(rng);
+            }
+            return w_sampled;
+        }
+
         match Cholesky::new(self.a_inv.clone()) {
             Some(chol) => {
                 let sigma = self.sigma2_noise.sqrt();
@@ -223,6 +237,10 @@ fn sample_standard_normal(dim: usize, rng: &mut impl Rng) -> DVector<f64> {
         v[i] = rng.sample(StandardNormal);
     }
     v
+}
+
+fn sample_standard_normal_scalar(rng: &mut impl Rng) -> f64 {
+    rng.sample(StandardNormal)
 }
 
 /// Action types for Q-function (without lot sizes — those are determined by execution layer).
@@ -375,6 +393,7 @@ mod tests {
     use super::*;
     use crate::features::FeatureVector;
     use rand::thread_rng;
+    use rand::SeedableRng;
 
     const DIM: usize = 5;
     const LAMBDA_REG: f64 = 1.0;
@@ -996,5 +1015,62 @@ mod tests {
 
         // Noise variance should not go below floor
         assert!(m.noise_variance() >= 1e-10);
+    }
+
+    #[test]
+    fn test_sample_weights_diagonal_approximation_no_panic() {
+        // n_observations=0 < dim=5 → diagonal approximation should not panic
+        let m = BayesianLinearRegression::new(DIM, LAMBDA_REG, HALFLIFE, INITIAL_SIGMA2);
+        assert_eq!(m.n_observations(), 0);
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let w = m.sample_weights(&mut rng);
+
+        // Should produce a vector of correct dimension
+        assert_eq!(w.len(), DIM);
+        // All values should be finite
+        for i in 0..DIM {
+            assert!(
+                w[i].is_finite(),
+                "sampled weight[{}] = {} is not finite",
+                i,
+                w[i]
+            );
+        }
+        // Should differ from pure point estimate (diagonal adds variance)
+        let w_hat = m.weights();
+        let all_same = (0..DIM).all(|i| (w[i] - w_hat[i]).abs() < 1e-15);
+        assert!(
+            !all_same,
+            "diagonal approximation should add variance, not just return point estimate"
+        );
+    }
+
+    #[test]
+    fn test_sample_weights_diagonal_then_cholesky_transition() {
+        let mut m = BayesianLinearRegression::new(DIM, LAMBDA_REG, HALFLIFE, INITIAL_SIGMA2);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+
+        // Before enough observations: diagonal approximation
+        for i in 0..(DIM - 1) {
+            let phi = vec![1.0; DIM];
+            m.update(&phi, (i as f64) * 0.1);
+        }
+        assert!(m.n_observations() < DIM);
+        let w_diag = m.sample_weights(&mut rng);
+        assert_eq!(w_diag.len(), DIM);
+
+        // After enough observations: full Cholesky
+        let phi = vec![1.0; DIM];
+        m.update(&phi, 1.0);
+        assert!(m.n_observations() >= DIM);
+        let w_chol = m.sample_weights(&mut rng);
+        assert_eq!(w_chol.len(), DIM);
+
+        // Both should produce finite values
+        for i in 0..DIM {
+            assert!(w_diag[i].is_finite());
+            assert!(w_chol[i].is_finite());
+        }
     }
 }

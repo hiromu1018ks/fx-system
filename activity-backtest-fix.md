@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 2 / 8
-**Current Task:** Task 3 — Cholesky対角近似
+**Tasks Completed:** 3 / 8
+**Current Task:** Task 4 — 週末前強制決済
 
 ---
 
@@ -43,6 +43,25 @@
 - `cargo build` — passed
 - `cargo test -p fx-backtest --lib -- data::tests::test_parse_timestamp` — 11 passed, 0 failed
 - `cargo clippy -p fx-backtest` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 3 — Cholesky対角近似: n_observations < dim の間は対角近似でサンプリング
+
+**What changed:**
+- `crates/strategy/src/bayesian_lr.rs`: `sample_weights()` を拡張
+  - `n_observations < dim` の場合: 対角近似 `ŵ + diag(sqrt(σ² · diag(A_inv))) · z` を使用
+  - `n_observations >= dim` の場合: 既存の完全Cholesky分解パス
+  - `sample_standard_normal_scalar()` ヘルパー関数追加
+  - テスト2件追加:
+    - `test_sample_weights_diagonal_approximation_no_panic`: n_observations=0でパニックせず、点推定と異なる値が生成されることを検証
+    - `test_sample_weights_diagonal_then_cholesky_transition`: 観測数増加による対角近似→Cholesky切替を検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-strategy --lib -- bayesian_lr::tests::test_sample_weights` — 3 passed, 0 failed
+- `cargo clippy -p fx-strategy` — no errors
 - `cargo fmt --check` — clean
 
 **Issues:** なし
