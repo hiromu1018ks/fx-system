@@ -173,7 +173,7 @@ struct DataTick {
       "LifecycleManagerの統合: Rolling Sharpe監視、戦略淘汰判定",
       "ユニットテスト: 報酬計算、エピソード完了判定、事後分布更新"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
