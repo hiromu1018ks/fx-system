@@ -243,6 +243,13 @@ impl BacktestEngine {
                 );
 
                 if result.filled {
+                    let trade_pnl = self.process_execution_result(
+                        pos_snap.strategy_id,
+                        &result,
+                        direction,
+                        tick_ns,
+                        &mut projector,
+                    );
                     let trade = TradeRecord {
                         timestamp_ns: tick_ns,
                         strategy_id: pos_snap.strategy_id,
@@ -250,20 +257,12 @@ impl BacktestEngine {
                         lots: result.fill_size,
                         fill_price: result.fill_price,
                         slippage: result.slippage,
-                        pnl: 0.0, // PnL computed after projector update
+                        pnl: trade_pnl,
                         fill_probability: result.effective_fill_probability,
                         latency_ms: result.latency_ms,
                         close_reason: Some("MAX_HOLD_TIME".to_string()),
                     };
                     trades.push(trade);
-
-                    self.process_execution_result(
-                        pos_snap.strategy_id,
-                        &result,
-                        direction,
-                        tick_ns,
-                        &mut projector,
-                    );
                 }
 
                 decisions.push(BacktestDecision {
@@ -317,6 +316,13 @@ impl BacktestEngine {
                     );
 
                     if result.filled {
+                        let trade_pnl = self.process_execution_result(
+                            pos_snap.strategy_id,
+                            &result,
+                            direction,
+                            last_ns,
+                            &mut projector,
+                        );
                         let trade = TradeRecord {
                             timestamp_ns: last_ns,
                             strategy_id: pos_snap.strategy_id,
@@ -324,29 +330,14 @@ impl BacktestEngine {
                             lots: result.fill_size,
                             fill_price: result.fill_price,
                             slippage: result.slippage,
-                            pnl: 0.0,
+                            pnl: trade_pnl,
                             fill_probability: result.effective_fill_probability,
                             latency_ms: result.latency_ms,
                             close_reason: Some("END_OF_DATA".to_string()),
                         };
                         trades.push(trade);
-
-                        self.process_execution_result(
-                            pos_snap.strategy_id,
-                            &result,
-                            direction,
-                            last_ns,
-                            &mut projector,
-                        );
                     }
                 }
-            }
-        }
-
-        // Compute final PnL from projector state
-        for trade in &mut trades {
-            if let Some(pos) = projector.snapshot().positions.get(&trade.strategy_id) {
-                trade.pnl = pos.realized_pnl;
             }
         }
 
@@ -476,6 +467,7 @@ impl BacktestEngine {
             })
     }
 
+    /// Process an execution result through the projector and return the per-trade PnL delta.
     fn process_execution_result(
         &self,
         strategy_id: StrategyId,
@@ -483,10 +475,17 @@ impl BacktestEngine {
         direction: Direction,
         timestamp_ns: u64,
         projector: &mut StateProjector,
-    ) {
+    ) -> f64 {
         if !result.filled {
-            return;
+            return 0.0;
         }
+
+        let prev_realized = projector
+            .snapshot()
+            .positions
+            .get(&strategy_id)
+            .map(|p| p.realized_pnl)
+            .unwrap_or(0.0);
 
         let signed_size = match direction {
             Direction::Buy => result.fill_size,
@@ -523,6 +522,15 @@ impl BacktestEngine {
 
         let generic_event = GenericEvent::new(header, proto_event.encode_to_vec());
         let _ = projector.process_execution_for_strategy(&generic_event, strategy_id);
+
+        let new_realized = projector
+            .snapshot()
+            .positions
+            .get(&strategy_id)
+            .map(|p| p.realized_pnl)
+            .unwrap_or(0.0);
+
+        new_realized - prev_realized
     }
 
     // -- Accessors --

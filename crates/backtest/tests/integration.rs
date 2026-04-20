@@ -732,7 +732,51 @@ fn test_backtest_engine_deterministic_replay() {
     for (t1, t2) in result1.trades.iter().zip(result2.trades.iter()) {
         assert!((t1.fill_price - t2.fill_price).abs() < 1e-10);
         assert!((t1.slippage - t2.slippage).abs() < 1e-10);
+        assert!((t1.pnl - t2.pnl).abs() < 1e-10, "PnL mismatch: {} vs {}", t1.pnl, t2.pnl);
         assert_eq!(t1.strategy_id, t2.strategy_id);
+    }
+}
+
+#[test]
+fn test_backtest_engine_individual_trade_pnl() {
+    use fx_backtest::engine::{generate_synthetic_ticks, BacktestConfig, BacktestEngine};
+
+    // Generate enough events to produce multiple trades
+    let events = generate_synthetic_ticks(NS_BASE, 500, 50, 110.0, 0.005);
+
+    let config = BacktestConfig {
+        rng_seed: Some([42u8; 32]),
+        ..Default::default()
+    };
+    let mut engine = BacktestEngine::new(config);
+    let result = engine.run_from_events(&events);
+
+    if result.trades.len() >= 2 {
+        // Verify: each trade has its own individual PnL (not all equal to total)
+        let total_pnl: f64 = result.trades.iter().map(|t| t.pnl).sum();
+        let all_same = result
+            .trades
+            .iter()
+            .all(|t| (t.pnl - result.trades[0].pnl).abs() < 1e-10);
+
+        // If all trades have the same PnL value, it's the bug (all get the cumulative total)
+        if all_same && result.trades.len() > 1 {
+            panic!(
+                "Bug: all {} trades have the same PnL = {}. Expected individual PnLs that sum to {}.",
+                result.trades.len(),
+                result.trades[0].pnl,
+                total_pnl
+            );
+        }
+
+        // Verify: sum of individual PnLs equals the summary's total_pnl
+        let summary_total = result.summary.total_pnl;
+        assert!(
+            (total_pnl - summary_total).abs() < 1e-6,
+            "Sum of trade PnLs ({}) != summary total_pnl ({})",
+            total_pnl,
+            summary_total
+        );
     }
 }
 

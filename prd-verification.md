@@ -78,11 +78,8 @@ struct DataTick {
       "stats.rsのtotal_pnl/realized_pnl集計が修正後の個別PnLを正しく合算することを確認",
       "既存テストが全て通ることを確認し、PnL計算の回帰テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
-  {
-    "category": "bugfix",
-    "description": "Change Point Detection誤検出テストの修正",
     "steps": [
       "test_no_detection_stable_distributionの失敗原因を特定: t=132での誤検出メカニズムを分析",
       "ADWINアルゴリズムの閾値パラメータが安定分布に対して適切か確認",
