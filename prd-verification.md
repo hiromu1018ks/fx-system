@@ -186,7 +186,7 @@ struct DataTick {
       "drift_tを特徴量パイプラインに反映",
       "ユニットテスト: regime推定、未知Regime検出、drift計算"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

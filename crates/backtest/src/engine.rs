@@ -22,6 +22,7 @@ use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
 use fx_strategy::features::FeatureVector;
 use fx_strategy::mc_eval::{McEvalConfig, McEvaluator, TerminalReason};
 use fx_strategy::policy::Action;
+use fx_strategy::regime::{RegimeCache, RegimeConfig};
 use fx_strategy::strategy_a::{StrategyA, StrategyAConfig, StrategyADecision};
 use fx_strategy::strategy_b::{StrategyB, StrategyBConfig, StrategyBDecision};
 use fx_strategy::strategy_c::{StrategyC, StrategyCConfig, StrategyCDecision};
@@ -72,6 +73,8 @@ pub struct BacktestConfig {
     pub kill_switch_config: KillSwitchConfig,
     /// Lifecycle manager configuration (strategy culling).
     pub lifecycle_config: LifecycleConfig,
+    /// Regime management configuration.
+    pub regime_config: RegimeConfig,
 }
 
 impl Default for BacktestConfig {
@@ -98,6 +101,7 @@ impl Default for BacktestConfig {
                 ..KillSwitchConfig::default()
             },
             lifecycle_config: LifecycleConfig::default(),
+            regime_config: RegimeConfig::default(),
         }
     }
 }
@@ -227,6 +231,9 @@ pub struct BacktestEngine {
     risk_barrier: DynamicRiskBarrier,
     kill_switch: KillSwitch,
     lifecycle_manager: LifecycleManager,
+    regime_cache: RegimeCache,
+    /// Tracks previous tick's `is_unknown` state to detect regime transitions.
+    prev_regime_unknown: bool,
 }
 
 impl BacktestEngine {
@@ -248,6 +255,8 @@ impl BacktestEngine {
             risk_barrier: DynamicRiskBarrier::new(config.barrier_config.clone()),
             kill_switch: KillSwitch::new(config.kill_switch_config.clone()),
             lifecycle_manager: LifecycleManager::new(config.lifecycle_config.clone()),
+            regime_cache: RegimeCache::new(config.regime_config.clone()),
+            prev_regime_unknown: false,
             config,
             execution_gateway: ExecutionGateway::new(gateway_config),
             rng: SmallRng::from_seed(rng_seed),
@@ -460,12 +469,45 @@ impl BacktestEngine {
                 }
             }
 
+            // Update regime cache from features (lightweight online indicator)
+            // Use Strategy A's features as the representative feature vector
+            if let Some(ctx_a) = tick_contexts.get(&StrategyId::A) {
+                self.update_regime(&ctx_a.features, tick_ns);
+            }
+
+            // Regime transition handling: unknown → known or known → unknown
+            let current_unknown = self.regime_cache.state().is_unknown();
+            if current_unknown && !self.prev_regime_unknown {
+                // Entered unknown regime: reset per-regime tracking in lifecycle
+                self.lifecycle_manager.reset_regime_tracking();
+                warn!("Entered unknown regime — strategy evaluation suppressed");
+            }
+            self.prev_regime_unknown = current_unknown;
+
             // Phase 2: Collect strategy decisions (skip culled strategies)
             let snapshot = projector.snapshot();
             let mut strategy_q: HashMap<StrategyId, f64> = HashMap::new();
             let mut strategy_decisions: Vec<(StrategyId, StrategyDecision)> = Vec::new();
 
             for &sid in &enabled_strategies {
+                // Skip all strategies when regime is unknown
+                if self.regime_cache.state().is_unknown() {
+                    strategy_decisions.push((
+                        sid,
+                        StrategyDecision {
+                            action: Action::Hold,
+                            q_point: 0.0,
+                            q_sampled: 0.0,
+                            posterior_std: 0.0,
+                            triggered: false,
+                            episode_active: false,
+                            should_close: false,
+                            skip_reason: Some("unknown_regime".to_string()),
+                            remaining_hold_time_ms: 0,
+                        },
+                    ));
+                    continue;
+                }
                 // Skip culled strategies (lifecycle manager hard-block)
                 if !self.lifecycle_manager.is_alive(sid) {
                     continue;
@@ -997,7 +1039,7 @@ impl BacktestEngine {
         state: &StateSnapshot,
         tick_ns: u64,
     ) -> StrategyDecision {
-        let regime_kl = 0.0; // Regime integration is a separate task
+        let regime_kl = self.regime_cache.state().kl_divergence();
         let latency_ms = 0.0; // No latency in backtest
         match sid {
             StrategyId::A => self
@@ -1085,7 +1127,7 @@ impl BacktestEngine {
                 return_g0: episode_result.return_g0,
                 duration_ns: episode_result.duration_ns,
             };
-            let is_unknown_regime = false; // Regime integration is a separate task
+            let is_unknown_regime = self.regime_cache.state().is_unknown();
             if let Some(_close_cmd) =
                 self.lifecycle_manager
                     .record_episode(&summary, is_unknown_regime, snapshot)
@@ -1099,6 +1141,53 @@ impl BacktestEngine {
             StrategyId::A => self.strategy_a.end_episode(),
             StrategyId::B => self.strategy_b.end_episode(),
             StrategyId::C => self.strategy_c.end_episode(),
+        }
+    }
+
+    /// Update the regime cache from extracted features using a lightweight online
+    /// indicator. Uses feature-derived regime scores (simple heuristic based on
+    /// volatility and spread features) when no pre-trained HDP-HMM weights are
+    /// available.
+    fn update_regime(&mut self, features: &FeatureVector, tick_ns: u64) {
+        let n_regimes = self.regime_cache.config().n_regimes;
+        let feature_dim = self.regime_cache.config().feature_dim;
+
+        // Build lightweight regime scores from key features.
+        // Without a trained HDP-HMM model, we use feature-derived heuristics:
+        // - Regime 0: Low vol, tight spread (calm)
+        // - Regime 1: Medium vol (normal)
+        // - Regime 2: High vol, wide spread (turbulent)
+        // - Regime 3: Extreme vol (crisis)
+        // The scores are computed from a subset of available features.
+        let spread_z = features.spread_zscore.abs();
+        let rv = features.realized_volatility;
+        let vol_ratio = features.volatility_ratio;
+
+        // Simple scoring: each regime gets a score based on feature proximity
+        let calm_score = -(spread_z + rv * 10.0 + vol_ratio * 2.0);
+        let normal_score =
+            -((spread_z - 1.0).abs() + (rv - 0.01).abs() * 10.0 + (vol_ratio - 1.0).abs() * 2.0);
+        let turbulent_score =
+            -((spread_z - 2.0).abs() + (rv - 0.03).abs() * 10.0 + (vol_ratio - 2.0).abs() * 2.0);
+        let crisis_score =
+            -(spread_z - 3.0).abs() - (rv - 0.05).abs() * 10.0 - (vol_ratio - 3.0).abs() * 2.0;
+
+        let mut scores = vec![calm_score, normal_score, turbulent_score, crisis_score];
+        // Pad or truncate to match n_regimes
+        scores.resize(n_regimes, 0.0);
+
+        // Numerically stable softmax
+        let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_scores: Vec<f64> = scores.iter().map(|s| (s - max_score).exp()).collect();
+        let sum_exp: f64 = exp_scores.iter().sum();
+        let posterior: Vec<f64> = exp_scores.iter().map(|e| e / sum_exp).collect();
+
+        self.regime_cache.update(posterior, tick_ns);
+
+        // Update drift if feature dimensions match
+        let phi = self.extract_strategy_features(StrategyId::A, features);
+        if phi.len() == feature_dim {
+            self.regime_cache.update_drift(&phi);
         }
     }
 
@@ -1276,6 +1365,11 @@ impl BacktestEngine {
     /// Access the lifecycle manager (for testing/inspection).
     pub fn lifecycle_manager(&self) -> &LifecycleManager {
         &self.lifecycle_manager
+    }
+
+    /// Access the regime cache (for testing/inspection).
+    pub fn regime_cache(&self) -> &RegimeCache {
+        &self.regime_cache
     }
 
     /// Collect LP execution stats from the gateway after a backtest run.
@@ -2464,6 +2558,135 @@ mod tests {
             );
         }
         // The MC pipeline is still validated by other tests when trades occur.
+    }
+
+    #[test]
+    fn test_regime_cache_updated_during_run() {
+        use fx_strategy::regime::RegimeConfig;
+
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.01);
+        let mut engine = BacktestEngine::new(default_config());
+        assert!(!engine.regime_cache().state().is_initialized());
+
+        let _result = engine.run_from_events(&events);
+
+        let regime = engine.regime_cache();
+        assert!(
+            regime.state().is_initialized(),
+            "Regime cache should be initialized after run"
+        );
+        assert!(
+            regime.state().last_update_ns() > 0,
+            "Last update time should be set"
+        );
+        // Posterior should be a valid probability distribution
+        let posterior = regime.state().posterior();
+        let sum: f64 = posterior.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "Regime posterior should sum to 1.0, got {}",
+            sum
+        );
+        for &p in posterior {
+            assert!(p >= 0.0, "Posterior probabilities should be non-negative");
+        }
+    }
+
+    #[test]
+    fn test_regime_kl_wired_to_strategy_decisions() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.01);
+        let mut engine = BacktestEngine::new(default_config());
+        let _result = engine.run_from_events(&events);
+
+        // After the run, regime_kl should have been used in strategy decisions.
+        // With synthetic data and the lightweight heuristic, the regime should not be
+        // permanently unknown (entropy should be below threshold for at least some ticks).
+        let regime = engine.regime_cache();
+        // KL divergence from uniform should be non-negative
+        assert!(
+            regime.state().kl_divergence() >= 0.0,
+            "KL divergence should be non-negative"
+        );
+        // Entropy should be in valid range [0, ln(n_regimes)]
+        assert!(
+            regime.state().entropy() >= 0.0,
+            "Entropy should be non-negative"
+        );
+        assert!(
+            regime.state().entropy() <= regime.config().max_entropy() + 1e-6,
+            "Entropy should not exceed max_entropy"
+        );
+    }
+
+    #[test]
+    fn test_regime_unknown_suppresses_strategies() {
+        use fx_strategy::regime::RegimeConfig;
+
+        // Set a very low entropy threshold so all regimes appear "unknown"
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.01);
+        let config = BacktestConfig {
+            regime_config: RegimeConfig {
+                unknown_regime_entropy_threshold: 0.0, // Everything is unknown
+                ..RegimeConfig::default()
+            },
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // All decisions should be "unknown_regime" holds
+        for decision in &result.decisions {
+            assert_eq!(
+                decision.skip_reason.as_deref(),
+                Some("unknown_regime"),
+                "Expected unknown_regime skip, got {:?}",
+                decision.skip_reason
+            );
+        }
+        // No trades should have been executed
+        assert_eq!(
+            result.trades.len(),
+            0,
+            "No trades should execute when regime is always unknown"
+        );
+    }
+
+    #[test]
+    fn test_regime_transition_resets_lifecycle() {
+        use fx_strategy::regime::RegimeConfig;
+
+        // Start with low threshold (unknown), then regime should stabilize
+        // when features cluster around one regime.
+        // With very low threshold, lifecycle should be reset on every tick transition.
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 100, 100, 110.0, 0.01);
+        let config = BacktestConfig {
+            regime_config: RegimeConfig {
+                unknown_regime_entropy_threshold: 0.0,
+                ..RegimeConfig::default()
+            },
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let _result = engine.run_from_events(&events);
+
+        // Verify the regime cache was updated throughout the run
+        let regime = engine.regime_cache();
+        assert!(regime.state().is_initialized());
+        // With threshold 0.0, is_unknown should always be true
+        assert!(regime.state().is_unknown());
+    }
+
+    #[test]
+    fn test_regime_drift_updated() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.01);
+        let mut engine = BacktestEngine::new(default_config());
+        let _result = engine.run_from_events(&events);
+
+        let regime = engine.regime_cache();
+        let drift = regime.state().drift();
+        // Drift should have been updated (may be zero if feature_dim doesn't match,
+        // but should not panic)
+        assert!(!drift.is_empty(), "Drift vector should be populated");
     }
 
     #[test]

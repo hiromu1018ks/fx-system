@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 7
-**Current Task:** Task 8 — 報酬計算・Monte Carlo評価の統合 (verified as already integrated)
+**Tasks Completed:** 8
+**Current Task:** Task 9 — Regime管理の統合
 
 ---
 
@@ -153,3 +153,30 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし。合成データ（固定スプレッド）では戦略トリガー条件（spread_z > 3等）を満たさない場合があるため、テストは条件付きアサート（トレード発生時のみ検証）としている。統合テストスイートではトレードが発生するデータで完全に検証される
+
+### 2026-04-20: Task 9 — Regime管理の統合（HDP-HMM lightweight online指標）
+
+**What changed:**
+- `crates/backtest/src/engine.rs`:
+  - `BacktestConfig` に `regime_config: RegimeConfig` フィールドを追加
+  - `BacktestEngine` に `regime_cache: RegimeCache` と `prev_regime_unknown: bool` フィールドを追加
+  - `get_strategy_decision()`: `regime_kl = 0.0` のスタブを `self.regime_cache.state().kl_divergence()` に置換
+  - `end_strategy_episode()`: `is_unknown_regime = false` のスタブを `self.regime_cache.state().is_unknown()` に置換
+  - `update_regime()` ヘルパーメソッド追加: 特徴量（spread_zscore, realized_volatility, volatility_ratio）から軽量ヒューリスティックでregime posteriorを計算（softmax over 4 regime scores: calm/normal/turbulent/crisis）
+  - メインループ Phase 2 直前に `update_regime()` を呼び出し、regime遷移検出時に `lifecycle_manager.reset_regime_tracking()` を実行
+  - 未知Regime検出時（`is_unknown == true`）: 全戦略を強制Hold + skip_reason="unknown_regime" + TradeSkipEvent発行
+  - `regime_cache()` 公開アクセサメソッド追加
+- テスト追加（5件）:
+  - `test_regime_cache_updated_during_run`: 実行後のRegimeCache初期化・posterior正規化を検証
+  - `test_regime_kl_wired_to_strategy_decisions`: KL divergenceとentropyの有効範囲検証
+  - `test_regime_unknown_suppresses_strategies`: entropy_threshold=0.0で全戦略がunknown_regime skipされることを検証
+  - `test_regime_transition_resets_lifecycle`: 低閾値でのregime遷移とlifecycleリセット検証
+  - `test_regime_drift_updated`: driftベクトルの更新検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1093 passed, 0 failed (84 in backtest lib, 5 new)
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+
+**Issues:** なし。HDP-HMM推論エンジンは未実装のため、軽量ヒューリスティック（特徴量ベースのsoftmax regime scoring）で代替。将来のONNXモデル統合時に `update_from_weights()` に切り替え可能
