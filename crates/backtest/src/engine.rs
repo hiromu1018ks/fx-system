@@ -10,6 +10,8 @@ use fx_events::store::EventStore;
 use fx_execution::gateway::{
     ExecutionGateway, ExecutionGatewayConfig, ExecutionRequest, ExecutionResult,
 };
+use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
+use fx_strategy::features::FeatureVector;
 use prost::Message as _;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -37,6 +39,8 @@ pub struct BacktestConfig {
     pub default_lot_size: u64,
     /// Seed for reproducible RNG (None = random).
     pub rng_seed: Option<[u8; 32]>,
+    /// Feature extractor configuration.
+    pub feature_extractor_config: FeatureExtractorConfig,
 }
 
 impl Default for BacktestConfig {
@@ -49,6 +53,7 @@ impl Default for BacktestConfig {
             global_position_limit: 10.0,
             default_lot_size: 100_000,
             rng_seed: None,
+            feature_extractor_config: FeatureExtractorConfig::default(),
         }
     }
 }
@@ -66,6 +71,17 @@ pub struct BacktestDecision {
     pub lots: u64,
     pub triggered: bool,
     pub skip_reason: Option<String>,
+}
+
+/// Intermediate context for a single tick, carrying extracted features alongside
+/// market data. Passed to Strategy evaluation and Risk checks in subsequent tasks.
+#[derive(Debug, Clone)]
+pub struct TickContext {
+    pub timestamp_ns: u64,
+    pub mid_price: f64,
+    pub spread: f64,
+    pub volatility: f64,
+    pub features: FeatureVector,
 }
 
 /// Result of a backtest run.
@@ -193,6 +209,8 @@ impl BacktestEngine {
 
         let bus = PartitionedEventBus::new();
         let mut projector = StateProjector::new(&bus, self.config.global_position_limit, 1);
+        let mut feature_extractor =
+            FeatureExtractor::new(self.config.feature_extractor_config.clone());
 
         let mut trades: Vec<TradeRecord> = Vec::new();
         let mut decisions: Vec<BacktestDecision> = Vec::new();
@@ -212,6 +230,9 @@ impl BacktestEngine {
                 continue;
             }
 
+            // Update feature extractor rolling windows with this market event
+            feature_extractor.process_market_event(event);
+
             let market_payload = match proto::MarketEventPayload::decode(event.payload_bytes()) {
                 Ok(p) => p,
                 Err(_) => continue,
@@ -220,6 +241,23 @@ impl BacktestEngine {
             let mid_price = (market_payload.bid + market_payload.ask) / 2.0;
             let spread = market_payload.ask - market_payload.bid;
             let volatility = spread / mid_price;
+
+            let snapshot = projector.snapshot();
+
+            // Extract features for each known strategy into TickContext
+            let _tick_contexts: Vec<TickContext> = StrategyId::all()
+                .iter()
+                .map(|&sid| {
+                    let features = feature_extractor.extract(event, snapshot, sid, tick_ns);
+                    TickContext {
+                        timestamp_ns: tick_ns,
+                        mid_price,
+                        spread,
+                        volatility,
+                        features,
+                    }
+                })
+                .collect();
 
             // Collect open positions (avoids borrow conflict with &mut projector)
             let open_positions =
@@ -243,13 +281,19 @@ impl BacktestEngine {
                 );
 
                 if result.filled {
-                    let trade_pnl = self.process_execution_result(
+                    let (trade_pnl, exec_event) = self.process_execution_result(
                         pos_snap.strategy_id,
                         &result,
                         direction,
                         tick_ns,
                         &mut projector,
                     );
+
+                    // Feed execution event back to feature extractor for lagged stats
+                    if let Some(ref exec_ev) = exec_event {
+                        feature_extractor.process_execution_event(exec_ev);
+                    }
+
                     let trade = TradeRecord {
                         timestamp_ns: tick_ns,
                         strategy_id: pos_snap.strategy_id,
@@ -316,7 +360,7 @@ impl BacktestEngine {
                     );
 
                     if result.filled {
-                        let trade_pnl = self.process_execution_result(
+                        let (trade_pnl, _) = self.process_execution_result(
                             pos_snap.strategy_id,
                             &result,
                             direction,
@@ -467,7 +511,8 @@ impl BacktestEngine {
             })
     }
 
-    /// Process an execution result through the projector and return the per-trade PnL delta.
+    /// Process an execution result through the projector and return the per-trade PnL delta
+    /// along with the constructed execution event for downstream use (e.g. feature extractor).
     fn process_execution_result(
         &self,
         strategy_id: StrategyId,
@@ -475,9 +520,9 @@ impl BacktestEngine {
         direction: Direction,
         timestamp_ns: u64,
         projector: &mut StateProjector,
-    ) -> f64 {
+    ) -> (f64, Option<GenericEvent>) {
         if !result.filled {
-            return 0.0;
+            return (0.0, None);
         }
 
         let prev_realized = projector
@@ -530,7 +575,7 @@ impl BacktestEngine {
             .map(|p| p.realized_pnl)
             .unwrap_or(0.0);
 
-        new_realized - prev_realized
+        (new_realized - prev_realized, Some(generic_event))
     }
 
     // -- Accessors --
@@ -638,6 +683,7 @@ mod tests {
             global_position_limit: 10.0,
             default_lot_size: 100_000,
             rng_seed: Some([42u8; 32]),
+            feature_extractor_config: FeatureExtractorConfig::default(),
         }
     }
 
@@ -823,6 +869,80 @@ mod tests {
     #[test]
     fn test_execution_gateway_accessible() {
         let engine = BacktestEngine::new(default_config());
+        assert!(!engine.execution_gateway().active_lp_id().is_empty());
+    }
+
+    #[test]
+    fn test_feature_extractor_integration_with_synthetic_data() {
+        use fx_strategy::features::FeatureVector;
+
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 300, 100, 110.0, 0.005);
+
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            feature_extractor_config: FeatureExtractorConfig::default(),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        assert_eq!(result.total_ticks, 300);
+
+        // Manually run FeatureExtractor to verify features are computed
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig::default());
+        for event in &events {
+            extractor.process_market_event(event);
+        }
+
+        // After processing enough events, feature extraction should produce valid vectors
+        let bus = PartitionedEventBus::new();
+        let projector = StateProjector::new(&bus, 10.0, 1);
+        let snapshot = projector.snapshot();
+
+        for &sid in StrategyId::all() {
+            let features = extractor.extract(
+                &events[250],
+                &snapshot,
+                sid,
+                events[250].header.timestamp_ns,
+            );
+            // Verify the FeatureVector has expected dimension
+            let flat = features.flattened();
+            assert_eq!(flat.len(), FeatureVector::DIM);
+
+            // Spread should be positive (ask > bid in synthetic data)
+            assert!(features.spread > 0.0, "spread should be positive");
+
+            // Realized volatility should be non-negative after enough ticks
+            assert!(
+                features.realized_volatility >= 0.0,
+                "volatility should be non-negative"
+            );
+
+            // Position-related features should be zero (no positions opened)
+            assert!(
+                features.position_size.abs() < f64::EPSILON,
+                "position_size should be zero with no positions"
+            );
+        }
+    }
+
+    #[test]
+    fn test_feature_extractor_config_customizable() {
+        let custom_config = FeatureExtractorConfig {
+            spread_window: 50,
+            obi_window: 50,
+            vol_window: 30,
+            ..FeatureExtractorConfig::default()
+        };
+
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            feature_extractor_config: custom_config,
+            ..default_config()
+        };
+
+        let engine = BacktestEngine::new(config);
         assert!(!engine.execution_gateway().active_lp_id().is_empty());
     }
 }

@@ -112,7 +112,7 @@ struct DataTick {
       "特徴量ベクトルがStrategyとRiskの評価に渡せるよう、中間データ構造を定義",
       "ユニットテスト: 合成データで特徴量が正しく抽出されることを確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 0
+**Tasks Completed:** 1
 **Current Task:** None started
 
 ---
@@ -61,5 +61,30 @@
 - `cargo test` — 463 passed, 0 failed
 - `cargo clippy` — no warnings
 - `cargo fmt` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 4 — FeatureExtractorのBacktestEngine統合
+
+**What changed:**
+- `crates/core/src/types.rs`: `StrategyId::all()` メソッド追加（A/B/Cの全戦略IDスライスを返す）
+- `crates/backtest/src/engine.rs`:
+  - `FeatureExtractor` と `FeatureVector` のインポート追加（`fx_strategy` クレート）
+  - `BacktestConfig` に `feature_extractor_config: FeatureExtractorConfig` フィールド追加
+  - `TickContext` 構造体定義: タイムスタンプ、mid_price、spread、volatility、FeatureVectorを持つ中間データ構造
+  - `run_inner()` に `FeatureExtractor` 初期化とパイプライン統合:
+    - 各ティックで `process_market_event()` を呼び出し、ローリングウィンドウを更新
+    - 各戦略IDについて `extract()` を呼び出し、FeatureVectorを生成してTickContextを構築
+    - 実行イベント発生後、`process_execution_event()` でラグ付き実行統計を更新
+  - `process_execution_result()` の戻り値を `f64` → `(f64, Option<GenericEvent>)` に変更し、生成した実行イベントをFeatureExtractorに渡せるようにした
+- `crates/backtest/src/engine.rs` テスト追加:
+  - `test_feature_extractor_integration_with_synthetic_data`: 300ティックの合成データで特徴量抽出を検証
+  - `test_feature_extractor_config_customizable`: カスタムFeatureExtractorConfigでエンジン生成を確認
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 465 passed (2 new), 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
 
 **Issues:** なし

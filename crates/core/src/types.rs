@@ -27,3 +27,9 @@ pub enum StrategyId {
     B,
     C,
 }
+
+impl StrategyId {
+    pub fn all() -> &'static [StrategyId] {
+        &[StrategyId::A, StrategyId::B, StrategyId::C]
+    }
+}
