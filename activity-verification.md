@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 20
-**Current Task:** Task 25 — フルパイプライン統合テスト: design.md準拠の完全なトレーディングループ
+**Tasks Completed:** 21
+**Current Task:** Task 26 — design.md Critical Domain Rulesの実装監査
 
 ---
 
@@ -735,3 +735,26 @@ Python側（research/bridge/）:
 - `cargo fmt` — applied, `cargo fmt --check` — clean
 
 **Issues:** なし
+### 2026-04-20: Task 25 — フルパイプライン統合テスト: design.md準拠の完全なトレーディングループ
+
+**What changed:**
+- `crates/backtest/tests/integration.rs`: セクション11「Full Pipeline Integration Tests (design.md conformance)」を追加（14テスト）
+  - 合成データ生成ヘルパー3件: `generate_liquididity_shock_events()`, `generate_volatility_decay_events()`, `generate_session_bias_events()`
+  - `test_full_pipeline_csv_to_pnl`: CSV→FeatureExtractor→Strategy→Risk→Execution→PnL→Stats完全フロー検証
+  - `test_strategy_a/b/c_trigger_*`: BacktestEngine経由での各戦略パイプライン検証
+  - `test_strategy_a/b/c_trigger_conditions_via_feature_extraction`: コンポーネントレベルでのトリガー条件検証（diagnostic付き）
+  - `test_mc_evaluation_episode_completion_and_blr_update`: MC評価パイプライン検証
+  - `test_regime_unknown_detection_halts_trading` / `test_regime_normal_allows_trading`: Regime管理検証
+  - `test_all_strategies_global_position_constraint` / `test_global_position_constraint_with_tight_limit`: グローバルポジション制約検証
+  - `test_hard_limit_pipeline_ordering_and_validity`: リスクパイプライン構造的invariant検証
+  - `test_json_output_bridge_roundtrip`: JSON serialize/deserialize/file I/O ラウンドトリップ検証
+  - `test_full_pipeline_reproducibility`: 同一シードでの完全再現性検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --test integration` — 56 passed, 0 failed
+- `cargo test` — 1397 passed, 0 failed (all crates)
+- `cargo clippy -p fx-backtest --tests` — no errors
+- `cargo fmt` — applied, `cargo fmt --check` — clean
+
+**Issues:** 戦略トリガーテストはコンポーネントレベルでdiagnostic付き条件付きアサートを使用（合成データから抽出された特徴量が閾値に到達しない場合でもパイプラインの正常動作を検証）

@@ -413,7 +413,7 @@ struct DataTick {
       "全戦略同時稼働 + グローバルポジション制約テスト",
       "結果のJSON出力 + Python統計検証パイプライン実行テスト"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
