@@ -258,7 +258,7 @@ struct DataTick {
       "CLI サブコマンド validate 追加: cargo run --bin fx-cli -- validate --backtest-result <JSON> --python-path <PATH>",
       "ユニットテスト: JSON出力の読み書き、Python連携のモックテスト"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

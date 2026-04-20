@@ -16,6 +16,8 @@ pub enum Commands {
     Backtest(BacktestCmd),
     /// Run a forward test (paper trading) using recorded or live data.
     ForwardTest(ForwardTestCmd),
+    /// Validate a backtest result using the Python statistical pipeline.
+    Validate(ValidateCmd),
 }
 
 /// Backtest subcommand arguments.
@@ -80,6 +82,26 @@ pub struct ForwardTestCmd {
     /// RNG seed for reproducibility.
     #[arg(long, default_value_t = 42)]
     pub seed: u64,
+}
+
+/// Validate subcommand arguments.
+#[derive(Parser, Debug)]
+pub struct ValidateCmd {
+    /// Path to backtest result JSON file to validate.
+    #[arg(short, long)]
+    pub backtest_result: PathBuf,
+
+    /// Path to Python interpreter (default: "python3").
+    #[arg(long, default_value = "python3")]
+    pub python_path: String,
+
+    /// Output directory for validation results.
+    #[arg(short, long, default_value = ".")]
+    pub output: Option<PathBuf>,
+
+    /// Number of features used by the strategy (overrides JSON value).
+    #[arg(long)]
+    pub num_features: Option<usize>,
 }
 
 #[cfg(test)]
@@ -203,5 +225,52 @@ mod tests {
     fn test_parse_version() {
         let result = Cli::try_parse_from(["fx-cli", "--version"]);
         assert!(result.is_err()); // --version causes early exit, which clap reports as error
+    }
+
+    #[test]
+    fn test_parse_validate_minimal() {
+        let cli = Cli::try_parse_from(["fx-cli", "validate", "--backtest-result", "result.json"]);
+        assert!(cli.is_ok());
+        let cli = cli.unwrap();
+        match cli.command {
+            Commands::Validate(cmd) => {
+                assert_eq!(cmd.backtest_result, PathBuf::from("result.json"));
+                assert_eq!(cmd.python_path, "python3");
+            }
+            _ => panic!("expected Validate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_validate_full() {
+        let cli = Cli::try_parse_from([
+            "fx-cli",
+            "validate",
+            "--backtest-result",
+            "backtest.json",
+            "--python-path",
+            "/usr/bin/python3",
+            "--output",
+            "/tmp/validation",
+            "--num-features",
+            "30",
+        ]);
+        assert!(cli.is_ok());
+        let cli = cli.unwrap();
+        match cli.command {
+            Commands::Validate(cmd) => {
+                assert_eq!(cmd.backtest_result, PathBuf::from("backtest.json"));
+                assert_eq!(cmd.python_path, "/usr/bin/python3");
+                assert_eq!(cmd.output, Some(PathBuf::from("/tmp/validation")));
+                assert_eq!(cmd.num_features, Some(30));
+            }
+            _ => panic!("expected Validate command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_validate_missing_input_fails() {
+        let result = Cli::try_parse_from(["fx-cli", "validate"]);
+        assert!(result.is_err());
     }
 }

@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 12
-**Current Task:** Task 14 — Rust ↔ Python連携ブリッジ（JSON I/O）の実装
+**Tasks Completed:** 13
+**Current Task:** Task 15 — 統計的検証パイプラインのE2Eテスト（Python側）
 
 ---
 
@@ -296,3 +296,54 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし。`VecEventStore`は`RecordedDataFeed`のジェネリクス`<S: EventStore>`に適合するよう`Mutex<Vec<GenericEvent>>`で実装。`ForwardTestRunner`のasync `run()`は`tokio::runtime::Runtime::block_on()`で同期的に実行
+
+### 2026-04-20: Task 14 — Rust ↔ Python連携ブリッジ（JSON I/O）の実装
+
+**What changed:**
+
+Rust側（crates/cli/）:
+- `src/output.rs`: ブリッジ用強化JSON出力を追加
+  - `BacktestBridgeJson`: 個別トレードPnL、returns配列、戦略別内訳、num_features、execution_statsを含む構造化JSON
+  - `BridgeSummary/BridgeTrade/BridgeStrategyBreakdown/BridgeExecutionStats`: ブリッジ用シリアライズ構造体
+  - `write_backtest_result_for_bridge()`: ブリッジ用JSON + trades.csv出力
+  - `ValidationResult/ValidationCheckResult`: Python検証結果JSONの読み込み用デシリアライズ構造体
+  - `ValidationResult::from_json_file()`: JSONファイルから検証結果を読み込み
+  - `ValidationResult::print_summary()`: 検証結果の表示（PASS/FAIL表示）
+  - `BridgeBacktestData/BridgeSummaryRead`: バックテストJSONの読み込み用構造体
+- `src/args.rs`: `Validate`サブコマンド追加
+  - `ValidateCmd`: `--backtest-result`, `--python-path` (default: "python3"), `--output`, `--num-features`
+  - `Commands::Validate`バリアント追加
+- `src/main.rs`: `run_validate()`実装
+  - バックテスト結果JSON → Python bridge CLI呼び出し（subprocess） → 検証結果JSON読み込み → サマリー表示
+  - `find_bridge_script()`: `research/bridge/cli.py`を自動検索
+
+Python側（research/bridge/）:
+- `__init__.py`: モジュールドキュメント
+- `loader.py`: バックテスト結果JSONの読み込み、returns配列抽出、num_features抽出
+- `runner.py`: バリデーションパイプラインの実行（CPCV/PBO/DSR/Sharpe Ceiling/Complexity Penalty）、データ不足時のフォールバック
+- `output.py`: 検証結果のJSON出力
+- `cli.py`: CLI エントリポイント（`--input`, `--output`, `--num-features`）
+
+テスト追加:
+- Rust ユニットテスト (10件):
+  - `test_parse_validate_minimal/full/missing_input_fails`: Validateサブコマンド引数パース
+  - `test_bridge_json_includes_trades_and_returns`: ブリッジJSONの全構造検証（trades, returns, strategy_breakdown, execution_stats）
+  - `test_bridge_json_strategy_breakdown_aggregation`: 戦略別集計の正確性
+  - `test_validation_result_reads_json/reads_failed/missing_file_errors/invalid_json_errors`: 検証結果JSON読み込み
+  - `test_bridge_backtest_data_reads_json`: バックテストJSON読み込み
+- Python テスト (12件 - `research/tests/test_bridge.py`):
+  - `TestLoader` (6件): ファイル読み込み、returns抽出（field/trades/no data）、num_features抽出
+  - `TestRunner` (4件): バリデーション実行、データ不足、空returns、チェック構造検証
+  - `TestOutput` (1件): 検証結果JSON出力
+  - `TestEndToEnd` (1件): フルラウンドトリップテスト（Rust→Python→Rust data flow）
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 全crate通過（fx-cli: 31 unit + 13 integration = 44 passed）
+- `cargo clippy` — エラーなし（dead_code警告のみ）
+- `cargo fmt --check` — clean
+- `python3 research/bridge/cli.py --help` — 動作確認OK
+- `python3 research/bridge/cli.py --input <json> --output <json>` — E2E検証PASSED: 4/4 checks
+- `pytest research/tests/test_bridge.py` — 12 passed, 0 failed
+
+**Issues:** なし。subprocessベースの連携によりpyo3の複雑な依存なしでRust-Python間のJSON I/Oを実現。ブリッジCLIは`research.analysis.pipeline.run_validation_pipeline()`を直接呼び出し

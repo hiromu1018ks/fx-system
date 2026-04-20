@@ -23,6 +23,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Backtest(cmd) => run_backtest(cmd),
         Commands::ForwardTest(cmd) => run_forward_test(cmd),
+        Commands::Validate(cmd) => run_validate(cmd),
     }
 }
 
@@ -372,6 +373,91 @@ fn parse_strategies(s: &str) -> Result<HashSet<StrategyId>> {
         anyhow::bail!("At least one strategy must be specified");
     }
     Ok(set)
+}
+
+fn run_validate(cmd: args::ValidateCmd) -> Result<()> {
+    info!(
+        backtest_result = ?cmd.backtest_result,
+        python_path = %cmd.python_path,
+        "Starting validation"
+    );
+
+    let result_path = &cmd.backtest_result;
+    if !result_path.exists() {
+        anyhow::bail!("Backtest result file not found: {}", result_path.display());
+    }
+
+    println!("Reading backtest result from {}", result_path.display());
+
+    // Find the bridge script — look in research/bridge/cli.py relative to project root
+    let bridge_script = find_bridge_script()?;
+
+    let output_dir = cmd.output.unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
+
+    let validation_output = output_dir.join("validation_result.json");
+
+    // Build arguments for Python bridge
+    let num_features_arg = cmd
+        .num_features
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "45".to_string());
+
+    println!("Running Python validation pipeline...");
+    let output = std::process::Command::new(&cmd.python_path)
+        .arg(&bridge_script)
+        .arg("--input")
+        .arg(result_path)
+        .arg("--output")
+        .arg(&validation_output)
+        .arg("--num-features")
+        .arg(&num_features_arg)
+        .output()
+        .with_context(|| format!("Failed to execute Python at '{}'", cmd.python_path))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Python validation failed:\n{stderr}");
+    }
+
+    if !validation_output.exists() {
+        anyhow::bail!(
+            "Python validation did not produce output: {}",
+            validation_output.display()
+        );
+    }
+
+    let validation = output::ValidationResult::from_json_file(&validation_output)?;
+    validation.print_summary();
+
+    info!(
+        all_passed = validation.all_passed,
+        n_passed = validation.n_passed,
+        n_failed = validation.n_failed,
+        "Validation completed"
+    );
+
+    Ok(())
+}
+
+fn find_bridge_script() -> Result<PathBuf> {
+    let candidates = [
+        PathBuf::from("research/bridge/cli.py"),
+        PathBuf::from("../research/bridge/cli.py"),
+    ];
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Ok(candidate.clone());
+        }
+    }
+    anyhow::bail!(
+        "Bridge script not found. Expected research/bridge/cli.py relative to working directory."
+    )
 }
 
 #[cfg(test)]
