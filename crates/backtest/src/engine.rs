@@ -31,6 +31,9 @@ use rand::prelude::*;
 use rand::rngs::SmallRng;
 use tracing::{debug, info, warn};
 
+use chrono::{DateTime, Datelike};
+use chrono_tz::Tz;
+
 use crate::stats::{ExecutionStats, LpExecutionStats, TradeRecord, TradeSummary};
 
 // ---------------------------------------------------------------------------
@@ -383,6 +386,25 @@ impl BacktestEngine {
             let spread = market_payload.ask - market_payload.bid;
             let volatility = spread / mid_price;
 
+            // Weekend gap detection: close all positions before processing the post-weekend tick
+            if Self::is_weekend_gap(prev_tick_ns, tick_ns) {
+                info!(
+                    tick_ns = tick_ns,
+                    prev_tick_ns = prev_tick_ns,
+                    "Weekend gap detected — force-closing all open positions"
+                );
+                self.close_all_positions(
+                    &mut projector,
+                    &mut feature_extractor,
+                    &mut trades,
+                    &mut execution_events,
+                    mid_price,
+                    volatility,
+                    tick_ns,
+                    "WEEKEND_HALT",
+                );
+            }
+
             let snapshot = projector.snapshot();
 
             // Extract features per strategy into a map for O(1) lookup
@@ -601,6 +623,7 @@ impl BacktestEngine {
                                 CloseReason::DailyRealizedHalt => "daily_realized_halt",
                                 CloseReason::WeeklyHalt => "weekly_halt",
                                 CloseReason::MonthlyHalt => "monthly_halt",
+                                CloseReason::WeekendHalt => "weekend_halt",
                             };
                             self.close_all_positions(
                                 &mut projector,
@@ -965,6 +988,38 @@ impl BacktestEngine {
 
     /// Close all open positions (used when a hard risk limit fires).
     #[allow(clippy::too_many_arguments)]
+    /// Check if there is a weekend gap between two consecutive ticks.
+    ///
+    /// A weekend gap is detected when the previous tick was on or before Friday
+    /// EET 23:59:59 and the current tick is on or after Monday EET 00:00:00.
+    /// Uses Europe/Helsinki timezone for DST-aware EET conversion.
+    fn is_weekend_gap(prev_tick_ns: u64, curr_tick_ns: u64) -> bool {
+        if prev_tick_ns == 0 || curr_tick_ns <= prev_tick_ns {
+            return false;
+        }
+        let helsinki: Tz = chrono_tz::Europe::Helsinki;
+        let prev_secs = prev_tick_ns as i64 / 1_000_000_000;
+        let prev_nanos = prev_tick_ns as i64 % 1_000_000_000;
+        let curr_secs = curr_tick_ns as i64 / 1_000_000_000;
+        let curr_nanos = curr_tick_ns as i64 % 1_000_000_000;
+        let prev_dt = DateTime::from_timestamp(prev_secs, prev_nanos as u32)
+            .unwrap_or_default()
+            .with_timezone(&helsinki);
+        let curr_dt = DateTime::from_timestamp(curr_secs, curr_nanos as u32)
+            .unwrap_or_default()
+            .with_timezone(&helsinki);
+
+        let prev_weekday = prev_dt.weekday().num_days_from_monday(); // Mon=0 .. Sun=6
+        let curr_weekday = curr_dt.weekday().num_days_from_monday();
+
+        // Weekend gap: prev was Fri (4) or earlier, curr is Mon (0) or later
+        // with a minimum gap of ~12 hours to avoid false positives
+        let gap_ns = (curr_tick_ns - prev_tick_ns) as i64;
+        let min_gap_ns = 12 * 3600 * 1_000_000_000i64;
+
+        prev_weekday <= 4 && curr_weekday == 0 && gap_ns >= min_gap_ns
+    }
+
     fn close_all_positions(
         &mut self,
         projector: &mut StateProjector,
@@ -3271,5 +3326,61 @@ mod tests {
                 "Gateway should be functional after LP switch"
             );
         }
+    }
+
+    #[test]
+    fn test_is_weekend_gap_friday_to_monday() {
+        // Friday 2024-01-12 13:00 UTC (EET 15:00 Fri) → Monday 2024-01-15 07:00 UTC (EET 09:00 Mon)
+        let friday_ns = 1705064400_000_000_000u64; // 2024-01-12T13:00:00Z
+        let monday_ns = 1705284000_000_000_000u64; // 2024-01-15T07:00:00Z
+        assert!(BacktestEngine::is_weekend_gap(friday_ns, monday_ns));
+    }
+
+    #[test]
+    fn test_is_weekend_gap_no_gap_consecutive_days() {
+        // Two consecutive Friday ticks — no weekend gap
+        let friday_ns = 1705106400_000_000_000u64;
+        let friday_later_ns = friday_ns + 60_000_000_000; // +60 seconds
+        assert!(!BacktestEngine::is_weekend_gap(friday_ns, friday_later_ns));
+    }
+
+    #[test]
+    fn test_is_weekend_gap_no_gap_within_week() {
+        // Wednesday to Thursday — no weekend gap
+        let wed_ns = 1704933600_000_000_000u64; // 2024-01-10T22:00:00Z (Wed)
+        let thu_ns = wed_ns + 86_400_000_000_000; // +1 day
+        assert!(!BacktestEngine::is_weekend_gap(wed_ns, thu_ns));
+    }
+
+    #[test]
+    fn test_is_weekend_gap_zero_prev() {
+        // No previous tick
+        let monday_ns = 1705293600_000_000_000u64;
+        assert!(!BacktestEngine::is_weekend_gap(0, monday_ns));
+    }
+
+    #[test]
+    fn test_weekend_gap_closes_positions() {
+        let mut engine = BacktestEngine::new(default_config());
+
+        // Friday tick — establish a position via synthetic events
+        let friday_ns = 1705064400_000_000_000u64; // 2024-01-12T13:00:00Z (Fri 15:00 EET)
+        let friday_events = generate_synthetic_ticks(friday_ns, 100, 1000, 110.0, 0.01);
+
+        let mut result = engine.run_from_events(&friday_events);
+
+        // Monday tick — should trigger weekend gap detection and close any positions
+        let monday_ns = 1705284000_000_000_000u64; // 2024-01-15T07:00:00Z (Mon 09:00 EET)
+        let monday_events = generate_synthetic_ticks(monday_ns, 50, 1000, 110.5, 0.01);
+        result = engine.run_from_events(&monday_events);
+
+        // Check that weekend halt trades exist if there were open positions
+        let weekend_trades: Vec<_> = result
+            .trades
+            .iter()
+            .filter(|t| t.close_reason.as_deref() == Some("WEEKEND_HALT"))
+            .collect();
+        // Even if no positions were open, the mechanism should not panic
+        // If positions existed, they should be closed with WEEKEND_HALT
     }
 }

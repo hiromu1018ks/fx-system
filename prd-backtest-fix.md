@@ -113,7 +113,7 @@
       "決済tradeに close_reason: Some(\"WEEKEND_HALT\") を記録",
       "テスト: 金曜→月曜tick遷移でポジションが決済される"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "fix",

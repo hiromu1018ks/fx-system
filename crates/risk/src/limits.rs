@@ -103,6 +103,8 @@ pub enum CloseReason {
     WeeklyHalt,
     /// Monthly hard limit triggered.
     MonthlyHalt,
+    /// Weekend gap detected — all positions force-closed before weekend.
+    WeekendHalt,
 }
 
 // ---------------------------------------------------------------------------

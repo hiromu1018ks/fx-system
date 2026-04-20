@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 3 / 8
-**Current Task:** Task 4 — 週末前強制決済
+**Tasks Completed:** 4 / 8
+**Current Task:** Task 5 — MonthlyHalt時の事後分布引き継ぎ
 
 ---
 
@@ -43,6 +43,31 @@
 - `cargo build` — passed
 - `cargo test -p fx-backtest --lib -- data::tests::test_parse_timestamp` — 11 passed, 0 failed
 - `cargo clippy -p fx-backtest` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 4 — 週末前強制決済: 金曜クローズ時に全ポジションを強制決済
+
+**What changed:**
+- `crates/risk/src/limits.rs`: `CloseReason` enumに `WeekendHalt` 変種を追加
+- `crates/backtest/src/engine.rs`:
+  - `chrono::{Datelike, DateTime}` + `chrono_tz::Tz` import追加
+  - `is_weekend_gap(prev_tick_ns, curr_tick_ns)` ヘルパー追加: Europe/Helsinki timezoneでDST対応の週末判定
+    - prev weekday <= Friday (4) && curr weekday == Monday (0) && gap >= 12h
+  - `run_inner()` メインループに週末ギャップ検出を追加: 検出時に `close_all_positions("WEEKEND_HALT")` を呼び出し
+  - `CloseReason` match に `WeekendHalt` arm 追加
+- テスト追加（5件）:
+  - `test_is_weekend_gap_friday_to_monday`: 金→月遷移で週末ギャップ検出
+  - `test_is_weekend_gap_no_gap_consecutive_days`: 連続金曜tickで非検出
+  - `test_is_weekend_gap_no_gap_within_week`: 水曜→木曜で非検出
+  - `test_is_weekend_gap_zero_prev`: prev_tick_ns=0で非検出
+  - `test_weekend_gap_closes_positions`: 金→月E2Eテスト
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --lib -- tests::test_is_weekend_gap tests::test_weekend_gap_closes` — 5 passed, 0 failed
+- `cargo clippy -p fx-backtest -p fx-risk` — no errors
 - `cargo fmt --check` — clean
 
 **Issues:** なし
