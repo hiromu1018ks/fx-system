@@ -80,6 +80,9 @@ struct DataTick {
     ],
     "passes": true
   },
+  {
+    "category": "bugfix",
+    "description": "Change Point Detection誤検出テストの修正",
     "steps": [
       "test_no_detection_stable_distributionの失敗原因を特定: t=132での誤検出メカニズムを分析",
       "ADWINアルゴリズムの閾値パラメータが安定分布に対して適切か確認",
@@ -89,6 +92,7 @@ struct DataTick {
     ],
     "passes": true
   },
+  {
     "category": "feature",
     "description": "履歴データローダーの実装（CSV対応）",
     "steps": [
@@ -104,6 +108,9 @@ struct DataTick {
     ],
     "passes": true
   },
+  {
+    "category": "feature",
+    "description": "BacktestEngineへのFeatureExtractor統合",
     "steps": [
       "fx-backtestのCargo.tomlにfx-strategy依存を確認・追加（既にある場合は確認のみ）",
       "BacktestEngine::run_inner()内でMarketEventからFeatureExtractorを用いて特徴量抽出を行う処理を追加",
@@ -126,7 +133,7 @@ struct DataTick {
       "戦略別のエピソード管理（on-policy Monte Carlo評価用）",
       "ユニットテスト: 各戦略のシグナル生成、複数戦略同時シグナルの処理"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

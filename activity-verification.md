@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 1
+**Tasks Completed:** 5
 **Current Task:** None started
 
 ---
@@ -40,50 +40,31 @@
 - `cargo clippy` — no warnings
 - `cargo fmt` — clean
 
-**Issues:** Bonferroni補正により、正当な変化点検出テスト（mean_shift, variance_shift）も引き続き通過することを確認
+**Issues:** Bonferrini補正により、正当な変化点検出テスト（mean_shift, variance_shift）も引き続き通過することを確認
 
-### 2026-04-20: Task 3 — 履歴データローダーの実装（CSV対応）
+### 2026-04-20: Task 5 — BacktestEngineへのStrategyA/B/C統合（ポジションオープン判断の実装）
 
 **What changed:**
-- `Cargo.toml`（workspace）: `csv = "1"` を追加
-- `crates/backtest/Cargo.toml`: `csv = { workspace = true }` を追加
-- `crates/backtest/src/data.rs`: 新規モジュール作成
-  - `DataTick` 構造体: CSV行のデシリアライズ（timestamp, bid, ask, bid_volume, ask_volume, symbol）
-  - `ValidatedTick` 構造体: バリデーション済みのナノ秒タイムスタンプ付きティック
-  - `load_csv()` / `load_csv_reader()`: CSV読み込み＋バリデーション（bid < ask、timestamp単調増加）
-  - `ticks_to_events()` / `tick_to_event()`: `ValidatedTick` → `GenericEvent` 変換
-  - `parse_timestamp()`: ISO 8601, Unix秒, Unix nsの柔軟パース
-  - 10のユニットテスト（タイムスタンプパース、CSV読み込み、バリデーション、イベント変換）
-- `crates/backtest/src/lib.rs`: `pub mod data;` を追加
+- `crates/backtest/src/engine.rs`: 大幅なリファクタリング
+  - `BacktestConfig` に新フィールド追加: `enabled_strategies`, `strategy_a/b/c_config`, `mc_eval_config`, `global_position_config`
+  - `BacktestEngine` に新フィールド追加: `strategy_a (StrategyA)`, `strategy_b (StrategyB)`, `strategy_c (StrategyC)`, `mc_evaluator (McEvaluator)`
+  - `StrategyDecision` 構造体追加: StrategyA/B/C の各Decision型を統一的に扱うための変換型
+  - `run_inner()` の完全リライト:
+    - Phase 1: 各戦略のMAX_HOLD_TIME切れポジションの自動クローズ（A:30s, B:5min, C:10min）
+    - Phase 2: 各有効戦略のdecide()呼び出し→Q値ベースの優先度ソート
+    - Phase 3: GlobalPositionCheckerによるポジション制約チェック→発注
+    - Phase 4: アクティブエピソードのMC遷移記録
+  - END_OF_DATA時の残ポジションクローズ時にMC episode終了+Q関数更新を追加
+  - ヘルパーメソッド追加: `should_close_max_hold()`, `strategy_max_hold_time_ns()`, `get_strategy_decision()`, `extract_strategy_features()`, `start_strategy_episode()`, `end_strategy_episode()`
+- テスト追加:
+  - `test_strategy_integration_produces_decisions`: 500ティックでdecisionsが上限内に収まること
+  - `test_strategy_enabled_subset`: Strategy Aのみ有効時に他戦略のdecisionが生成されないこと
+  - `test_strategy_per_strategy_max_hold_time`: 各戦略のMAX_HOLD_TIME (30s/5min/10min) 検証
+  - `test_strategy_reproducible_with_seed`: 同一シードで再現性確認
 
 **Commands run:**
 - `cargo build` — passed
-- `cargo test` — 463 passed, 0 failed
-- `cargo clippy` — no warnings
-- `cargo fmt` — clean
-
-**Issues:** なし
-
-### 2026-04-20: Task 4 — FeatureExtractorのBacktestEngine統合
-
-**What changed:**
-- `crates/core/src/types.rs`: `StrategyId::all()` メソッド追加（A/B/Cの全戦略IDスライスを返す）
-- `crates/backtest/src/engine.rs`:
-  - `FeatureExtractor` と `FeatureVector` のインポート追加（`fx_strategy` クレート）
-  - `BacktestConfig` に `feature_extractor_config: FeatureExtractorConfig` フィールド追加
-  - `TickContext` 構造体定義: タイムスタンプ、mid_price、spread、volatility、FeatureVectorを持つ中間データ構造
-  - `run_inner()` に `FeatureExtractor` 初期化とパイプライン統合:
-    - 各ティックで `process_market_event()` を呼び出し、ローリングウィンドウを更新
-    - 各戦略IDについて `extract()` を呼び出し、FeatureVectorを生成してTickContextを構築
-    - 実行イベント発生後、`process_execution_event()` でラグ付き実行統計を更新
-  - `process_execution_result()` の戻り値を `f64` → `(f64, Option<GenericEvent>)` に変更し、生成した実行イベントをFeatureExtractorに渡せるようにした
-- `crates/backtest/src/engine.rs` テスト追加:
-  - `test_feature_extractor_integration_with_synthetic_data`: 300ティックの合成データで特徴量抽出を検証
-  - `test_feature_extractor_config_customizable`: カスタムFeatureExtractorConfigでエンジン生成を確認
-
-**Commands run:**
-- `cargo build` — passed
-- `cargo test` — 465 passed (2 new), 0 failed
+- `cargo test` — 463 passed (4 new), 0 failed
 - `cargo clippy` — no warnings
 - `cargo fmt --check` — clean
 

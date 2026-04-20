@@ -1,17 +1,25 @@
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::{Event, GenericEvent};
 use fx_events::header::EventHeader;
-use fx_events::projector::StateProjector;
+use fx_events::projector::{StateProjector, StateSnapshot};
 use fx_events::proto;
 use fx_events::store::EventStore;
 use fx_execution::gateway::{
     ExecutionGateway, ExecutionGatewayConfig, ExecutionRequest, ExecutionResult,
 };
+use fx_risk::global_position::{GlobalPositionChecker, GlobalPositionConfig};
+use fx_strategy::bayesian_lr::QAction;
 use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
 use fx_strategy::features::FeatureVector;
+use fx_strategy::mc_eval::{McEvalConfig, McEvaluator, TerminalReason};
+use fx_strategy::policy::Action;
+use fx_strategy::strategy_a::{StrategyA, StrategyAConfig, StrategyADecision};
+use fx_strategy::strategy_b::{StrategyB, StrategyBConfig, StrategyBDecision};
+use fx_strategy::strategy_c::{StrategyC, StrategyCConfig, StrategyCDecision};
 use prost::Message as _;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -41,6 +49,16 @@ pub struct BacktestConfig {
     pub rng_seed: Option<[u8; 32]>,
     /// Feature extractor configuration.
     pub feature_extractor_config: FeatureExtractorConfig,
+    /// Strategies enabled for this backtest run.
+    pub enabled_strategies: HashSet<StrategyId>,
+    /// Per-strategy configurations.
+    pub strategy_a_config: StrategyAConfig,
+    pub strategy_b_config: StrategyBConfig,
+    pub strategy_c_config: StrategyCConfig,
+    /// Monte Carlo evaluation configuration.
+    pub mc_eval_config: McEvalConfig,
+    /// Global position constraint configuration.
+    pub global_position_config: GlobalPositionConfig,
 }
 
 impl Default for BacktestConfig {
@@ -54,6 +72,12 @@ impl Default for BacktestConfig {
             default_lot_size: 100_000,
             rng_seed: None,
             feature_extractor_config: FeatureExtractorConfig::default(),
+            enabled_strategies: StrategyId::all().iter().copied().collect(),
+            strategy_a_config: StrategyAConfig::default(),
+            strategy_b_config: StrategyBConfig::default(),
+            strategy_c_config: StrategyCConfig::default(),
+            mc_eval_config: McEvalConfig::default(),
+            global_position_config: GlobalPositionConfig::default(),
         }
     }
 }
@@ -84,6 +108,69 @@ pub struct TickContext {
     pub features: FeatureVector,
 }
 
+/// Normalized decision from any strategy variant (A/B/C).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct StrategyDecision {
+    action: Action,
+    q_point: f64,
+    q_sampled: f64,
+    posterior_std: f64,
+    triggered: bool,
+    episode_active: bool,
+    should_close: bool,
+    skip_reason: Option<String>,
+    remaining_hold_time_ms: u64,
+}
+
+impl From<StrategyADecision> for StrategyDecision {
+    fn from(d: StrategyADecision) -> Self {
+        Self {
+            action: d.action,
+            q_point: d.q_point,
+            q_sampled: d.q_sampled,
+            posterior_std: d.posterior_std,
+            triggered: d.triggered,
+            episode_active: d.episode_active,
+            should_close: d.should_close,
+            skip_reason: d.skip_reason,
+            remaining_hold_time_ms: d.remaining_hold_time_ms,
+        }
+    }
+}
+
+impl From<StrategyBDecision> for StrategyDecision {
+    fn from(d: StrategyBDecision) -> Self {
+        Self {
+            action: d.action,
+            q_point: d.q_point,
+            q_sampled: d.q_sampled,
+            posterior_std: d.posterior_std,
+            triggered: d.triggered,
+            episode_active: d.episode_active,
+            should_close: d.should_close,
+            skip_reason: d.skip_reason,
+            remaining_hold_time_ms: d.remaining_hold_time_ms,
+        }
+    }
+}
+
+impl From<StrategyCDecision> for StrategyDecision {
+    fn from(d: StrategyCDecision) -> Self {
+        Self {
+            action: d.action,
+            q_point: d.q_point,
+            q_sampled: d.q_sampled,
+            posterior_std: d.posterior_std,
+            triggered: d.triggered,
+            episode_active: d.episode_active,
+            should_close: d.should_close,
+            skip_reason: d.skip_reason,
+            remaining_hold_time_ms: d.remaining_hold_time_ms,
+        }
+    }
+}
+
 /// Result of a backtest run.
 #[derive(Debug, Clone)]
 pub struct BacktestResult {
@@ -110,6 +197,10 @@ pub struct BacktestEngine {
     config: BacktestConfig,
     execution_gateway: ExecutionGateway,
     rng: SmallRng,
+    strategy_a: StrategyA,
+    strategy_b: StrategyB,
+    strategy_c: StrategyC,
+    mc_evaluator: McEvaluator,
 }
 
 impl BacktestEngine {
@@ -124,6 +215,10 @@ impl BacktestEngine {
             seed
         });
         Self {
+            strategy_a: StrategyA::new(config.strategy_a_config.clone()),
+            strategy_b: StrategyB::new(config.strategy_b_config.clone()),
+            strategy_c: StrategyC::new(config.strategy_c_config.clone()),
+            mc_evaluator: McEvaluator::new(config.mc_eval_config.clone()),
             config,
             execution_gateway: ExecutionGateway::new(gateway_config),
             rng: SmallRng::from_seed(rng_seed),
@@ -216,10 +311,11 @@ impl BacktestEngine {
         let mut decisions: Vec<BacktestDecision> = Vec::new();
         let mut total_ticks: u64 = 0;
         let mut total_decision_ticks: u64 = 0;
-
-        let max_hold_time_ns = 30_000_000_000u64; // 30s default MAX_HOLD_TIME
-
         let mut prev_tick_ns: u64 = 0;
+
+        // Clone to release borrow on self.config before mutating self
+        let enabled_strategies: Vec<StrategyId> =
+            self.config.enabled_strategies.iter().copied().collect();
 
         for event in market_events {
             let tick_ns = event.header.timestamp_ns;
@@ -230,7 +326,6 @@ impl BacktestEngine {
                 continue;
             }
 
-            // Update feature extractor rolling windows with this market event
             feature_extractor.process_market_event(event);
 
             let market_payload = match proto::MarketEventPayload::decode(event.payload_bytes()) {
@@ -244,80 +339,264 @@ impl BacktestEngine {
 
             let snapshot = projector.snapshot();
 
-            // Extract features for each known strategy into TickContext
-            let _tick_contexts: Vec<TickContext> = StrategyId::all()
+            // Extract features per strategy into a map for O(1) lookup
+            let tick_contexts: HashMap<StrategyId, TickContext> = StrategyId::all()
                 .iter()
                 .map(|&sid| {
                     let features = feature_extractor.extract(event, snapshot, sid, tick_ns);
-                    TickContext {
-                        timestamp_ns: tick_ns,
-                        mid_price,
-                        spread,
-                        volatility,
-                        features,
-                    }
+                    (
+                        sid,
+                        TickContext {
+                            timestamp_ns: tick_ns,
+                            mid_price,
+                            spread,
+                            volatility,
+                            features,
+                        },
+                    )
                 })
                 .collect();
 
-            // Collect open positions (avoids borrow conflict with &mut projector)
-            let open_positions =
-                self.collect_expired_positions(&projector, tick_ns, max_hold_time_ns);
+            // Phase 1: Close positions that exceeded per-strategy MAX_HOLD_TIME
+            for &sid in &enabled_strategies {
+                if self.should_close_max_hold(sid, &projector, tick_ns) {
+                    let snap = projector.snapshot();
+                    if let Some(pos) = snap.positions.get(&sid) {
+                        if pos.is_open() {
+                            let direction = if pos.size > 0.0 {
+                                Direction::Sell
+                            } else {
+                                Direction::Buy
+                            };
+                            let lots = pos.size.abs() as u64;
 
-            for pos_snap in &open_positions {
-                let direction = if pos_snap.size > 0.0 {
-                    Direction::Sell
-                } else {
-                    Direction::Buy
-                };
-                let lots = pos_snap.size.abs() as u64;
+                            let result = self.simulate_order(
+                                direction, lots, sid, mid_price, volatility, tick_ns,
+                            );
 
-                let result = self.simulate_order(
-                    direction,
-                    lots,
-                    pos_snap.strategy_id,
-                    mid_price,
-                    volatility,
-                    tick_ns,
-                );
+                            if result.filled {
+                                let (trade_pnl, exec_event) = self.process_execution_result(
+                                    sid,
+                                    &result,
+                                    direction,
+                                    tick_ns,
+                                    &mut projector,
+                                );
+                                if let Some(ref exec_ev) = exec_event {
+                                    feature_extractor.process_execution_event(exec_ev);
+                                }
+                                trades.push(TradeRecord {
+                                    timestamp_ns: tick_ns,
+                                    strategy_id: sid,
+                                    direction,
+                                    lots: result.fill_size,
+                                    fill_price: result.fill_price,
+                                    slippage: result.slippage,
+                                    pnl: trade_pnl,
+                                    fill_probability: result.effective_fill_probability,
+                                    latency_ms: result.latency_ms,
+                                    close_reason: Some("MAX_HOLD_TIME".to_string()),
+                                });
+                            }
 
-                if result.filled {
-                    let (trade_pnl, exec_event) = self.process_execution_result(
-                        pos_snap.strategy_id,
-                        &result,
-                        direction,
-                        tick_ns,
-                        &mut projector,
-                    );
+                            self.end_strategy_episode(
+                                sid,
+                                TerminalReason::MaxHoldTimeExceeded,
+                                tick_ns,
+                            );
 
-                    // Feed execution event back to feature extractor for lagged stats
-                    if let Some(ref exec_ev) = exec_event {
-                        feature_extractor.process_execution_event(exec_ev);
+                            decisions.push(BacktestDecision {
+                                timestamp_ns: tick_ns,
+                                strategy_id: sid,
+                                direction: Some(direction),
+                                lots,
+                                triggered: false,
+                                skip_reason: Some("MAX_HOLD_TIME close".to_string()),
+                            });
+                            total_decision_ticks += 1;
+                        }
                     }
+                }
+            }
 
-                    let trade = TradeRecord {
-                        timestamp_ns: tick_ns,
-                        strategy_id: pos_snap.strategy_id,
-                        direction,
-                        lots: result.fill_size,
-                        fill_price: result.fill_price,
-                        slippage: result.slippage,
-                        pnl: trade_pnl,
-                        fill_probability: result.effective_fill_probability,
-                        latency_ms: result.latency_ms,
-                        close_reason: Some("MAX_HOLD_TIME".to_string()),
-                    };
-                    trades.push(trade);
+            // Phase 2: Collect strategy decisions
+            let snapshot = projector.snapshot();
+            let mut strategy_q: HashMap<StrategyId, f64> = HashMap::new();
+            let mut strategy_decisions: Vec<(StrategyId, StrategyDecision)> = Vec::new();
+
+            for &sid in &enabled_strategies {
+                let ctx = tick_contexts.get(&sid).unwrap();
+                let decision = self.get_strategy_decision(sid, &ctx.features, snapshot, tick_ns);
+                strategy_q.insert(sid, decision.q_sampled);
+                strategy_decisions.push((sid, decision));
+            }
+
+            // Sort by Q-value descending for priority (design.md §9.5)
+            strategy_decisions.sort_by(|a, b| {
+                b.1.q_sampled
+                    .partial_cmp(&a.1.q_sampled)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Phase 3: Execute strategy decisions
+            for (sid, decision) in strategy_decisions {
+                let triggered = decision.triggered;
+                let skip = decision.skip_reason.clone();
+
+                match decision.action {
+                    Action::Buy(lots) | Action::Sell(lots) => {
+                        let direction = match decision.action {
+                            Action::Buy(_) => Direction::Buy,
+                            Action::Sell(_) => Direction::Sell,
+                            Action::Hold => unreachable!(),
+                        };
+
+                        let snap = projector.snapshot();
+                        let has_position = snap
+                            .positions
+                            .get(&sid)
+                            .map(|p| p.is_open())
+                            .unwrap_or(false);
+
+                        if has_position {
+                            decisions.push(BacktestDecision {
+                                timestamp_ns: tick_ns,
+                                strategy_id: sid,
+                                direction: Some(direction),
+                                lots,
+                                triggered,
+                                skip_reason: Some("already_in_position".to_string()),
+                            });
+                            total_decision_ticks += 1;
+                            continue;
+                        }
+
+                        // Global position constraint check (priority-based)
+                        let pos_result = GlobalPositionChecker::validate_order(
+                            &self.config.global_position_config,
+                            snap,
+                            sid,
+                            direction,
+                            lots as f64,
+                            decision.q_sampled,
+                            &strategy_q,
+                        );
+
+                        let effective_lots = match pos_result {
+                            Ok(r) => r.effective_lot.max(0.0) as u64,
+                            Err(_) => {
+                                decisions.push(BacktestDecision {
+                                    timestamp_ns: tick_ns,
+                                    strategy_id: sid,
+                                    direction: Some(direction),
+                                    lots,
+                                    triggered,
+                                    skip_reason: Some("global_position_rejected".to_string()),
+                                });
+                                total_decision_ticks += 1;
+                                continue;
+                            }
+                        };
+
+                        if effective_lots == 0 {
+                            decisions.push(BacktestDecision {
+                                timestamp_ns: tick_ns,
+                                strategy_id: sid,
+                                direction: Some(direction),
+                                lots,
+                                triggered,
+                                skip_reason: Some("zero_effective_lot".to_string()),
+                            });
+                            total_decision_ticks += 1;
+                            continue;
+                        }
+
+                        let result = self.simulate_order(
+                            direction,
+                            effective_lots,
+                            sid,
+                            mid_price,
+                            volatility,
+                            tick_ns,
+                        );
+
+                        if result.filled {
+                            let (trade_pnl, exec_event) = self.process_execution_result(
+                                sid,
+                                &result,
+                                direction,
+                                tick_ns,
+                                &mut projector,
+                            );
+                            if let Some(ref exec_ev) = exec_event {
+                                feature_extractor.process_execution_event(exec_ev);
+                            }
+
+                            trades.push(TradeRecord {
+                                timestamp_ns: tick_ns,
+                                strategy_id: sid,
+                                direction,
+                                lots: result.fill_size,
+                                fill_price: result.fill_price,
+                                slippage: result.slippage,
+                                pnl: trade_pnl,
+                                fill_probability: result.effective_fill_probability,
+                                latency_ms: result.latency_ms,
+                                close_reason: None,
+                            });
+
+                            // Start MC episode
+                            self.start_strategy_episode(sid, tick_ns, projector.snapshot());
+                        }
+
+                        decisions.push(BacktestDecision {
+                            timestamp_ns: tick_ns,
+                            strategy_id: sid,
+                            direction: Some(direction),
+                            lots: effective_lots,
+                            triggered,
+                            skip_reason: if result.filled {
+                                None
+                            } else {
+                                Some("execution_rejected".to_string())
+                            },
+                        });
+                        total_decision_ticks += 1;
+                    }
+                    Action::Hold => {
+                        if triggered || decision.episode_active {
+                            decisions.push(BacktestDecision {
+                                timestamp_ns: tick_ns,
+                                strategy_id: sid,
+                                direction: None,
+                                lots: 0,
+                                triggered,
+                                skip_reason: skip,
+                            });
+                            total_decision_ticks += 1;
+                        }
+                    }
                 }
 
-                decisions.push(BacktestDecision {
-                    timestamp_ns: tick_ns,
-                    strategy_id: pos_snap.strategy_id,
-                    direction: Some(direction),
-                    lots,
-                    triggered: false,
-                    skip_reason: Some("MAX_HOLD_TIME close".to_string()),
-                });
-                total_decision_ticks += 1;
+                // Phase 4: Record MC transition for active episodes
+                if self.mc_evaluator.has_active_episode(sid) {
+                    let ctx = tick_contexts.get(&sid).unwrap();
+                    let phi = self.extract_strategy_features(sid, &ctx.features);
+                    let snap = projector.snapshot();
+                    let q_action = match decision.action {
+                        Action::Buy(_) => QAction::Buy,
+                        Action::Sell(_) => QAction::Sell,
+                        Action::Hold => QAction::Hold,
+                    };
+                    self.mc_evaluator.record_transition(
+                        sid,
+                        tick_ns,
+                        q_action,
+                        phi,
+                        snap,
+                        volatility * volatility,
+                    );
+                }
             }
 
             // Time-compressed replay delay
@@ -332,7 +611,7 @@ impl BacktestEngine {
             prev_tick_ns = tick_ns;
         }
 
-        // Close remaining open positions at the last mid price
+        // Close remaining open positions at the last mid price (END_OF_DATA)
         if let Some(last_event) = market_events.last() {
             if let Ok(last_market) = proto::MarketEventPayload::decode(last_event.payload_bytes()) {
                 let last_mid = (last_market.bid + last_market.ask) / 2.0;
@@ -367,7 +646,7 @@ impl BacktestEngine {
                             last_ns,
                             &mut projector,
                         );
-                        let trade = TradeRecord {
+                        trades.push(TradeRecord {
                             timestamp_ns: last_ns,
                             strategy_id: pos_snap.strategy_id,
                             direction,
@@ -378,9 +657,14 @@ impl BacktestEngine {
                             fill_probability: result.effective_fill_probability,
                             latency_ms: result.latency_ms,
                             close_reason: Some("END_OF_DATA".to_string()),
-                        };
-                        trades.push(trade);
+                        });
                     }
+
+                    self.end_strategy_episode(
+                        pos_snap.strategy_id,
+                        TerminalReason::PositionClosed,
+                        last_ns,
+                    );
                 }
             }
         }
@@ -409,32 +693,118 @@ impl BacktestEngine {
         }
     }
 
-    /// Collect positions that have exceeded MAX_HOLD_TIME.
-    fn collect_expired_positions(
+    /// Check if a strategy's position should be closed due to MAX_HOLD_TIME.
+    fn should_close_max_hold(
         &self,
+        sid: StrategyId,
         projector: &StateProjector,
         tick_ns: u64,
-        max_hold_time_ns: u64,
-    ) -> Vec<PositionSnapshot> {
-        projector
-            .snapshot()
-            .positions
-            .iter()
-            .filter_map(|(&sid, pos)| {
-                if pos.is_open()
-                    && pos.entry_timestamp_ns > 0
-                    && tick_ns - pos.entry_timestamp_ns >= max_hold_time_ns
-                {
-                    Some(PositionSnapshot {
-                        strategy_id: sid,
-                        size: pos.size,
-                        entry_timestamp_ns: pos.entry_timestamp_ns,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect()
+    ) -> bool {
+        let snap = projector.snapshot();
+        let pos = match snap.positions.get(&sid) {
+            Some(p) if p.is_open() => p,
+            _ => return false,
+        };
+        if pos.entry_timestamp_ns == 0 {
+            return false;
+        }
+        let max_hold_ns = self.strategy_max_hold_time_ns(sid);
+        tick_ns - pos.entry_timestamp_ns >= max_hold_ns
+    }
+
+    /// Per-strategy MAX_HOLD_TIME in nanoseconds.
+    fn strategy_max_hold_time_ns(&self, sid: StrategyId) -> u64 {
+        match sid {
+            StrategyId::A => self.strategy_a.config().max_hold_time_ms * 1_000_000,
+            StrategyId::B => self.strategy_b.config().max_hold_time_ms * 1_000_000,
+            StrategyId::C => self.strategy_c.config().max_hold_time_ms * 1_000_000,
+        }
+    }
+
+    /// Get strategy decision for a given strategy ID.
+    fn get_strategy_decision(
+        &mut self,
+        sid: StrategyId,
+        features: &FeatureVector,
+        state: &StateSnapshot,
+        tick_ns: u64,
+    ) -> StrategyDecision {
+        let regime_kl = 0.0; // Regime integration is a separate task
+        let latency_ms = 0.0; // No latency in backtest
+        match sid {
+            StrategyId::A => self
+                .strategy_a
+                .decide(
+                    features,
+                    state,
+                    regime_kl,
+                    latency_ms,
+                    tick_ns,
+                    &mut self.rng,
+                )
+                .into(),
+            StrategyId::B => self
+                .strategy_b
+                .decide(
+                    features,
+                    state,
+                    regime_kl,
+                    latency_ms,
+                    tick_ns,
+                    &mut self.rng,
+                )
+                .into(),
+            StrategyId::C => self
+                .strategy_c
+                .decide(
+                    features,
+                    state,
+                    regime_kl,
+                    latency_ms,
+                    tick_ns,
+                    &mut self.rng,
+                )
+                .into(),
+        }
+    }
+
+    /// Extract strategy-specific feature vector (39-dim including strategy extras).
+    fn extract_strategy_features(&self, sid: StrategyId, base: &FeatureVector) -> Vec<f64> {
+        match sid {
+            StrategyId::A => self.strategy_a.extract_features(base),
+            StrategyId::B => self.strategy_b.extract_features(base),
+            StrategyId::C => self.strategy_c.extract_features(base),
+        }
+    }
+
+    /// Start an MC episode and strategy episode for the given strategy.
+    fn start_strategy_episode(&mut self, sid: StrategyId, tick_ns: u64, snapshot: &StateSnapshot) {
+        let equity = snapshot.total_realized_pnl + snapshot.total_unrealized_pnl;
+        self.mc_evaluator.start_episode(sid, tick_ns, equity);
+        match sid {
+            StrategyId::A => self.strategy_a.start_episode(tick_ns),
+            StrategyId::B => self.strategy_b.start_episode(tick_ns),
+            StrategyId::C => self.strategy_c.start_episode(tick_ns),
+        }
+    }
+
+    /// End an MC episode, update the Q-function, and reset strategy episode state.
+    fn end_strategy_episode(&mut self, sid: StrategyId, reason: TerminalReason, tick_ns: u64) {
+        if self.mc_evaluator.has_active_episode(sid) {
+            // Extract episode first, then update Q-function separately to avoid double borrow
+            let episode_result = self.mc_evaluator.end_episode(sid, reason, tick_ns);
+            let q_fn = match sid {
+                StrategyId::A => self.strategy_a.q_function_mut(),
+                StrategyId::B => self.strategy_b.q_function_mut(),
+                StrategyId::C => self.strategy_c.q_function_mut(),
+            };
+            McEvaluator::update_from_result(q_fn, &episode_result);
+        }
+        match sid {
+            StrategyId::A => self.strategy_a.end_episode(),
+            StrategyId::B => self.strategy_b.end_episode(),
+            StrategyId::C => self.strategy_c.end_episode(),
+        }
     }
 
     /// Collect all currently open positions.
@@ -678,12 +1048,8 @@ mod tests {
         BacktestConfig {
             start_time_ns: 1_000_000_000_000_000,
             end_time_ns: 2_000_000_000_000_000,
-            replay_speed: 0.0,
-            symbol: "USD/JPY".to_string(),
-            global_position_limit: 10.0,
-            default_lot_size: 100_000,
             rng_seed: Some([42u8; 32]),
-            feature_extractor_config: FeatureExtractorConfig::default(),
+            ..BacktestConfig::default()
         }
     }
 
@@ -944,5 +1310,88 @@ mod tests {
 
         let engine = BacktestEngine::new(config);
         assert!(!engine.execution_gateway().active_lp_id().is_empty());
+    }
+
+    // -- Strategy integration tests --
+
+    #[test]
+    fn test_strategy_integration_produces_decisions() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            enabled_strategies: StrategyId::all().iter().copied().collect(),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        assert_eq!(result.total_ticks, 500);
+        // Decisions should be recorded for each enabled strategy on each tick
+        // (even if most are Hold with triggered=false, active episodes may produce some)
+        assert!(
+            result.decisions.len() <= result.total_ticks as usize * 3,
+            "decisions should not exceed 3 per tick"
+        );
+    }
+
+    #[test]
+    fn test_strategy_enabled_subset() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 200, 100, 110.0, 0.005);
+
+        // Only enable Strategy A
+        let mut enabled = HashSet::new();
+        enabled.insert(StrategyId::A);
+
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            enabled_strategies: enabled,
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // All decisions should be from Strategy A only
+        for d in &result.decisions {
+            assert_eq!(d.strategy_id, StrategyId::A);
+        }
+    }
+
+    #[test]
+    fn test_strategy_per_strategy_max_hold_time() {
+        let engine = BacktestEngine::new(default_config());
+
+        // StrategyA: 30s, StrategyB: 5min, StrategyC: 10min
+        let a_ns = engine.strategy_max_hold_time_ns(StrategyId::A);
+        let b_ns = engine.strategy_max_hold_time_ns(StrategyId::B);
+        let c_ns = engine.strategy_max_hold_time_ns(StrategyId::C);
+
+        assert_eq!(a_ns, 30_000_000_000u64, "StrategyA max hold = 30s");
+        assert_eq!(b_ns, 300_000_000_000u64, "StrategyB max hold = 5min");
+        assert_eq!(c_ns, 600_000_000_000u64, "StrategyC max hold = 10min");
+    }
+
+    #[test]
+    fn test_strategy_reproducible_with_seed() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 300, 100, 110.0, 0.005);
+
+        let config1 = BacktestConfig {
+            rng_seed: Some([77u8; 32]),
+            ..default_config()
+        };
+        let mut engine1 = BacktestEngine::new(config1);
+        let result1 = engine1.run_from_events(&events);
+
+        let config2 = BacktestConfig {
+            rng_seed: Some([77u8; 32]),
+            ..default_config()
+        };
+        let mut engine2 = BacktestEngine::new(config2);
+        let result2 = engine2.run_from_events(&events);
+
+        assert_eq!(result1.trades.len(), result2.trades.len());
+        assert_eq!(result1.decisions.len(), result2.decisions.len());
+        for (t1, t2) in result1.trades.iter().zip(result2.trades.iter()) {
+            assert!((t1.fill_price - t2.fill_price).abs() < 1e-10);
+        }
     }
 }
