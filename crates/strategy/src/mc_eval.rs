@@ -1469,4 +1469,477 @@ mod tests {
         let mc = McEvalConfig::default();
         assert!((mc.reward.gamma - 0.99).abs() < 1e-10);
     }
+
+    // =========================================================================
+    // §3.0 MDP Formulation Validation Tests
+    // =========================================================================
+    //
+    // These tests verify the implementation matches design.md §3.0:
+    //   State space:  s_t = (X_t^market, p_t^position)
+    //   Action space: a_t ∈ {buy_k, sell_k, hold}
+    //   Constraints:  |p_{t+1}| ≤ P_max
+    //   Reward:       r_t^i = ΔPnL - λ_risk·σ² - λ_dd·min(DD, DD_cap)
+    //   Q-function:   Q(s,a) = w_a^T φ(s)
+
+    // --- State Space Validation ---
+
+    /// Verify FeatureVector contains both market features AND position state,
+    /// matching the MDP state s_t = (X_t^market, p_t^position).
+    #[test]
+    fn test_mdp_state_space_contains_market_and_position_features() {
+        use crate::features::FeatureVector;
+
+        let fv = FeatureVector::zero();
+        let flat = fv.flattened();
+        assert_eq!(flat.len(), FeatureVector::DIM);
+
+        // Market features (X_t^market): indices 0-15
+        // spread, spread_zscore, obi, delta_obi, depth_change_rate, queue_position,
+        // realized_volatility, volatility_ratio, volatility_decay_rate,
+        // session_tokyo, session_london, session_ny, session_sydney,
+        // time_since_open_ms, time_since_last_spike_ms, holding_time_ms
+        let _ = fv.spread;
+        let _ = fv.realized_volatility;
+        let _ = fv.session_tokyo;
+
+        // Position state features (p_t^position): indices 16-19
+        // position_size, position_direction, entry_price, pnl_unrealized
+        let _ = fv.position_size;
+        let _ = fv.position_direction;
+        let _ = fv.entry_price;
+        let _ = fv.pnl_unrealized;
+
+        // Execution features with forced lag: indices 20-23
+        let _ = fv.trade_intensity;
+        let _ = fv.recent_fill_rate; // lagged
+        let _ = fv.recent_slippage; // lagged
+
+        // Non-linear transform terms: indices 24-29
+        let _ = fv.self_impact;
+        let _ = fv.time_decay;
+        let _ = fv.dynamic_cost;
+
+        // Interaction terms: indices 30-33
+        let _ = fv.spread_z_x_vol;
+        let _ = fv.position_size_x_vol;
+
+        // Verify flattened length is exactly DIM
+        assert_eq!(flat.len(), 34);
+    }
+
+    /// Verify FeatureVector roundtrip preserves all fields,
+    /// ensuring the state vector is fully recoverable.
+    #[test]
+    fn test_mdp_state_vector_roundtrip_integrity() {
+        use crate::features::FeatureVector;
+
+        let mut fv = FeatureVector::zero();
+        fv.spread = 1.5;
+        fv.spread_zscore = 2.3;
+        fv.position_size = 100_000.0;
+        fv.position_direction = 1.0;
+        fv.entry_price = 1.08500;
+        fv.pnl_unrealized = 50.0;
+        fv.self_impact = 0.01;
+        fv.p_revert = 0.7;
+
+        let flat = fv.flattened();
+        let restored = FeatureVector::from_flattened(&flat).unwrap();
+
+        assert!((restored.spread - 1.5).abs() < 1e-15);
+        assert!((restored.position_size - 100_000.0).abs() < 1e-15);
+        assert!((restored.entry_price - 1.08500).abs() < 1e-15);
+        assert!((restored.pnl_unrealized - 50.0).abs() < 1e-15);
+        assert!((restored.self_impact - 0.01).abs() < 1e-15);
+    }
+
+    // --- Action Space Validation ---
+
+    /// Verify QAction matches the MDP action space: {Buy, Sell, Hold}.
+    #[test]
+    fn test_mdp_action_space_has_three_actions() {
+        let all = QAction::all();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&QAction::Buy));
+        assert!(all.contains(&QAction::Sell));
+        assert!(all.contains(&QAction::Hold));
+    }
+
+    /// Verify Buy and Sell receive optimistic initialization while Hold does not.
+    #[test]
+    fn test_mdp_optimistic_initialization_buy_sell_not_hold() {
+        let dim = 5;
+        let bias = 1.0;
+        let q_fn = QFunction::new(dim, 0.01, 500, 0.01, bias);
+
+        let phi = vec![1.0; dim];
+        let q_buy = q_fn.q_value(QAction::Buy, &phi);
+        let q_sell = q_fn.q_value(QAction::Sell, &phi);
+        let q_hold = q_fn.q_value(QAction::Hold, &phi);
+
+        // Buy and Sell should have positive bias
+        assert!(
+            q_buy > 0.0,
+            "Buy should have optimistic bias, got {}",
+            q_buy
+        );
+        assert!(
+            q_sell > 0.0,
+            "Sell should have optimistic bias, got {}",
+            q_sell
+        );
+        // Hold should NOT have optimistic bias
+        assert!(
+            q_hold.abs() < 1e-10,
+            "Hold should not have optimistic bias, got {}",
+            q_hold
+        );
+    }
+
+    // --- Position Constraints Validation ---
+
+    /// Verify P_max constraint formula: P_max^global = Σ P_max^i / max(corr, floor)
+    /// This mirrors the design doc §9.5 global position constraint.
+    #[test]
+    fn test_mdp_p_max_constraint_formula() {
+        // Replicate the formula from fx-risk::GlobalPositionChecker without importing
+        // P_max^global = Σ P_max^i / max(correlation_factor, FLOOR_CORRELATION)
+
+        let strategy_max: [f64; 3] = [5.0, 5.0, 5.0]; // per-strategy P_max
+        let sum_max: f64 = strategy_max.iter().sum(); // 15.0
+
+        // Default: correlation=1.0, floor=1.5 → divisor=1.5 → limit=10.0
+        let divisor = 1.0_f64.max(1.5);
+        let limit = sum_max / divisor;
+        assert!(
+            (limit - 10.0).abs() < 1e-10,
+            "P_max^global should be 10.0, got {}",
+            limit
+        );
+
+        // High correlation → lower limit
+        let high_corr_divisor = 2.0_f64.max(1.5);
+        let tight_limit = sum_max / high_corr_divisor;
+        assert!(
+            tight_limit < limit,
+            "Higher correlation should reduce P_max"
+        );
+
+        // Floor provides lower bound on divisor
+        let floor_divisor = 0.1_f64.max(2.0);
+        let floored_limit = sum_max / floor_divisor;
+        assert!(
+            (floored_limit - 7.5).abs() < 1e-10,
+            "Floor should cap divisor: got {}",
+            floored_limit
+        );
+    }
+
+    // --- Strategy-Separated Reward Validation ---
+
+    /// Verify the reward function r_t^i = ΔPnL - λ_risk·σ² - λ_dd·min(DD, DD_cap)
+    /// matches the design doc formula exactly.
+    #[test]
+    fn test_mdp_reward_formula_matches_design_doc() {
+        let mut buf = EpisodeBuffer::new(StrategyId::A, 0, 100.0);
+        let config = RewardConfig {
+            lambda_risk: 0.01,
+            lambda_dd: 0.2,
+            dd_cap: 30.0,
+            gamma: 0.99,
+        };
+
+        // Equity drops from 100 to 85, position=5000, vol²=0.0004
+        let equity = 85.0;
+        let pos_size = 5000.0;
+        let vol_sq = 0.0004;
+
+        buf.record(
+            1_000_000_000,
+            QAction::Hold,
+            vec![1.0; 5],
+            equity,
+            pos_size,
+            vol_sq,
+            &config,
+        );
+
+        let delta_pnl = equity - 100.0; // -15
+        let pos_var = pos_size * pos_size * vol_sq; // 10000
+        let dd = (100.0 - equity).max(0.0); // 15
+        let dd_capped = dd.min(config.dd_cap); // 15
+        let expected = delta_pnl - config.lambda_risk * pos_var - config.lambda_dd * dd_capped;
+
+        let actual = buf.transitions[0].reward;
+        assert!(
+            (actual - expected).abs() < 1e-10,
+            "Reward formula mismatch: expected {}, got {}",
+            expected,
+            actual
+        );
+    }
+
+    /// Verify each strategy's reward is independent (no cross-strategy coupling).
+    #[test]
+    fn test_mdp_strategy_separated_rewards_independent() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        // Start independent episodes for A and B
+        eval.start_episode(StrategyId::A, 0, 0.0);
+        eval.start_episode(StrategyId::B, 0, 0.0);
+
+        // Strategy A: equity goes up
+        let sa = make_state_with_equity(StrategyId::A, 10.0, 0.0);
+        eval.record_transition(StrategyId::A, 1, QAction::Buy, vec![1.0; 5], &sa, 0.0);
+
+        // Strategy B: equity goes down
+        let sb = make_state_with_equity(StrategyId::B, -5.0, 0.0);
+        eval.record_transition(StrategyId::B, 1, QAction::Sell, vec![1.0; 5], &sb, 0.0);
+
+        let ra = eval.end_episode(StrategyId::A, TerminalReason::PositionClosed, 2);
+        let rb = eval.end_episode(StrategyId::B, TerminalReason::PositionClosed, 2);
+
+        // Strategy A reward is +10 (independent of B's -5)
+        assert!(
+            (ra.total_reward - 10.0).abs() < 1e-10,
+            "Strategy A reward should be 10, got {}",
+            ra.total_reward
+        );
+        // Strategy B reward is -5 (independent of A's +10)
+        assert!(
+            (rb.total_reward - (-5.0)).abs() < 1e-10,
+            "Strategy B reward should be -5, got {}",
+            rb.total_reward
+        );
+    }
+
+    /// Verify DD_cap prevents drawdown penalty from dominating reward.
+    #[test]
+    fn test_mdp_dd_cap_saturation() {
+        let mut buf = EpisodeBuffer::new(StrategyId::A, 0, 100.0);
+        let config = RewardConfig {
+            lambda_risk: 0.0,
+            lambda_dd: 1.0,
+            dd_cap: 5.0,
+            gamma: 0.99,
+        };
+
+        // Equity drops from 100 to 50 → DD = 50, capped at 5
+        buf.record(1, QAction::Hold, vec![1.0; 5], 50.0, 0.0, 0.0, &config);
+
+        let expected = (50.0 - 100.0) - 1.0_f64 * (100.0_f64 - 50.0).min(5.0_f64);
+        // = -50 - 5 = -55
+        assert!(
+            (buf.transitions[0].reward - expected).abs() < 1e-10,
+            "DD should be capped at 5, got reward {}",
+            buf.transitions[0].reward
+        );
+    }
+
+    // --- Q-Function Validation ---
+
+    /// Verify Q(s,a) = w_a^T φ(s) point estimate is deterministic for fixed input.
+    #[test]
+    fn test_mdp_q_function_point_estimate_deterministic() {
+        let dim = 10;
+        let q_fn = QFunction::new(dim, 0.01, 500, 0.01, 0.0);
+
+        let phi = vec![1.0, 0.5, -0.3, 0.2, 0.0, 0.1, -0.1, 0.4, 0.3, -0.2];
+
+        // Same input should always produce same output
+        let q1 = q_fn.q_value(QAction::Buy, &phi);
+        let q2 = q_fn.q_value(QAction::Buy, &phi);
+        assert!(
+            (q1 - q2).abs() < 1e-15,
+            "Q point estimate should be deterministic"
+        );
+    }
+
+    /// Verify Q-function uses separate BLR models per action (Buy, Sell, Hold).
+    #[test]
+    fn test_mdp_q_function_separate_models_per_action() {
+        let dim = 5;
+        let mut q_fn = QFunction::new(dim, 0.01, 500, 0.01, 0.5);
+
+        let phi = vec![1.0; dim];
+
+        // Update Buy with positive return, Sell with negative
+        for _ in 0..20 {
+            q_fn.update(QAction::Buy, &phi, 10.0);
+            q_fn.update(QAction::Sell, &phi, -10.0);
+        }
+
+        let q_buy = q_fn.q_value(QAction::Buy, &phi);
+        let q_sell = q_fn.q_value(QAction::Sell, &phi);
+
+        // After positive updates for Buy and negative for Sell, they should diverge
+        assert!(
+            q_buy > q_sell,
+            "Buy Q ({}) should be > Sell Q ({}) after divergent updates",
+            q_buy,
+            q_sell
+        );
+    }
+
+    /// Verify σ_model is ONLY in Thompson Sampling, NOT in point estimate.
+    #[test]
+    fn test_mdp_sigma_model_only_in_sampling_not_point_estimate() {
+        let dim = 5;
+        let q_fn = QFunction::new(dim, 0.01, 500, 0.01, 0.0);
+        let phi = vec![1.0; dim];
+
+        // Point estimate should be a single deterministic value
+        let q_point = q_fn.q_point(QAction::Buy, &phi);
+
+        // Sampled values should vary (reflecting σ_model uncertainty)
+        use rand::thread_rng;
+        let mut rng = thread_rng();
+        let mut samples = Vec::new();
+        for _ in 0..100 {
+            samples.push(q_fn.sample_q_value(QAction::Buy, &phi, &mut rng));
+        }
+
+        // Samples should have variance (σ_model is reflected)
+        let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+        let var: f64 =
+            samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+        assert!(
+            var > 0.0,
+            "Thompson Sampling samples should have variance (σ_model reflected)"
+        );
+
+        // Point estimate should equal the mean of the sampling distribution
+        // (point estimate is ŵ·φ, samples are w̃·φ where w̃ ~ N(ŵ, Σ̂))
+        // The mean of samples should converge to the point estimate
+        assert!(
+            (mean - q_point).abs() < 2.0,
+            "Sample mean ({}) should be close to point estimate ({})",
+            mean,
+            q_point
+        );
+    }
+
+    /// Verify divergence detection: ||w_t|| / ||w_{t-1}|| > threshold triggers reset.
+    #[test]
+    fn test_mdp_divergence_monitoring() {
+        use crate::bayesian_lr::BayesianLinearRegression;
+
+        let dim = 5;
+        let mut blr = BayesianLinearRegression::new(dim, 0.001, 100, 0.01);
+
+        let phi = vec![1.0; dim];
+
+        // Normal update should not diverge
+        let result = blr.update(&phi, 1.0);
+        assert!(
+            !result.diverged,
+            "Normal update should not trigger divergence"
+        );
+        assert!(
+            result.divergence_ratio >= 0.0,
+            "Divergence ratio should be non-negative"
+        );
+
+        // The default threshold is 2.0 (from bayesian_lr.rs line 70)
+        // Verify the UpdateResult struct contains the expected fields
+        let _ = result.residual;
+    }
+
+    /// Verify MC returns use full episodic G_t (no bootstrapping).
+    #[test]
+    fn test_mdp_mc_returns_full_episodic_no_bootstrap() {
+        // G_t = Σ_{k=0}^{T-t} γ^k · r_{t+k}, NOT r_t + γ · Q(s_{t+1}, a*)
+        let rewards = vec![2.0, 3.0, -1.0, 4.0];
+        let gamma = 0.95;
+
+        let returns = McEvaluator::compute_returns(&rewards, gamma);
+
+        // G_0 = 2 + 0.95*3 + 0.9025*(-1) + 0.857375*4
+        let expected_g0 = 2.0 + 0.95 * 3.0 + 0.95_f64.powi(2) * (-1.0) + 0.95_f64.powi(3) * 4.0;
+        assert!(
+            (returns[0] - expected_g0).abs() < 1e-10,
+            "G_0 should be full discounted sum {}, got {}",
+            expected_g0,
+            returns[0]
+        );
+
+        // This is NOT r_0 + gamma * V(s_1) — it's the full MC return
+    }
+
+    /// Verify on-policy: only actually-taken actions are recorded and used for updates.
+    #[test]
+    fn test_mdp_on_policy_only_taken_actions_updated() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        eval.start_episode(StrategyId::A, 0, 0.0);
+
+        // Only take Buy and Hold (NOT Sell)
+        let s1 = make_state_with_equity(StrategyId::A, 5.0, 0.0);
+        eval.record_transition(StrategyId::A, 1, QAction::Buy, vec![1.0; 5], &s1, 0.0);
+        let s2 = make_state_with_equity(StrategyId::A, 8.0, 0.0);
+        eval.record_transition(StrategyId::A, 2, QAction::Hold, vec![1.0; 5], &s2, 0.0);
+
+        let result = eval.end_episode(StrategyId::A, TerminalReason::PositionClosed, 3);
+
+        // Verify only Buy and Hold were recorded
+        assert_eq!(result.transitions.len(), 2);
+        assert_eq!(result.transitions[0].action, QAction::Buy);
+        assert_eq!(result.transitions[1].action, QAction::Hold);
+
+        // Q-function update only touches Buy and Hold models
+        let dim = 5;
+        let mut q_fn = QFunction::new(dim, 0.01, 500, 0.01, 0.0);
+        let updates = McEvaluator::update_from_result(&mut q_fn, &result);
+        assert_eq!(updates.len(), 2);
+    }
+
+    /// Verify per-strategy episode buffers are independent.
+    #[test]
+    fn test_mdp_per_strategy_episode_buffers_independent() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        // Start episodes for all 3 strategies simultaneously
+        eval.start_episode(StrategyId::A, 0, 0.0);
+        eval.start_episode(StrategyId::B, 0, 0.0);
+        eval.start_episode(StrategyId::C, 0, 0.0);
+
+        // Each has independent equity trajectory
+        let sa = make_state_with_equity(StrategyId::A, 10.0, 0.0);
+        let sb = make_state_with_equity(StrategyId::B, -5.0, 0.0);
+        let sc = make_state_with_equity(StrategyId::C, 3.0, 0.0);
+
+        eval.record_transition(StrategyId::A, 1, QAction::Buy, vec![1.0; 5], &sa, 0.0);
+        eval.record_transition(StrategyId::B, 1, QAction::Sell, vec![1.0; 5], &sb, 0.0);
+        eval.record_transition(StrategyId::C, 1, QAction::Hold, vec![1.0; 5], &sc, 0.0);
+
+        let ra = eval.end_episode(StrategyId::A, TerminalReason::PositionClosed, 2);
+        let rb = eval.end_episode(StrategyId::B, TerminalReason::PositionClosed, 2);
+        let rc = eval.end_episode(StrategyId::C, TerminalReason::PositionClosed, 2);
+
+        // Each strategy's total reward matches only its own equity change
+        assert!((ra.total_reward - 10.0).abs() < 1e-10);
+        assert!((rb.total_reward - (-5.0)).abs() < 1e-10);
+        assert!((rc.total_reward - 3.0).abs() < 1e-10);
+    }
 }

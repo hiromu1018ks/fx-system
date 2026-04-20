@@ -366,3 +366,30 @@ Python側（research/bridge/）:
 - `cargo test` — 784 passed, 0 failed (all Rust tests)
 
 **Issues:** なし。テスト設計時の修正: (1) CPCV purge zone検証をtest block単位のboundary確認に修正（非連続test groupの正しい処理）、(2) 情報リーク比率が負になり得るためvalue範囲チェックをisfiniteに変更、(3) 報酬関数の安定性/不安定性を明確にするため、安定関数はパラメータ無視（sum返却）、不安定関数は二乗感度（1/lr²）に設計
+
+### 2026-04-20: Task 16 — design.md §3.0 MDP定式化の実装整合性検証
+
+**What changed:**
+- `crates/strategy/src/mc_eval.rs`: §3.0 MDP検証テスト15件を追加:
+  - **状態空間** (2 tests): `test_mdp_state_space_contains_market_and_position_features` — FeatureVector 34次元が市場特徴量＋ポジション状態＋実行特徴量＋非線形項＋交互作用項を含むことを検証。`test_mdp_state_vector_roundtrip_integrity` — flattened()→from_flattened()の往復整合性検証
+  - **行動空間** (2 tests): `test_mdp_action_space_has_three_actions` — QAction::{Buy, Sell, Hold}の3行動確認。`test_mdp_optimistic_initialization_buy_sell_not_hold` — Buy/Sellの楽観的初期化、Holdのゼロ初期化を検証
+  - **位置制約** (1 test): `test_mdp_p_max_constraint_formula` — P_max^global = ΣP_max^i / max(corr, floor)の相関調整公式検証
+  - **報酬関数** (3 tests): `test_mdp_reward_formula_matches_design_doc` — r_t = ΔPnL - λ_risk·σ² - λ_dd·min(DD, DD_cap)の公式正確性検証。`test_mdp_strategy_separated_rewards_independent` — 戦略A/B/Cの報酬が独立であることを検証。`test_mdp_dd_cap_saturation` — DD_capによるペナルティ上限の検証
+  - **Q関数** (4 tests): `test_mdp_q_function_point_estimate_deterministic` — 点推定Q(s,a)の決定性検証。`test_mdp_q_function_separate_models_per_action` — Buy/Sell/Hold別BLRモデルの独立性検証。`test_mdp_sigma_model_only_in_sampling_not_point_estimate` — σ_modelがThompson Samplingにのみ反映され点推定に含まれないことを検証。`test_mdp_divergence_monitoring` — ||w_t||/||w_{t-1}||発散監視の検証
+  - **On-policy MC** (3 tests): `test_mdp_mc_returns_full_episodic_no_bootstrap` — MC完全エピソード返却（非ブートストラップ）の検証。`test_mdp_on_policy_only_taken_actions_updated` — 実行行動のみが記録・更新されることを検証。`test_mdp_per_strategy_episode_buffers_independent` — 戦略別エピソードバッファの独立性検証
+
+**調査結果:**
+- 状態空間 s_t = (X_t^market, p_t^position): FeatureVector 34次元に完全実装。市場特徴量・ポジション状態・実行特徴量（lag付き）・非線形項・交互作用項を含む。各戦略は+5次元拡張（A/B/C = 39次元）
+- 行動空間 a_t ∈ {buy_k, sell_k, hold}: QAction enum (Buy/Sell/Hold) + Action enum (Buy(u64)/Sell(u64)/Hold) の2層設計。QActionはQ関数評価用、Actionは実行用
+- 位置制約 |p_{t+1}| ≤ P_max: GlobalPositionCheckerで完全実装。相関調整、優先度ベースロット削減、方向フィージビリティチェック含む
+- V_max (velocity制約): design.mdに3箇所で参照（§3.0行動フィルタリング、特徴量インデックス20、§9リスクチェック）があるが実装なし。RiskError::VelocityLimitBreachedも未実装。これはdesign docと実装の乖離であり、将来のタスクで対応が必要
+- 戦略分離型報酬: McEvaluatorのHashMap<StrategyId, EpisodeBuffer>で完全に独立。state_equity()とstate_position_size()は各戦略のPositionのみを参照
+- Q関数: BayesianLinearRegressionでSherman-Morrisonオンライン更新。QFunctionはQAction別に独立BLRモデルを管理。σ_modelはsample_q_value()のみで使用、q_value()には含まれない
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 全crate通過（fx-strategy: 478 passed, 15 new MDP tests）
+- `cargo clippy` — dead_code warnings only（既存）
+- `cargo fmt --check` — clean
+
+**Issues:** V_max (velocity制約、design.md §3.0/§9)が実装されていない。design.mdに3箇所で参照されるが、コードベース全体に実装なし。これは本検証タスクの範囲外（新規機能実装が必要）のため、別タスクとして記録

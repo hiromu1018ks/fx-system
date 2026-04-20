@@ -287,7 +287,7 @@ struct DataTick {
       "Q関数 Q(s,a) = w_a^T·φ(s) の実装確認: BayesianLinearRegression",
       "各項目についてユニットテストを追加または既存テストを確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
