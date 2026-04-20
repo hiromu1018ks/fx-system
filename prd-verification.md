@@ -442,7 +442,7 @@ struct DataTick {
       "再現性テスト: 同一シード・同一データで同一結果",
       "結果レポートのJSON/CSV出力確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",

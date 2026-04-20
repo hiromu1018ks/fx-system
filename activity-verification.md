@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 22
-**Current Task:** Task 27 — フォワードテストのフルパイプライン統合テスト
+**Tasks Completed:** 23
+**Current Task:** Task 28 — design.md §12 運用指針に基づく破綻シナリオのストレステスト
 
 ---
 
@@ -792,3 +792,22 @@ Python側（research/bridge/）:
 - `cargo fmt` — applied, `cargo fmt --check` — clean
 
 **Issues:** なし
+
+### 2026-04-20: Task 27 — フォワードテストのフルパイプライン統合テスト
+
+**What changed:**
+- `crates/forward/tests/integration.rs`: 新規作成。フォワードテストフルパイプライン統合テスト19件を追加
+  - **フルパイプライン** (1 test): RecordedDataFeed → ForwardTestRunner → PaperExecution → PerformanceTracker の完全フロー検証
+  - **戦略個別・組み合わせ** (2 tests): Strategy A単体、B+Cサブセットの実行検証
+  - **アラートシステム** (5 tests): AlertEvaluator（RiskLimit/ExecutionDrift/SharpeDegradation）の閾値判定、LogAlertChannel送信、WebhookAlertChannel構築
+  - **ComparisonEngine** (3 tests): 同一結果の完全一致、有意乖離の検出、メトリクス詳細の全次元カバレッジ
+  - **期間管理** (2 tests): duration=Noneで全ティック処理、duration=60sでのグレースフル完了
+  - **再現性** (1 test): 同一シード+同一データで同一PnLの完全再現性検証
+  - **レポート出力** (3 tests): JSON出力（内容検証）、CSV出力、Trades CSV出力
+  - **PerformanceTracker** (2 tests): update+snapshot API、rolling Sharpe計算
+
+**Commands run:**
+- `cargo test -p fx-forward --test integration` — 19 passed, 0 failed
+- `cargo test` — 1424 passed, 0 failed (all crates)
+
+**Issues:** CSVレポートファイル名が`performance_summary.csv`（コード実装）と`session_report.csv`（初期テスト想定）で不一致。テストを修正して実装に合わせた
