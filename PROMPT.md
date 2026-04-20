@@ -1,30 +1,30 @@
-@prd-backtest-fix.md @activity-backtest-fix.md @prd-verification.md @activity-verification.md @prd-forward.md @prd.md
+@prd-design-gap.md @activity-design-gap.md @prd-backtest-fix.md @activity-backtest-fix.md @prd-verification.md @activity-verification.md @prd-forward.md @prd.md
 
-We are fixing the **Backtest Engine** (バックテストエンジン修正) according to the PRD in `prd-backtest-fix.md`.
-5 issues: OOM fix (streaming), weekend gap PnL, TS posterior carry-over, Cholesky diagonal fallback, EET DST.
+We are implementing **design.md未実装機能** according to the PRD in `prd-design-gap.md`.
+14 tasks: HDP-HMM bugs, feature interaction terms, Dynamic K, GapDetector halt, PreFailureMetrics wiring, ONNX integration, E2E pipeline.
 
-First read `activity-backtest-fix.md` to see what was recently accomplished.
+First read `activity-design-gap.md` to see what was recently accomplished.
 
 ## Start the Application
 
 ### Rust (Core Execution Platform)
 - **Build**: `cargo build`
 - **Test**: `cargo test`
-- **Test forward only**: `cargo test -p fx-forward`
+- **Test specific crate**: `cargo test -p fx-strategy`
 - **Lint**: `cargo clippy`
 - **Format**: `cargo fmt --check`
-- **Run**: `cargo run` (or `cargo run --bin <binary-name>` for specific binaries)
+- **Run**: `cargo run --bin fx-cli`
 
 ### Python (Research & ML)
 - **Install**: `uv pip install -e .` or `pip install -e .`
 - **Test**: `pytest research/tests/`
-- **Jupyter**: `jupyter lab` (for research notebooks)
+- **Single test**: `pytest research/tests/test_hdp_hmm.py -v`
 
 If a port is taken, try another port.
 
 ## Work on Tasks
 
-Open `prd-backtest-fix.md` and find the single highest priority task where `"passes": false`.
+Open `prd-design-gap.md` and find the single highest priority task where `"passes": false`.
 
 Work on exactly ONE task:
 1. Implement the change according to the task steps
@@ -46,21 +46,21 @@ After implementing, verify your work:
 
 ## Log Progress
 
-Append a dated progress entry to `activity-verification.md` describing:
+Append a dated progress entry to `activity-design-gap.md` describing:
 - What you changed
 - What commands you ran
 - Any issues encountered and how you resolved them
 
 ## Update Task Status
 
-When the task is confirmed working, update that task's `"passes"` field in `prd-verification.md` from `false` to `true`.
+When the task is confirmed working, update that task's `"passes"` field in `prd-design-gap.md` from `false` to `true`.
 
 ## Commit Changes
 
 Make one git commit for that task only with a clear, descriptive message:
 ```
 git add .
-git commit -m "feat(verification): [brief description of what was implemented]"
+git commit -m "feat(gap): [brief description of what was implemented]"
 ```
 
 Do NOT run `git init`, do NOT change git remotes, and do NOT push.
@@ -74,19 +74,18 @@ Do NOT run `git init`, do NOT change git remotes, and do NOT push.
 - **Thompson Sampling**: σ_model is ONLY reflected through posterior sampling. NEVER include σ_model in point estimates
 - **Strategy-separated rewards**: Each strategy's reward is independent. No cross-strategy reward coupling
 - **ONNX**: Python-trained models are exported via ONNX for Rust-side inference
-- **Paper execution**: The forward test system MUST NEVER connect to actual order pathways. Paper execution is structurally guaranteed
-- **Existing crates**: Minimize changes to existing crates. The forward crate should use existing APIs
-- **New crate**: All forward test code goes in `crates/forward/` (fx-forward)
+- **Paper execution**: The forward test system MUST NEVER connect to actual order pathways
+- **Backward compatibility**: ONNX model is optional. When absent, fall back to heuristic regime detection
 
 ## Important Rules
 
 - ONLY work on a SINGLE task per iteration
 - Always verify with tests before marking a task as passing
-- Always log your progress in `activity-forward.md`
+- Always log your progress in `activity-design-gap.md`
 - Always commit after completing a task
 
 ## Completion
 
-When ALL tasks in `prd-backtest-fix.md` have `"passes": true`, output:
+When ALL tasks in `prd-design-gap.md` have `"passes": true`, output:
 
 <promise>COMPLETE</promise>
