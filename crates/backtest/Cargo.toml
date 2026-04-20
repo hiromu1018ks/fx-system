@@ -21,3 +21,4 @@ prost = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
 tempfile = { workspace = true }
+csv = { workspace = true }

@@ -41,3 +41,25 @@
 - `cargo fmt` — clean
 
 **Issues:** Bonferroni補正により、正当な変化点検出テスト（mean_shift, variance_shift）も引き続き通過することを確認
+
+### 2026-04-20: Task 3 — 履歴データローダーの実装（CSV対応）
+
+**What changed:**
+- `Cargo.toml`（workspace）: `csv = "1"` を追加
+- `crates/backtest/Cargo.toml`: `csv = { workspace = true }` を追加
+- `crates/backtest/src/data.rs`: 新規モジュール作成
+  - `DataTick` 構造体: CSV行のデシリアライズ（timestamp, bid, ask, bid_volume, ask_volume, symbol）
+  - `ValidatedTick` 構造体: バリデーション済みのナノ秒タイムスタンプ付きティック
+  - `load_csv()` / `load_csv_reader()`: CSV読み込み＋バリデーション（bid < ask、timestamp単調増加）
+  - `ticks_to_events()` / `tick_to_event()`: `ValidatedTick` → `GenericEvent` 変換
+  - `parse_timestamp()`: ISO 8601, Unix秒, Unix nsの柔軟パース
+  - 10のユニットテスト（タイムスタンプパース、CSV読み込み、バリデーション、イベント変換）
+- `crates/backtest/src/lib.rs`: `pub mod data;` を追加
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 463 passed, 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt` — clean
+
+**Issues:** なし

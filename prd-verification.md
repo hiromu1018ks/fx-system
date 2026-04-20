@@ -102,11 +102,8 @@ struct DataTick {
       "BacktestEngine::run_inner()がVec<DataTick>を受け取れるインターフェース追加",
       "ユニットテスト: 合成CSVの読み込み、バリデーション、エラーハンドリング"
     ],
-    "passes": false
+    "passes": true
   },
-  {
-    "category": "feature",
-    "description": "BacktestEngineへのFeatureExtractor統合",
     "steps": [
       "fx-backtestのCargo.tomlにfx-strategy依存を確認・追加（既にある場合は確認のみ）",
       "BacktestEngine::run_inner()内でMarketEventからFeatureExtractorを用いて特徴量抽出を行う処理を追加",
