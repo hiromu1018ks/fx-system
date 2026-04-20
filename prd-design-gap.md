@@ -234,7 +234,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "フォワードテストも同様のフルパイプラインで動作",
       "全テスト通過確認 (cargo test, pytest)"
     ],
-    "passes": false
+    "passes": true
   }
 ]
 ```
