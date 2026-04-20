@@ -1,9 +1,9 @@
-@prd-verification.md @activity-verification.md @prd-forward.md @prd.md
+@prd-backtest-fix.md @activity-backtest-fix.md @prd-verification.md @activity-verification.md @prd-forward.md @prd.md
 
-We are building the **Verification & Integration System** (検証・統合) according to the PRD in `prd-verification.md`.
-The core system (prd.md, 28 tasks) and forward test (prd-forward.md, 12 tasks) are both complete.
+We are fixing the **Backtest Engine** (バックテストエンジン修正) according to the PRD in `prd-backtest-fix.md`.
+5 issues: OOM fix (streaming), weekend gap PnL, TS posterior carry-over, Cholesky diagonal fallback, EET DST.
 
-First read `activity-verification.md` to see what was recently accomplished.
+First read `activity-backtest-fix.md` to see what was recently accomplished.
 
 ## Start the Application
 
@@ -24,7 +24,7 @@ If a port is taken, try another port.
 
 ## Work on Tasks
 
-Open `prd-verification.md` and find the single highest priority task where `"passes": false`.
+Open `prd-backtest-fix.md` and find the single highest priority task where `"passes": false`.
 
 Work on exactly ONE task:
 1. Implement the change according to the task steps
@@ -87,6 +87,6 @@ Do NOT run `git init`, do NOT change git remotes, and do NOT push.
 
 ## Completion
 
-When ALL tasks in `prd-verification.md` have `"passes": true`, output:
+When ALL tasks in `prd-backtest-fix.md` have `"passes": true`, output:
 
 <promise>COMPLETE</promise>

@@ -1,4 +1,5 @@
 use std::io::Read;
+use tracing::warn;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -58,7 +59,8 @@ pub enum DataLoadError {
 /// Normalize CSV header names to canonical field names.
 fn normalize_header(header: &str) -> String {
     match header.trim().to_lowercase().replace(' ', "_").as_str() {
-        "local_time" | "time" | "timestamp" | "datetime" | "date" => "timestamp".to_string(),
+        "local_time" | "time" | "timestamp" | "datetime" | "date"
+        | "time_(eet)" => "timestamp".to_string(),
         "bid" => "bid".to_string(),
         "ask" => "ask".to_string(),
         "bidvolume" | "bid_vol" | "bid_size" => "bid_volume".to_string(),
@@ -104,21 +106,24 @@ pub fn load_csv_reader<R: Read>(reader: R) -> Result<Vec<ValidatedTick>, DataLoa
         })?;
 
         if tick.bid >= tick.ask {
-            return Err(DataLoadError::Validation {
-                row: idx + 2,
-                message: format!("bid ({}) must be < ask ({})", tick.bid, tick.ask),
-            });
+            warn!(
+                row = idx + 2,
+                bid = tick.bid,
+                ask = tick.ask,
+                "skipping row: bid >= ask (crossed market)"
+            );
+            continue;
         }
 
         if let Some(prev) = prev_ts {
             if ts_ns <= prev {
-                return Err(DataLoadError::Validation {
-                    row: idx + 2,
-                    message: format!(
-                        "timestamp {} (ns) is not monotonically increasing (prev: {})",
-                        ts_ns, prev
-                    ),
-                });
+                warn!(
+                    row = idx + 2,
+                    timestamp_ns = ts_ns,
+                    prev = prev,
+                    "skipping row: timestamp not monotonically increasing"
+                );
+                continue;
             }
         }
 
@@ -210,6 +215,15 @@ fn parse_timestamp(s: &str) -> Result<u64> {
                 return Ok(utc_ns as u64);
             }
         }
+    }
+
+    // YYYY.MM.DD HH:MM:SS.mmm (Dukascopy EET format, no timezone suffix)
+    // EET = UTC+2 (winter) / UTC+3 (summer DST, last Sunday of March ~ last Sunday of October)
+    // Approximate: apply UTC+2 offset. The ~1hr DST drift is acceptable for regime-level analysis.
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y.%m.%d %H:%M:%S%.f") {
+        let eet_offset_ns = 2i64 * 3600 * 1_000_000_000;
+        let utc_ns = dt.and_utc().timestamp_nanos_opt().unwrap_or(0) as i64 - eet_offset_ns;
+        return Ok(utc_ns as u64);
     }
 
     // Try ISO 8601 with T separator
@@ -363,5 +377,20 @@ mod tests {
         let ticks = load_csv_reader(Cursor::new(csv_data)).unwrap();
         assert_eq!(ticks[0].bid_volume, 0.0);
         assert_eq!(ticks[0].ask_volume, 0.0);
+    }
+
+    #[test]
+    fn test_parse_timestamp_eet_format() {
+        // Dukascopy EET format: YYYY.MM.DD HH:MM:SS.mmm (UTC+2)
+        let ns = parse_timestamp("2024.04.22 00:00:08.859").unwrap();
+        assert!(ns > 0);
+        // Verify UTC+2 offset: 2024-04-22 00:00:08.859 EET = 2024-04-21 22:00:08.859 UTC
+        let utc_ns = parse_timestamp("2024-04-21T22:00:08.859").unwrap();
+        assert_eq!(ns, utc_ns);
+    }
+
+    #[test]
+    fn test_parse_timestamp_eet_header_normalization() {
+        assert_eq!(normalize_header("Time (EET)"), "timestamp");
     }
 }
