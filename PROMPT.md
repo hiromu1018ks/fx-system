@@ -1,14 +1,16 @@
-@prd.md @activity.md
+@prd-verification.md @activity-verification.md @prd-forward.md @prd.md
 
-We are building the project according to the PRD in this repo.
+We are building the **Verification & Integration System** (検証・統合) according to the PRD in `prd-verification.md`.
+The core system (prd.md, 28 tasks) and forward test (prd-forward.md, 12 tasks) are both complete.
 
-First read activity.md to see what was recently accomplished.
+First read `activity-verification.md` to see what was recently accomplished.
 
 ## Start the Application
 
 ### Rust (Core Execution Platform)
 - **Build**: `cargo build`
 - **Test**: `cargo test`
+- **Test forward only**: `cargo test -p fx-forward`
 - **Lint**: `cargo clippy`
 - **Format**: `cargo fmt --check`
 - **Run**: `cargo run` (or `cargo run --bin <binary-name>` for specific binaries)
@@ -22,7 +24,7 @@ If a port is taken, try another port.
 
 ## Work on Tasks
 
-Open prd.md and find the single highest priority task where `"passes": false`.
+Open `prd-verification.md` and find the single highest priority task where `"passes": false`.
 
 Work on exactly ONE task:
 1. Implement the change according to the task steps
@@ -44,21 +46,21 @@ After implementing, verify your work:
 
 ## Log Progress
 
-Append a dated progress entry to activity.md describing:
+Append a dated progress entry to `activity-verification.md` describing:
 - What you changed
 - What commands you ran
 - Any issues encountered and how you resolved them
 
 ## Update Task Status
 
-When the task is confirmed working, update that task's `"passes"` field in prd.md from `false` to `true`.
+When the task is confirmed working, update that task's `"passes"` field in `prd-verification.md` from `false` to `true`.
 
 ## Commit Changes
 
 Make one git commit for that task only with a clear, descriptive message:
 ```
 git add .
-git commit -m "feat: [brief description of what was implemented]"
+git commit -m "feat(verification): [brief description of what was implemented]"
 ```
 
 Do NOT run `git init`, do NOT change git remotes, and do NOT push.
@@ -72,16 +74,19 @@ Do NOT run `git init`, do NOT change git remotes, and do NOT push.
 - **Thompson Sampling**: σ_model is ONLY reflected through posterior sampling. NEVER include σ_model in point estimates
 - **Strategy-separated rewards**: Each strategy's reward is independent. No cross-strategy reward coupling
 - **ONNX**: Python-trained models are exported via ONNX for Rust-side inference
+- **Paper execution**: The forward test system MUST NEVER connect to actual order pathways. Paper execution is structurally guaranteed
+- **Existing crates**: Minimize changes to existing crates. The forward crate should use existing APIs
+- **New crate**: All forward test code goes in `crates/forward/` (fx-forward)
 
 ## Important Rules
 
 - ONLY work on a SINGLE task per iteration
 - Always verify with tests before marking a task as passing
-- Always log your progress in activity.md
+- Always log your progress in `activity-forward.md`
 - Always commit after completing a task
 
 ## Completion
 
-When ALL tasks have `"passes": true`, output:
+When ALL tasks in `prd-verification.md` have `"passes": true`, output:
 
 <promise>COMPLETE</promise>

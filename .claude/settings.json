@@ -34,7 +34,17 @@
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(toml:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(mv:*)"
     ],
     "deny": [
       "Bash(sudo:*)",
