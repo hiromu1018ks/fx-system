@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 13
-**Current Task:** Task 15 — 統計的検証パイプラインのE2Eテスト（Python側）
+**Tasks Completed:** 14
+**Current Task:** Task 16 — design.md §3.0 MDP定式化の実装整合性検証
 
 ---
 
@@ -347,3 +347,22 @@ Python側（research/bridge/）:
 - `pytest research/tests/test_bridge.py` — 12 passed, 0 failed
 
 **Issues:** なし。subprocessベースの連携によりpyo3の複雑な依存なしでRust-Python間のJSON I/Oを実現。ブリッジCLIは`research.analysis.pipeline.run_validation_pipeline()`を直接呼び出し
+
+### 2026-04-20: Task 15 — 統計的検証パイプラインのE2Eテスト（Python側）
+
+**What changed:**
+- `research/tests/test_e2e_validation.py` 新規作成（22テスト）:
+  - `TestE2eCpcv` (4 tests): bridge経由CPCV検証、train/test非重複確認、purge/embargo zoneの検証（各test group boundary前後のtrain除外確認）、負のリターンでのCPCV失敗確認
+  - `TestE2ePbo` (3 tests): 非過学習戦略の低PBO確認、過学習検出の構造検証、フルパイプライン経由のPBO実行確認
+  - `TestE2eDsr` (3 tests): 適正SharpeでのDSR確認、多重試行によるDSR低下確認、bridge経由DSR実行確認
+  - `TestE2eSharpeCeiling` (3 tests): 適正Sharpe通過、高Sharpe拒否（年率>1.5）、bridge経由での天井拒否確認
+  - `TestE2eInformationLeakage` (3 tests): 非リーク通過、リーク検出、フルパイプライン経由の情報リークチェック
+  - `TestE2eRewardSensitivity` (3 tests): 安定報酬関数のロバスト性確認、不安定報酬関数のfragile検出、フルパイプライン経由の感度分析
+  - `TestE2eFullRoundtrip` (3 tests): 最小パイプライン（4チェック: Sharpe/DSR/Complexity/CPCV）、全8チェックのフルパイプライン、再現性テスト
+
+**Commands run:**
+- `pytest research/tests/test_e2e_validation.py` — 22 passed, 0 failed
+- `pytest research/tests/` — 127 passed, 8 failed (pre-existing failures in test_environment.py and test_hdp_hmm.py, unrelated to this task)
+- `cargo test` — 784 passed, 0 failed (all Rust tests)
+
+**Issues:** なし。テスト設計時の修正: (1) CPCV purge zone検証をtest block単位のboundary確認に修正（非連続test groupの正しい処理）、(2) 情報リーク比率が負になり得るためvalue範囲チェックをisfiniteに変更、(3) 報酬関数の安定性/不安定性を明確にするため、安定関数はパラメータ無視（sum返却）、不安定関数は二乗感度（1/lr²）に設計

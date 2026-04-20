@@ -274,7 +274,7 @@ struct DataTick {
       "報酬関数感度分析テスト: λパラメータ摂動での安定性確認",
       "pytest で全テストが通ることを確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
