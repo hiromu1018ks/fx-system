@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::{Event, GenericEvent};
+use fx_events::gap_detector::GapDetector;
 use fx_events::header::EventHeader;
 use fx_events::projector::{StateProjector, StateSnapshot};
 use fx_events::proto;
@@ -478,6 +479,7 @@ impl BacktestEngine {
         let mut projector = StateProjector::new(&bus, self.config.global_position_limit, 1);
         let mut feature_extractor =
             FeatureExtractor::new(self.config.feature_extractor_config.clone());
+        let mut gap_detector = GapDetector::new(&bus, 1);
 
         let mut trades: Vec<TradeRecord> = Vec::new();
         let mut decisions: Vec<BacktestDecision> = Vec::new();
@@ -496,6 +498,14 @@ impl BacktestEngine {
 
             // Feed tick to KillSwitch for interval anomaly detection
             self.kill_switch.record_tick(tick_ns);
+
+            // Feed tick to GapDetector for sequence/timing gap detection
+            if let Err(e) = gap_detector.process_market_event_sync(event) {
+                debug!("Gap detector error: {}", e);
+            }
+
+            // Check if trading is halted due to severe gap
+            let gap_halted = gap_detector.is_trading_halted();
 
             if let Err(e) = projector.process_event(event) {
                 debug!("Failed to process market event: {}", e);
@@ -639,6 +649,24 @@ impl BacktestEngine {
             let mut strategy_decisions: Vec<(StrategyId, StrategyDecision)> = Vec::new();
 
             for &sid in &enabled_strategies {
+                // Skip all strategies when trading is halted due to severe gap
+                if gap_halted {
+                    strategy_decisions.push((
+                        sid,
+                        StrategyDecision {
+                            action: Action::Hold,
+                            q_point: 0.0,
+                            q_sampled: 0.0,
+                            posterior_std: 0.0,
+                            triggered: false,
+                            episode_active: false,
+                            should_close: false,
+                            skip_reason: Some("gap_detected".to_string()),
+                            remaining_hold_time_ms: 0,
+                        },
+                    ));
+                    continue;
+                }
                 // Skip all strategies when regime is unknown
                 if self.regime_cache.state().is_unknown() {
                     strategy_decisions.push((

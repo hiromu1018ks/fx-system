@@ -5,6 +5,7 @@ use anyhow::Result;
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::GenericEvent;
+use fx_events::gap_detector::GapDetector;
 use fx_events::header::EventHeader;
 use fx_execution::gateway::{ExecutionGatewayConfig, ExecutionRequest};
 use fx_gateway::market::TickData;
@@ -69,6 +70,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             self.config.risk_config.max_position_lots,
             1,
         );
+        let mut gap_detector = GapDetector::new(&bus, 1);
 
         let exec_config = ExecutionGatewayConfig::default();
         let mut paper_engine = PaperExecutionEngine::new(exec_config, seed);
@@ -124,6 +126,11 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             // Feed kill switch with tick timestamps for anomaly detection
             let _ = kill_switch.record_tick(tick_ns);
 
+            // Feed tick to GapDetector for sequence/timing gap detection
+            if let Err(e) = gap_detector.process_market_event(&market_event).await {
+                debug!("Gap detector error: {}", e);
+            }
+
             if let Err(e) = projector.process_event(&market_event) {
                 warn!("Projector error: {}", e);
                 continue;
@@ -135,6 +142,12 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             // Check kill switch
             if kill_switch.validate_order().is_err() {
                 debug!(ts = tick_ns, "Kill switch active, skipping");
+                continue;
+            }
+
+            // Check gap detector halt
+            if gap_detector.is_trading_halted() {
+                debug!(ts = tick_ns, "Trading halted due to severe gap");
                 continue;
             }
 

@@ -46,6 +46,7 @@ pub struct GapDetector {
     max_history: usize,
     publisher: EventPublisher,
     schema_version: u32,
+    halted: bool,
 }
 
 impl GapDetector {
@@ -64,6 +65,7 @@ impl GapDetector {
             max_history: DEFAULT_MAX_HISTORY,
             publisher,
             schema_version,
+            halted: false,
         }
     }
 
@@ -89,6 +91,7 @@ impl GapDetector {
             max_history: DEFAULT_MAX_HISTORY,
             publisher,
             schema_version,
+            halted: false,
         }
     }
 
@@ -111,8 +114,39 @@ impl GapDetector {
 
         if let Some(ref info) = gap_info {
             if info.level != GapLevel::None {
+                if info.level == GapLevel::Severe {
+                    self.halted = true;
+                }
                 self.publish_gap_event(info, event.header.timestamp_ns)
                     .await;
+            }
+        }
+
+        Ok(gap_info)
+    }
+
+    /// Synchronous version for use in non-async contexts (e.g. backtest engine).
+    /// Detects gaps and updates internal state but does not publish events.
+    pub fn process_market_event_sync(
+        &mut self,
+        event: &GenericEvent,
+    ) -> Result<Option<GapInfo>, String> {
+        let market = proto::MarketEventPayload::decode(event.payload_bytes())
+            .map_err(|e| format!("decode error: {e}"))?;
+
+        let current_seq = event.header.sequence_id;
+        let current_ts = market.timestamp_ns;
+
+        let gap_info = self.detect_gap(current_ts, current_seq);
+
+        self.update_statistics(current_ts);
+
+        self.last_timestamp_ns = Some(current_ts);
+        self.last_sequence_id = current_seq;
+
+        if let Some(ref info) = gap_info {
+            if info.level == GapLevel::Severe {
+                self.halted = true;
             }
         }
 
@@ -293,7 +327,11 @@ impl GapDetector {
     }
 
     pub fn is_trading_halted(&self) -> bool {
-        false
+        self.halted
+    }
+
+    pub fn reset_halt(&mut self) {
+        self.halted = false;
     }
 
     pub fn mean_interval_ns(&self) -> f64 {
@@ -439,6 +477,7 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.level, GapLevel::Severe);
         assert_eq!(info.missed_ticks, 3);
+        assert!(detector.is_trading_halted());
     }
 
     #[tokio::test]
@@ -458,6 +497,7 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.level, GapLevel::Severe);
         assert_eq!(info.missed_ticks, 5);
+        assert!(detector.is_trading_halted());
     }
 
     #[tokio::test]
@@ -831,6 +871,7 @@ mod tests {
         let result = detector.process_market_event(&event).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().level, GapLevel::Severe);
+        assert!(detector.is_trading_halted());
     }
 
     #[tokio::test]
@@ -938,5 +979,65 @@ mod tests {
         }
 
         assert!(subscriber.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_minor_gap_does_not_halt_trading() {
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+        assert!(!detector.is_trading_halted());
+
+        // Minor gap: skip 1 tick
+        let ts = NS_BASE + 11 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 12);
+        let result = detector.process_market_event(&event).await.unwrap();
+        assert_eq!(result.unwrap().level, GapLevel::Minor);
+        assert!(!detector.is_trading_halted());
+    }
+
+    #[tokio::test]
+    async fn test_reset_halt_clears_halted_state() {
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+
+        // Trigger severe gap
+        let ts = NS_BASE + 13 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 14);
+        detector.process_market_event(&event).await.unwrap();
+        assert!(detector.is_trading_halted());
+
+        // Reset
+        detector.reset_halt();
+        assert!(!detector.is_trading_halted());
+    }
+
+    #[tokio::test]
+    async fn test_halt_persists_across_normal_ticks() {
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+
+        // Trigger severe gap
+        let ts = NS_BASE + 13 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 14);
+        detector.process_market_event(&event).await.unwrap();
+        assert!(detector.is_trading_halted());
+
+        // Normal ticks after severe gap — halt persists
+        for i in 14..20 {
+            make_normal_tick(&mut detector, i).await;
+        }
+        assert!(detector.is_trading_halted());
     }
 }

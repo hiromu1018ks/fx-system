@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 5
-**Current Task:** Task 6 — GapDetector取引停止ロジック配線
+**Tasks Completed:** 6
+**Current Task:** Task 7 — PreFailureMetricsライブ配線
 
 ---
 
@@ -115,6 +115,38 @@
 **Commands run:**
 - `cargo test -p fx-strategy --lib -- test_dynamic_k` — 5 passed, 0 failed
 - `cargo test --workspace --no-fail-fast` — 1456 passed (+5 new), 3 failed (事前存在CSVバリデーション)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 6 — GapDetector取引停止ロジックの配線
+
+**What changed:**
+- `crates/events/src/gap_detector.rs`: GapDetectorに取引停止機能を実装
+  - `halted: bool` フィールドを追加し、`new()` / `with_config()` で `false` 初期化
+  - `process_market_event()` で Severe ギャップ検出時に `halted = true` を設定
+  - `is_trading_halted()` を `self.halted` を返すよう修正（旧: 常に `false`）
+  - `reset_halt()` メソッドを追加
+  - `process_market_event_sync()` 同期版を追加（バックテストエンジン用、イベント発行なし）
+  - 既存テスト2件に `assert!(detector.is_trading_halted())` を追加
+  - 新テスト3件追加:
+    - `test_minor_gap_does_not_halt_trading`: Minor → halted=false
+    - `test_reset_halt_clears_halted_state`: Severe → reset → false
+    - `test_halt_persists_across_normal_ticks`: 通常ティック後もhalt持続
+- `crates/backtest/src/engine.rs`: バックテストエンジンにGapDetector配線
+  - `run_inner()` で `GapDetector` を作成、各ティックを `process_market_event_sync()` で処理
+  - Phase 2 戦略意思決定ループの先頭で `gap_halted` チェック、halted時は全戦略 hold + skip_reason="gap_detected"
+- `crates/forward/src/runner.rs`: フォワードテストランナーにGapDetector配線
+  - `run()` で `GapDetector` を作成、各ティックを `process_market_event()` で処理
+  - kill switch チェック直後に `is_trading_halted()` チェック、halted時は continue
+- `crates/strategy/src/thompson_sampling.rs`: fmt修正 (事前存在のフォーマット問題)
+
+**Commands run:**
+- `cargo test -p fx-events --lib -- gap_detector` — 29 passed, 0 failed
+- `cargo build -p fx-backtest` — passed
+- `cargo build -p fx-forward` — passed
+- `cargo test --workspace --no-fail-fast` — 失敗は全て事前存在のCSVバリデーション (3件)
 - `cargo clippy` — no errors
 - `cargo fmt --check` — clean
 

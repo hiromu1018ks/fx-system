@@ -192,8 +192,11 @@ impl ThompsonSamplingPolicy {
 
         // Dynamic k: volatility and regime-dependent uncertainty penalty
         let regime_stability = (1.0 - features.volatility_ratio.min(1.0)).max(0.0);
-        let dynamic_k =
-            compute_dynamic_k(self.config.non_model_uncertainty_k, features.realized_volatility, regime_stability);
+        let dynamic_k = compute_dynamic_k(
+            self.config.non_model_uncertainty_k,
+            features.realized_volatility,
+            regime_stability,
+        );
         let non_model_penalty = dynamic_k * sigma_noise;
 
         let latency_penalty = self.config.latency_penalty_k * latency_ms;
@@ -2018,14 +2021,21 @@ mod tests {
     fn test_dynamic_k_low_stability_high_k() {
         let k = compute_dynamic_k(0.1, 0.01, 0.0);
         // Low stability: regime_multiplier = 1 + 2*(1-0) = 3.0 → k = 0.1 * 1.1 * 3.0 = 0.33
-        assert!(k > 0.3, "Low stability should significantly increase k: got {}", k);
+        assert!(
+            k > 0.3,
+            "Low stability should significantly increase k: got {}",
+            k
+        );
     }
 
     #[test]
     fn test_dynamic_k_zero_volatility_equals_base() {
         let k = compute_dynamic_k(0.1, 0.0, 1.0);
         // Zero vol, full stability: 1+0 * 1.0 = 1.0 → k = 0.1
-        assert!((k - 0.1).abs() < 1e-15, "Zero vol + full stability should give base_k");
+        assert!(
+            (k - 0.1).abs() < 1e-15,
+            "Zero vol + full stability should give base_k"
+        );
     }
 
     #[test]

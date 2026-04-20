@@ -128,7 +128,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "halted時: 全戦略hold強制 + TradeSkipEvent(reason: GAP_DETECTED) 発行",
       "テスト: Severeギャップ → is_trading_halted()=true、Minor → false、リセット → false"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
