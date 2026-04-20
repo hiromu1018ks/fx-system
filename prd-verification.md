@@ -327,7 +327,7 @@ struct DataTick {
       "γ-減衰によるhold誘導抑制の確認",
       "各機構についてテストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",

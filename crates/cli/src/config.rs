@@ -325,6 +325,9 @@ fn apply_strategy_a(
     f64_field(table, "hold_degeneration_inflation", |v| {
         cfg.hold_degeneration_inflation = v
     });
+    f64_field(table, "inflation_decay_rate", |v| {
+        cfg.inflation_decay_rate = v
+    });
     u64_field(table, "max_lot_size", |v| cfg.max_lot_size = v);
     u64_field(table, "min_lot_size", |v| cfg.min_lot_size = v);
     f64_field(table, "consistency_threshold", |v| {
@@ -368,6 +371,9 @@ fn apply_strategy_b(
     f64_field(table, "hold_degeneration_inflation", |v| {
         cfg.hold_degeneration_inflation = v
     });
+    f64_field(table, "inflation_decay_rate", |v| {
+        cfg.inflation_decay_rate = v
+    });
     u64_field(table, "max_lot_size", |v| cfg.max_lot_size = v);
     u64_field(table, "min_lot_size", |v| cfg.min_lot_size = v);
     f64_field(table, "consistency_threshold", |v| {
@@ -410,6 +416,9 @@ fn apply_strategy_c(
     });
     f64_field(table, "hold_degeneration_inflation", |v| {
         cfg.hold_degeneration_inflation = v
+    });
+    f64_field(table, "inflation_decay_rate", |v| {
+        cfg.inflation_decay_rate = v
     });
     u64_field(table, "max_lot_size", |v| cfg.max_lot_size = v);
     u64_field(table, "min_lot_size", |v| cfg.min_lot_size = v);

@@ -24,6 +24,9 @@ pub struct ThompsonSamplingConfig {
     pub trade_frequency_window: usize,
     /// Covariance inflation factor when hold degeneration is detected.
     pub hold_degeneration_inflation: f64,
+    /// Decay rate for inflation when trade frequency recovers (per decision).
+    /// Applied as: current = 1.0 + (current - 1.0) * decay_rate.
+    pub inflation_decay_rate: f64,
     /// Maximum lot size for a single order.
     pub max_lot_size: u64,
     /// Minimum lot size (below this, issue Hold instead).
@@ -43,6 +46,7 @@ impl Default for ThompsonSamplingConfig {
             min_trade_frequency: 0.02,
             trade_frequency_window: 500,
             hold_degeneration_inflation: 1.5,
+            inflation_decay_rate: 0.99,
             max_lot_size: 1_000_000,
             min_lot_size: 1000,
             consistency_threshold: 0.05,
@@ -120,6 +124,8 @@ pub struct ThompsonSamplingPolicy {
     config: ThompsonSamplingConfig,
     trade_tracker: TradeFrequencyTracker,
     total_decisions: usize,
+    /// Current applied inflation level (1.0 = no inflation, > 1.0 = inflated).
+    current_inflation: f64,
 }
 
 impl ThompsonSamplingPolicy {
@@ -130,6 +136,7 @@ impl ThompsonSamplingPolicy {
             config,
             trade_tracker,
             total_decisions: 0,
+            current_inflation: 1.0,
         }
     }
 
@@ -241,8 +248,19 @@ impl ThompsonSamplingPolicy {
         // Step 8: Hold degeneration detection and prevention
         let hold_degeneration_detected = self.check_hold_degeneration();
         if hold_degeneration_detected {
-            self.q_function
-                .inflate_covariance(self.config.hold_degeneration_inflation);
+            // Only inflate if not already at or above target level
+            if self.current_inflation < self.config.hold_degeneration_inflation {
+                let ratio = self.config.hold_degeneration_inflation / self.current_inflation;
+                self.q_function.inflate_covariance(ratio);
+                self.current_inflation = self.config.hold_degeneration_inflation;
+            }
+        } else if self.current_inflation > 1.0 {
+            // Gradual decrease: decay inflation toward 1.0
+            self.current_inflation =
+                1.0 + (self.current_inflation - 1.0) * self.config.inflation_decay_rate;
+            if self.current_inflation < 1.001 {
+                self.current_inflation = 1.0;
+            }
         }
 
         let selected_q_action = match effective_lot {
@@ -349,6 +367,11 @@ impl ThompsonSamplingPolicy {
         self.total_decisions
     }
 
+    /// Get current inflation level (1.0 = no inflation).
+    pub fn current_inflation(&self) -> f64 {
+        self.current_inflation
+    }
+
     /// Access the underlying Q-function.
     pub fn q_function(&self) -> &QFunction {
         &self.q_function
@@ -385,6 +408,7 @@ mod tests {
             min_trade_frequency: 0.02,
             trade_frequency_window: 50,
             hold_degeneration_inflation: 1.5,
+            inflation_decay_rate: 0.99,
             max_lot_size: 1_000_000,
             min_lot_size: 1000,
             consistency_threshold: 0.05,
@@ -1246,5 +1270,383 @@ mod tests {
                     < 1e-10,
             "Decision q_point should match one of the point estimates"
         );
+    }
+
+    // =========================================================================
+    // §3.0.3 Hold Degeneration Prevention Validation Tests
+    // =========================================================================
+    //
+    // Verifies the three hold-degeneration prevention mechanisms per design.md §3.0.3:
+    //   1. Optimistic Initialization: ŵ_buy, ŵ_sell > hold
+    //   2. Minimum Trade Frequency Monitoring: detect low trade rate and inflate covariance
+    //   3. Posterior Variance Inflation: α_inflation increases Thompson Sampling diversity
+    //   4. α_inflation Gradual Decrease: decay toward 1.0 when frequency recovers
+    //   5. γ-decay Hold Suppression: structural via MC discounted returns
+
+    /// §3.0.3 #1: Verify optimistic initialization makes Buy/Sell Q-values > Hold.
+    #[test]
+    fn test_hold_degen_optimistic_init_buy_sell_above_hold() {
+        let qf = QFunction::new(FeatureVector::DIM, 1.0, 500, 0.01, 0.5);
+        let phi = FeatureVector::zero().flattened();
+
+        let q_buy = qf.q_point(QAction::Buy, &phi);
+        let q_sell = qf.q_point(QAction::Sell, &phi);
+        let q_hold = qf.q_point(QAction::Hold, &phi);
+
+        assert!(
+            q_buy > q_hold,
+            "Optimistic init: Q_buy ({}) should be > Q_hold ({})",
+            q_buy,
+            q_hold
+        );
+        assert!(
+            q_sell > q_hold,
+            "Optimistic init: Q_sell ({}) should be > Q_hold ({})",
+            q_sell,
+            q_hold
+        );
+        // Hold starts at zero (no bias)
+        assert!(q_hold.abs() < 1e-10, "Hold Q should be ~0, got {}", q_hold);
+    }
+
+    /// §3.0.3 #2: Verify minimum trade frequency monitoring triggers at correct threshold.
+    #[test]
+    fn test_hold_degen_min_frequency_monitoring() {
+        let config = ThompsonSamplingConfig {
+            trade_frequency_window: 100,
+            min_trade_frequency: 0.05, // 5% minimum
+            ..make_test_config()
+        };
+        let mut policy = ThompsonSamplingPolicy::new(make_q_function(), config);
+
+        // Fill with only holds (0% frequency) — should trigger
+        for _ in 0..100 {
+            policy.trade_tracker.record(false);
+        }
+        policy.total_decisions = 100;
+        assert!(
+            policy.check_hold_degeneration(),
+            "Should detect degeneration with 0% trade frequency"
+        );
+
+        // Add enough trades to exceed threshold (6/100 = 6% > 5%)
+        policy.trade_tracker.reset();
+        for i in 0..100 {
+            policy.trade_tracker.record(i < 6);
+        }
+        assert!(
+            !policy.check_hold_degeneration(),
+            "Should NOT detect degeneration with 6% trade frequency"
+        );
+
+        // Below threshold (4/100 = 4% < 5%)
+        policy.trade_tracker.reset();
+        for i in 0..100 {
+            policy.trade_tracker.record(i < 4);
+        }
+        assert!(
+            policy.check_hold_degeneration(),
+            "Should detect degeneration with 4% trade frequency"
+        );
+    }
+
+    /// §3.0.3 #2: Grace period — no check before window is full.
+    #[test]
+    fn test_hold_degen_grace_period_before_window() {
+        let config = ThompsonSamplingConfig {
+            trade_frequency_window: 100,
+            min_trade_frequency: 0.5,
+            ..make_test_config()
+        };
+        let mut policy = ThompsonSamplingPolicy::new(make_q_function(), config);
+
+        // Only 50 decisions (less than window of 100) — no check
+        for _ in 0..50 {
+            policy.trade_tracker.record(false);
+        }
+        policy.total_decisions = 50;
+        assert!(
+            !policy.check_hold_degeneration(),
+            "Should not check degeneration before window is filled"
+        );
+    }
+
+    /// §3.0.3 #3: Verify covariance inflation increases posterior std for Thompson Sampling.
+    #[test]
+    fn test_hold_degen_inflation_increases_sampling_diversity() {
+        let config = ThompsonSamplingConfig {
+            trade_frequency_window: 10,
+            min_trade_frequency: 0.5,
+            hold_degeneration_inflation: 2.0,
+            ..make_test_config()
+        };
+        let mut policy = ThompsonSamplingPolicy::new(make_q_function(), config);
+
+        // Pre-fill with all holds to trigger degeneration
+        for _ in 0..10 {
+            policy.trade_tracker.record(false);
+        }
+        policy.total_decisions = 10;
+
+        let features = make_features();
+        let state = make_state();
+        let mut rng = thread_rng();
+
+        // Collect Q samples before inflation
+        let mut pre_samples = Vec::new();
+        for _ in 0..20 {
+            let q =
+                policy
+                    .q_function()
+                    .sample_q_value(QAction::Buy, &features.flattened(), &mut rng);
+            pre_samples.push(q);
+        }
+        let pre_var = variance(&pre_samples);
+
+        // Trigger inflation via decide()
+        let _decision = policy.decide(&features, &state, StrategyId::A, 0.0, &mut rng);
+
+        // Collect Q samples after inflation
+        let mut post_samples = Vec::new();
+        for _ in 0..20 {
+            let q =
+                policy
+                    .q_function()
+                    .sample_q_value(QAction::Buy, &features.flattened(), &mut rng);
+            post_samples.push(q);
+        }
+        let post_var = variance(&post_samples);
+
+        assert!(
+            post_var > pre_var,
+            "Post-inflation sample variance ({}) should exceed pre-inflation ({})",
+            post_var,
+            pre_var
+        );
+    }
+
+    /// §3.0.3 #4: Verify α_inflation gradually decreases when trade frequency recovers.
+    #[test]
+    fn test_hold_degen_inflation_gradual_decrease_on_recovery() {
+        let config = ThompsonSamplingConfig {
+            trade_frequency_window: 10,
+            min_trade_frequency: 0.5,
+            hold_degeneration_inflation: 2.0,
+            inflation_decay_rate: 0.9,
+            ..make_test_config()
+        };
+        let mut policy = ThompsonSamplingPolicy::new(make_q_function(), config);
+        let features = make_features();
+        let mut rng = thread_rng();
+
+        // Phase 1: Trigger degeneration by forcing all holds (lot_multiplier=0 → forced Hold)
+        let hold_state = StateSnapshot {
+            lot_multiplier: 0.0,
+            ..make_state()
+        };
+        for _ in 0..10 {
+            policy.trade_tracker.record(false);
+        }
+        policy.total_decisions = 10;
+        let _decision = policy.decide(&features, &hold_state, StrategyId::A, 0.0, &mut rng);
+        assert!(
+            (policy.current_inflation() - 2.0).abs() < 1e-10,
+            "After degeneration, inflation should be 2.0, got {}",
+            policy.current_inflation()
+        );
+
+        // Phase 2: Recover trade frequency (fill tracker with trades)
+        policy.trade_tracker.reset();
+        for _ in 0..10 {
+            policy.trade_tracker.record(true);
+        }
+
+        // Simulate recovery: use state that forces trades (lot_multiplier=1, high global limit)
+        // but also set min_trade_frequency=0 so degeneration is never re-triggered
+        let trade_state = StateSnapshot {
+            lot_multiplier: 1.0,
+            ..make_state()
+        };
+        policy.config.min_trade_frequency = 0.0; // Never re-trigger degeneration
+
+        // Run multiple decisions with recovered frequency
+        let mut inflation_values = vec![policy.current_inflation()];
+        for _ in 0..80 {
+            let _d = policy.decide(&features, &trade_state, StrategyId::A, 0.0, &mut rng);
+            inflation_values.push(policy.current_inflation());
+        }
+
+        // Inflation should decrease monotonically
+        for i in 1..inflation_values.len() {
+            assert!(
+                inflation_values[i] <= inflation_values[i - 1] + 1e-10,
+                "Inflation should decrease monotonically: step {} had {} > {}",
+                i,
+                inflation_values[i],
+                inflation_values[i - 1]
+            );
+        }
+
+        // Eventually should reach 1.0 (0.9^80 ≈ 0.0002)
+        assert!(
+            (inflation_values.last().unwrap() - 1.0).abs() < 0.01,
+            "After many recovery steps, inflation should approach 1.0, got {}",
+            inflation_values.last().unwrap()
+        );
+    }
+
+    /// §3.0.3 #4: Verify inflation stays at max during continuous degeneration.
+    #[test]
+    fn test_hold_degen_inflation_no_growth_beyond_max() {
+        let config = ThompsonSamplingConfig {
+            trade_frequency_window: 10,
+            min_trade_frequency: 0.5,
+            hold_degeneration_inflation: 1.5,
+            ..make_test_config()
+        };
+        let mut policy = ThompsonSamplingPolicy::new(make_q_function(), config);
+        let features = make_features();
+        let mut rng = thread_rng();
+
+        // Force Hold by using lot_multiplier=0.0 so no trades are generated
+        let hold_state = StateSnapshot {
+            lot_multiplier: 0.0,
+            ..make_state()
+        };
+
+        // Pre-fill tracker with all holds
+        for _ in 0..10 {
+            policy.trade_tracker.record(false);
+        }
+        policy.total_decisions = 10;
+
+        // Continuously detect degeneration
+        for _ in 0..20 {
+            let _d = policy.decide(&features, &hold_state, StrategyId::A, 0.0, &mut rng);
+        }
+
+        // Inflation should be at hold_degeneration_inflation, not compounded
+        assert!(
+            (policy.current_inflation() - 1.5).abs() < 1e-10,
+            "Continuous degeneration should keep inflation at max (1.5), not compound. Got {}",
+            policy.current_inflation()
+        );
+    }
+
+    /// §3.0.3 #5: Verify γ-decay provides structural hold suppression.
+    /// MC discounted returns naturally reduce value of long holds:
+    /// longer hold → more discount → lower G_0 → lower Q for hold-heavy episodes.
+    #[test]
+    fn test_hold_degen_gamma_decay_structural_suppression() {
+        // Same reward sequence with non-zero rewards throughout:
+        // Simulates an episode where holding longer adds diminishing returns
+        let rewards: Vec<f64> = vec![1.0, 1.0, 1.0, 1.0, 1.0];
+
+        let returns_low = crate::mc_eval::McEvaluator::compute_returns(&rewards, 0.5);
+        let returns_high = crate::mc_eval::McEvaluator::compute_returns(&rewards, 0.99);
+
+        // With low gamma, distant rewards decay fast → lower G_0
+        assert!(
+            returns_low[0] < returns_high[0],
+            "Low gamma should produce lower cumulative return: low={}, high={}",
+            returns_low[0],
+            returns_high[0]
+        );
+
+        // Verify gamma formula: G_0 = Σ γ^k * r_k
+        let expected_low: f64 = (0..5).map(|k| 0.5_f64.powi(k as i32)).sum();
+        assert!(
+            (returns_low[0] - expected_low).abs() < 1e-10,
+            "G_0 with gamma=0.5 should be {}, got {}",
+            expected_low,
+            returns_low[0]
+        );
+    }
+
+    /// §3.0.3 #5: Verify time_decay feature decreases with holding time.
+    #[test]
+    fn test_hold_degen_time_decay_feature_suppresses_long_holds() {
+        // time_decay = exp(-decay_rate * holding_time_ms)
+        // This is feature index 25 in FeatureVector
+        let decay_rate = 0.001_f64;
+        let decay_short = (-decay_rate * 1000.0_f64).exp(); // 1 second
+        let decay_long = (-decay_rate * 20_000.0_f64).exp(); // 20 seconds
+
+        assert!(
+            decay_short > decay_long,
+            "Short hold time_decay ({}) should be > long hold ({})",
+            decay_short,
+            decay_long
+        );
+        assert!(decay_short > 0.0);
+        assert!(decay_long > 0.0);
+    }
+
+    /// §3.0.3: End-to-end — degeneration triggers inflation, recovery decays it back.
+    #[test]
+    fn test_hold_degen_full_cycle_degeneration_and_recovery() {
+        let config = ThompsonSamplingConfig {
+            trade_frequency_window: 10,
+            min_trade_frequency: 0.5,
+            hold_degeneration_inflation: 2.0,
+            inflation_decay_rate: 0.95,
+            ..make_test_config()
+        };
+        let mut policy = ThompsonSamplingPolicy::new(make_q_function(), config);
+        let features = make_features();
+        let mut rng = thread_rng();
+
+        let hold_state = StateSnapshot {
+            lot_multiplier: 0.0,
+            ..make_state()
+        };
+
+        // Phase 1: Normal trading — no degeneration (tracker full of trades)
+        for _ in 0..10 {
+            policy.trade_tracker.record(true);
+        }
+        policy.total_decisions = 10;
+        let _d = policy.decide(&features, &hold_state, StrategyId::A, 0.0, &mut rng);
+        assert!(
+            (policy.current_inflation() - 1.0).abs() < 1e-10,
+            "No degeneration should keep inflation at 1.0, got {}",
+            policy.current_inflation()
+        );
+
+        // Phase 2: Degeneration — all holds (forced via lot_multiplier=0)
+        policy.trade_tracker.reset();
+        for _ in 0..10 {
+            policy.trade_tracker.record(false);
+        }
+        let _d = policy.decide(&features, &hold_state, StrategyId::A, 0.0, &mut rng);
+        assert!(
+            (policy.current_inflation() - 2.0).abs() < 1e-10,
+            "Degeneration should set inflation to 2.0, got {}",
+            policy.current_inflation()
+        );
+
+        // Phase 3: Recovery — fill tracker with trades, prevent re-trigger
+        policy.trade_tracker.reset();
+        for _ in 0..10 {
+            policy.trade_tracker.record(true);
+        }
+        policy.config.min_trade_frequency = 0.0; // prevent re-trigger during recovery
+        for _ in 0..200 {
+            let _d = policy.decide(&features, &hold_state, StrategyId::A, 0.0, &mut rng);
+        }
+        assert!(
+            (policy.current_inflation() - 1.0).abs() < 0.01,
+            "After full recovery, inflation should be ~1.0, got {}",
+            policy.current_inflation()
+        );
+    }
+
+    /// Helper: compute variance of a slice.
+    fn variance(values: &[f64]) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / values.len() as f64
     }
 }

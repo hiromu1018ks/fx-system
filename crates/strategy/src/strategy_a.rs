@@ -57,6 +57,8 @@ pub struct StrategyAConfig {
     pub trade_frequency_window: usize,
     /// Covariance inflation factor for hold degeneration.
     pub hold_degeneration_inflation: f64,
+    /// Decay rate for inflation when trade frequency recovers.
+    pub inflation_decay_rate: f64,
     /// Maximum lot size per order.
     pub max_lot_size: u64,
     /// Minimum lot size (below this → Hold).
@@ -85,6 +87,7 @@ impl Default for StrategyAConfig {
             min_trade_frequency: 0.02,
             trade_frequency_window: 500,
             hold_degeneration_inflation: 1.5,
+            inflation_decay_rate: 0.99,
             max_lot_size: 1_000_000,
             min_lot_size: 1000,
             consistency_threshold: 0.05,
@@ -127,6 +130,7 @@ pub struct StrategyA {
     q_function: QFunction,
     trade_history: Vec<bool>,
     total_decisions: usize,
+    current_inflation: f64,
 }
 
 impl StrategyA {
@@ -145,6 +149,7 @@ impl StrategyA {
             q_function,
             trade_history: Vec::with_capacity(trade_capacity),
             total_decisions: 0,
+            current_inflation: 1.0,
         }
     }
 
@@ -477,8 +482,17 @@ impl StrategyA {
         // Hold degeneration monitoring
         let hold_degeneration_detected = self.check_hold_degeneration();
         if hold_degeneration_detected {
-            self.q_function
-                .inflate_covariance(self.config.hold_degeneration_inflation);
+            if self.current_inflation < self.config.hold_degeneration_inflation {
+                let ratio = self.config.hold_degeneration_inflation / self.current_inflation;
+                self.q_function.inflate_covariance(ratio);
+                self.current_inflation = self.config.hold_degeneration_inflation;
+            }
+        } else if self.current_inflation > 1.0 {
+            self.current_inflation =
+                1.0 + (self.current_inflation - 1.0) * self.config.inflation_decay_rate;
+            if self.current_inflation < 1.001 {
+                self.current_inflation = 1.0;
+            }
         }
 
         let selected_q_action = match effective_action {
@@ -517,6 +531,10 @@ impl StrategyA {
 
     pub fn config(&self) -> &StrategyAConfig {
         &self.config
+    }
+
+    pub fn current_inflation(&self) -> f64 {
+        self.current_inflation
     }
 
     pub fn reset_trade_tracker(&mut self) {

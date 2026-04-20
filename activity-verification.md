@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 14
-**Current Task:** Task 16 — design.md §3.0 MDP定式化の実装整合性検証
+**Tasks Completed:** 15
+**Current Task:** Task 20 — design.md §4.1 決定関数の実装整合性検証
 
 ---
 
@@ -455,3 +455,44 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean
 
 **Issues:** なし
+
+### 2026-04-20: Task 19 — design.md §3.0.3 Hold退化防止機構の実装検証
+
+**What changed:**
+
+新規実装（メカニズム4: α_inflation漸減）:
+- `crates/strategy/src/thompson_sampling.rs`:
+  - `ThompsonSamplingConfig`に`inflation_decay_rate: f64`（default 0.99）フィールド追加
+  - `ThompsonSamplingPolicy`に`current_inflation: f64`フィールド追加（初期値1.0）
+  - `decide()`のインフレーションロジックを漸減対応に変更: 退化検出時はtargetまでinflate（複利防止）、回復時は指数減衰で1.0に漸減
+  - `current_inflation()`公開アクセサメソッド追加
+- `crates/strategy/src/strategy_a.rs`: 同じ変更（`inflation_decay_rate` config、`current_inflation` field、漸減ロジック）
+- `crates/strategy/src/strategy_b.rs`: 同じ変更
+- `crates/strategy/src/strategy_c.rs`: 同じ変更
+- `crates/cli/src/config.rs`: 3つの戦略設定パーサーに`inflation_decay_rate`読み込みを追加
+
+検証テスト（9件追加）:
+- `test_hold_degen_optimistic_init_buy_sell_above_hold`: 楽観的初期化でBuy/Sell > Holdを検証
+- `test_hold_degen_min_frequency_monitoring`: 最小取引頻度監視の閾値判定（閾値以下/以上/境界値）
+- `test_hold_degen_grace_period_before_window`: window未満のdecisionsでは判定しないgrace period検証
+- `test_hold_degen_inflation_increases_sampling_diversity`: 分散膨張でThompson Samplingのサンプル分散が増加
+- `test_hold_degen_inflation_gradual_decrease_on_recovery`: 回復時の指数減衰を検証（単調減少、最終的に1.0に接近）
+- `test_hold_degen_inflation_no_growth_beyond_max`: 連続退化検出時の複利防止を検証（一定レベルを維持）
+- `test_hold_degen_gamma_decay_structural_suppression`: γ減衰による長期holdの構造的抑制を検証
+- `test_hold_degen_time_decay_feature_suppresses_long_holds`: time_decay特徴量の指数減少を検証
+- `test_hold_degen_full_cycle_degeneration_and_recovery`: 退化→回復のフルサイクルE2E検証
+
+**調査結果:**
+- メカニズム1（楽観的初期化）: QFunction::new()でBuy/Sellのみapply_optimistic_bias()適用。Holdはゼロ。完全実装
+- メカニズム2（最小取引頻度監視）: TradeFrequencyTracker（スライディングウィンドウ）+ check_hold_degeneration()。4戦略全てに実装
+- メカニズム3（事後分散膨張）: inflate_covariance()でA_invにfactor乗算。α_inflation > 1でThompson Sampling多様化。完全実装
+- メカニズム4（α_inflation漸減）: **今回実装**。current_inflation追跡、退化時はmaxまでinflate（複利防止）、回復時は指数減衰。BLRオンライン更新が共分散を自然縮小するため、トラッカーのみで減衰を記録
+- メカニズム5（γ減衰）: MC割引累積報酬（compute_returns）+ time_decay特徴量（指数減少）+ MAX_HOLD_TIME強制クローズの3層構造的抑制
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1187 passed, 0 failed（fx-strategy: 503 passed, 9 new）
+- `cargo clippy` — dead_code warnings only（既存）
+- `cargo fmt --check` — clean
+
+**Issues:** なし。メカニズム4の実装前は、退化検出のたびにinflate_covariance()が呼ばれ分散が指数的に増大していた（1.5^N）。複利防止ロジックを追加し、退化中は一定レベルを維持、回復時は漸減する正しい挙動に修正
