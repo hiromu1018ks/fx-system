@@ -1,6 +1,6 @@
 use std::io::Read;
-use tracing::warn;
 use std::path::Path;
+use tracing::warn;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDateTime;
@@ -59,8 +59,9 @@ pub enum DataLoadError {
 /// Normalize CSV header names to canonical field names.
 fn normalize_header(header: &str) -> String {
     match header.trim().to_lowercase().replace(' ', "_").as_str() {
-        "local_time" | "time" | "timestamp" | "datetime" | "date"
-        | "time_(eet)" => "timestamp".to_string(),
+        "local_time" | "time" | "timestamp" | "datetime" | "date" | "time_(eet)" => {
+            "timestamp".to_string()
+        }
         "bid" => "bid".to_string(),
         "ask" => "ask".to_string(),
         "bidvolume" | "bid_vol" | "bid_size" => "bid_volume".to_string(),
@@ -93,12 +94,13 @@ pub fn load_csv_reader<R: Read>(reader: R) -> Result<Vec<ValidatedTick>, DataLoa
             message: e.to_string(),
         })?;
 
-        let tick: DataTick = record
-            .deserialize(Some(&normalized))
-            .map_err(|e| DataLoadError::CsvParse {
-                row: idx + 2,
-                message: e.to_string(),
-            })?;
+        let tick: DataTick =
+            record
+                .deserialize(Some(&normalized))
+                .map_err(|e| DataLoadError::CsvParse {
+                    row: idx + 2,
+                    message: e.to_string(),
+                })?;
 
         let ts_ns = parse_timestamp(&tick.timestamp).map_err(|e| DataLoadError::Validation {
             row: idx + 2,
@@ -202,8 +204,17 @@ fn parse_timestamp(s: &str) -> Result<u64> {
         let tz_offset_secs: i32 = if !tz_str.is_empty() {
             let sign = if tz_str.starts_with('-') { -1 } else { 1i32 };
             let digits = tz_str.trim_start_matches('+').trim_start_matches('-');
-            sign * digits.get(..2).and_then(|h| h.parse::<i32>().ok()).unwrap_or(0) * 3600
-                + sign * digits.get(2..).and_then(|m| m.parse::<i32>().ok()).unwrap_or(0) * 60
+            sign * digits
+                .get(..2)
+                .and_then(|h| h.parse::<i32>().ok())
+                .unwrap_or(0)
+                * 3600
+                + sign
+                    * digits
+                        .get(2..)
+                        .and_then(|m| m.parse::<i32>().ok())
+                        .unwrap_or(0)
+                    * 60
         } else {
             0
         };
@@ -218,12 +229,28 @@ fn parse_timestamp(s: &str) -> Result<u64> {
     }
 
     // YYYY.MM.DD HH:MM:SS.mmm (Dukascopy EET format, no timezone suffix)
-    // EET = UTC+2 (winter) / UTC+3 (summer DST, last Sunday of March ~ last Sunday of October)
-    // Approximate: apply UTC+2 offset. The ~1hr DST drift is acceptable for regime-level analysis.
+    // EET = UTC+2 (winter) / EEST = UTC+3 (summer DST)
+    // Use Europe/Helsinki timezone for automatic DST detection.
     if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y.%m.%d %H:%M:%S%.f") {
-        let eet_offset_ns = 2i64 * 3600 * 1_000_000_000;
-        let utc_ns = dt.and_utc().timestamp_nanos_opt().unwrap_or(0) as i64 - eet_offset_ns;
-        return Ok(utc_ns as u64);
+        let helsinki = chrono_tz::Europe::Helsinki;
+        let local = dt.and_local_timezone(helsinki).single();
+        let utc_ns = match local {
+            Some(local_dt) => local_dt.timestamp_nanos_opt().unwrap_or(0) as u64,
+            None => {
+                // Ambiguous time (fall-back) or non-existent (spring-forward): prefer earlier
+                let earliest = dt.and_local_timezone(helsinki).earliest();
+                match earliest {
+                    Some(e) => e.timestamp_nanos_opt().unwrap_or(0) as u64,
+                    None => {
+                        // Non-existent local time: use UTC+2 as fallback
+                        let eet_offset_ns = 2i64 * 3600 * 1_000_000_000;
+                        (dt.and_utc().timestamp_nanos_opt().unwrap_or(0) as i64 - eet_offset_ns)
+                            as u64
+                    }
+                }
+            }
+        };
+        return Ok(utc_ns);
     }
 
     // Try ISO 8601 with T separator
@@ -380,12 +407,56 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_timestamp_eet_format() {
-        // Dukascopy EET format: YYYY.MM.DD HH:MM:SS.mmm (UTC+2)
+    fn test_parse_timestamp_eet_format_winter() {
+        // Dukascopy EET format: YYYY.MM.DD HH:MM:SS.mmm
+        // Winter (EET = UTC+2): 2024-01-15 12:00:00 EET = 2024-01-15 10:00:00 UTC
+        let ns = parse_timestamp("2024.01.15 12:00:00.000").unwrap();
+        let utc_ns = parse_timestamp("2024-01-15T10:00:00").unwrap();
+        assert_eq!(ns, utc_ns);
+    }
+
+    #[test]
+    fn test_parse_timestamp_eet_format_summer_dst() {
+        // Summer (EEST = UTC+3): 2024-04-22 00:00:08.859 EET = 2024-04-21 21:00:08.859 UTC
         let ns = parse_timestamp("2024.04.22 00:00:08.859").unwrap();
-        assert!(ns > 0);
-        // Verify UTC+2 offset: 2024-04-22 00:00:08.859 EET = 2024-04-21 22:00:08.859 UTC
-        let utc_ns = parse_timestamp("2024-04-21T22:00:08.859").unwrap();
+        let utc_ns = parse_timestamp("2024-04-21T21:00:08.859").unwrap();
+        assert_eq!(ns, utc_ns);
+    }
+
+    #[test]
+    fn test_parse_timestamp_eet_dst_transition_spring() {
+        // DST starts last Sunday of March 2024 (March 31, 03:00 EET → 04:00 EEST)
+        // Before transition: 2024-03-31 02:00:00 EET (UTC+2) = 2024-03-31 00:00:00 UTC
+        let ns_before = parse_timestamp("2024.03.31 02:00:00.000").unwrap();
+        let utc_before = parse_timestamp("2024-03-31T00:00:00").unwrap();
+        assert_eq!(ns_before, utc_before);
+
+        // After transition: 2024-03-31 04:00:00 EEST (UTC+3) = 2024-03-31 01:00:00 UTC
+        let ns_after = parse_timestamp("2024.03.31 04:00:00.000").unwrap();
+        let utc_after = parse_timestamp("2024-03-31T01:00:00").unwrap();
+        assert_eq!(ns_after, utc_after);
+    }
+
+    #[test]
+    fn test_parse_timestamp_eet_dst_transition_autumn() {
+        // DST ends last Sunday of October 2024 (October 27, 04:00 EEST → 03:00 EET)
+        // Before transition (clearly DST): 2024-10-27 02:00:00 EEST (UTC+3) = 2024-10-26 23:00:00 UTC
+        let ns_before = parse_timestamp("2024.10.27 02:00:00.000").unwrap();
+        let utc_before = parse_timestamp("2024-10-26T23:00:00").unwrap();
+        assert_eq!(ns_before, utc_before);
+
+        // After transition (clearly standard): 2024-10-27 05:00:00 EET (UTC+2) = 2024-10-27 03:00:00 UTC
+        let ns_after = parse_timestamp("2024.10.27 05:00:00.000").unwrap();
+        let utc_after = parse_timestamp("2024-10-27T03:00:00").unwrap();
+        assert_eq!(ns_after, utc_after);
+    }
+
+    #[test]
+    fn test_parse_timestamp_eet_dst_ambiguous_time_earliest() {
+        // At 2024-10-27 03:30:00, clocks have gone back so this time exists in both EEST and EET.
+        // earliest() picks EEST (UTC+3) → 2024-10-27 00:30:00 UTC
+        let ns = parse_timestamp("2024.10.27 03:30:00.000").unwrap();
+        let utc_ns = parse_timestamp("2024-10-27T00:30:00").unwrap();
         assert_eq!(ns, utc_ns);
     }
 

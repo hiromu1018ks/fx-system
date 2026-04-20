@@ -88,7 +88,7 @@
       "既存の test_parse_timestamp_eet_format テストが通ることを確認",
       "3月最終日曜・10月最終日曜の境界テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "fix",
