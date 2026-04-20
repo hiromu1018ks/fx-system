@@ -87,9 +87,8 @@ struct DataTick {
       "安定分布データでの誤検出率が統計的に期待範囲内（false positive rate < 0.05）になることを確認",
       "テストが安定して通ることを確認"
     ],
-    "passes": false
+    "passes": true
   },
-  {
     "category": "feature",
     "description": "履歴データローダーの実装（CSV対応）",
     "steps": [

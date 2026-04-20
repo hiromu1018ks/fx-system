@@ -26,3 +26,18 @@
 - `cargo fmt --check` — clean
 
 **Issues:** None
+
+### 2026-04-20: Task 2 — Change Point Detection誤検出テストの修正
+
+**What changed:**
+- `crates/strategy/src/change_point.rs`: `find_best_split()`のHoeffding限界にBonferroni補正を追加。`ln(4/delta)` → `ln(4*n_cuts/delta)` に修正し、多重比較問題に対処
+- 同ファイル: テスト`test_no_detection_stable_distribution`の`rand::thread_rng()`を`StdRng::seed_from_u64(42)`に変更し、非決定性を排除
+- `use rand::SeedableRng`をテストモジュールに追加
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 463 passed, 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt` — clean
+
+**Issues:** Bonferroni補正により、正当な変化点検出テスト（mean_shift, variance_shift）も引き続き通過することを確認

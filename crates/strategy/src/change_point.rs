@@ -384,6 +384,9 @@ impl ChangePointDetector {
         let mut left_sum = 0.0;
         let mut best: Option<(usize, f64, f64)> = None;
 
+        // Number of split points tested — Bonferroni correction for multiple comparisons
+        let n_cuts = (n.saturating_sub(2 * min_size) + 1) as f64;
+
         for split in min_size..=(n - min_size) {
             left_sum += values[split - 1];
             let right_sum = total_sum - left_sum;
@@ -396,11 +399,11 @@ impl ChangePointDetector {
                 continue;
             }
 
-            // Hoeffding bound: ε = sqrt((1/(2m)) · ln(4/δ))
+            // Hoeffding bound with Bonferroni correction: ε = sqrt((1/(2m)) · ln(4·n_cuts/δ))
             let n0 = split;
             let n1 = n - split;
             let m = n0.min(n1);
-            let epsilon = ((4.0 / self.config.delta).ln() / (2.0 * m as f64)).sqrt();
+            let epsilon = ((4.0 * n_cuts / self.config.delta).ln() / (2.0 * m as f64)).sqrt();
 
             let ratio = mean_diff / epsilon;
 
@@ -540,7 +543,7 @@ impl ChangePointDetector {
 mod tests {
     use super::*;
     use crate::bayesian_lr::QAction;
-    use rand::Rng;
+    use rand::{Rng, SeedableRng};
 
     fn make_detector(n_features: usize) -> ChangePointDetector {
         ChangePointDetector::new(
@@ -672,7 +675,7 @@ mod tests {
             ..ChangePointConfig::default()
         };
         let mut d = ChangePointDetector::new(2, config);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         // Feed stable data — should not trigger with very high confidence
         for t in 0..200 {

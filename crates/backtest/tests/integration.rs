@@ -732,7 +732,12 @@ fn test_backtest_engine_deterministic_replay() {
     for (t1, t2) in result1.trades.iter().zip(result2.trades.iter()) {
         assert!((t1.fill_price - t2.fill_price).abs() < 1e-10);
         assert!((t1.slippage - t2.slippage).abs() < 1e-10);
-        assert!((t1.pnl - t2.pnl).abs() < 1e-10, "PnL mismatch: {} vs {}", t1.pnl, t2.pnl);
+        assert!(
+            (t1.pnl - t2.pnl).abs() < 1e-10,
+            "PnL mismatch: {} vs {}",
+            t1.pnl,
+            t2.pnl
+        );
         assert_eq!(t1.strategy_id, t2.strategy_id);
     }
 }
