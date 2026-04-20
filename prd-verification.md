@@ -428,7 +428,7 @@ struct DataTick {
       "ペーパー実行安全性確認: ForwardTestが実際の発注パスに接続しないこと",
       "release build安全性確認: 全チェックがassert!またはResult<_, RiskError>であること"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",

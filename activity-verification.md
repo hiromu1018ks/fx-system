@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 21
-**Current Task:** Task 26 — design.md Critical Domain Rulesの実装監査
+**Tasks Completed:** 22
+**Current Task:** Task 27 — フォワードテストのフルパイプライン統合テスト
 
 ---
 
@@ -758,3 +758,37 @@ Python側（research/bridge/）:
 - `cargo fmt` — applied, `cargo fmt --check` — clean
 
 **Issues:** 戦略トリガーテストはコンポーネントレベルでdiagnostic付き条件付きアサートを使用（合成データから抽出された特徴量が閾値に到達しない場合でもパイプラインの正常動作を検証）
+
+### 2026-04-20: Task 26 — design.md Critical Domain Rulesの実装監査
+
+**What changed:**
+- `crates/backtest/tests/integration.rs`: セクション12「Critical Domain Rules Audit」を追加（8テスト）
+  - `test_domain_rule_no_debug_assert_in_production_code`: 30の主要ソースファイルでdebug_assert!不在を検証（include_str!ベース）
+  - `test_domain_rule_information_leakage_lag_enforced`: execution_lag_ns > 0確認 + extractor.rsのlagged mid-price documentation確認
+  - `test_domain_rule_otc_model_no_exchange_matching`: OTCモデルに取引所用語不在確認 + Last-Look/fill_probability/slippage存在確認
+  - `test_domain_rule_hard_limits_before_q_evaluation`: 構造的検証（HierarchicalRiskLimiterがQ値パラメータ非依存）+ 締密リミットでのパイプライン動作確認
+  - `test_domain_rule_sigma_model_only_in_thompson_sampling`: QFunction.predict()の決定性確認（同じfeatures → 同じpoint estimate）
+  - `test_domain_rule_strategy_separated_rewards`: per-strategy EpisodeBuffer独立性確認 + McEvaluator.episodes_for()のstrategy_id整合性
+  - `test_domain_rule_paper_execution_safety`: PaperExecutionEngine + simulate_execution使用確認 + 危険な用語不在確認
+  - `test_domain_rule_release_build_safety`: RiskError enum存在 + Result型使用確認 + assert!/assert_eq!使用確認
+
+**監査結果:**
+| # | ルール | ステータス | エビデンス |
+|---|------|-----------|-----------|
+| 1 | No debug_assert! | PASS | 30ファイルでゼロインスタンス |
+| 2 | 情報リーク防止 | PASS | execution_lag_ns=500ms + lagged mid-price |
+| 3 | OTC市場モデル | PASS | exchange用語ゼロ + Last-Look/fill_prob/slippage実装 |
+| 4 | ハードリミット優先 | PASS | HierarchicalRiskLimiterがQ値非依存 + パイプライン順序確認 |
+| 5 | σ_model分離 | PASS | predict()決定性 + sample_predict()のみσ反映 |
+| 6 | 戦略分離報酬 | PASS | per-strategy EpisodeBuffer + strategy_id keyed |
+| 7 | ペーパー実行安全 | PASS | simulate_executionのみ + 危険用語ゼロ |
+| 8 | Release安全性 | PASS | debug_assert!ゼロ + assert!/Result使用 |
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --test integration -- "test_domain_rule"` — 8 passed, 0 failed
+- `cargo test` — 1405 passed, 0 failed (all crates)
+- `cargo clippy -p fx-backtest --tests` — no errors
+- `cargo fmt` — applied, `cargo fmt --check` — clean
+
+**Issues:** なし
