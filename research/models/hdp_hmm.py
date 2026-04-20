@@ -213,10 +213,11 @@ def train_hdp_hmm_online(
 
     for x in features_sequence:
         posterior = compute_regime_posterior(x, params.weights, params.bias)
+        winner = int(np.argmax(posterior))
         for k in range(params.n_regimes):
-            residual = posterior[k] - posterior
-            params.weights[k] += learning_rate * residual * x[np.newaxis, :]
-            params.bias[k] += learning_rate * (posterior[k] - np.mean(posterior))
+            gradient = (1.0 if k == winner else 0.0) - posterior[k]
+            params.weights[k] += learning_rate * gradient * x
+            params.bias[k] += learning_rate * gradient
 
     return params
 

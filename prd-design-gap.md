@@ -77,7 +77,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "勾配計算をスカラーまたは正しい形状に修正: params.weights[k]の更新は(feature_dim,)であるべき",
       "pytest research/tests/test_hdp_hmm.py::TestTrainHdpHmmOnline で全テスト通過確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "dependency",

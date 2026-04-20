@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 1
-**Current Task:** Task 2 — train_hdp_hmm_online() ブロードキャストバグ修正
+**Tasks Completed:** 2
+**Current Task:** Task 3 — Python依存パッケージ追加
 
 ---
 
@@ -34,3 +34,18 @@
 - `cargo test -p fx-strategy --lib -- regime` — 42 passed, 0 failed
 
 **Issues:** Rust側 `regime.rs` の `compute_drift()` にも同様の形状バグが存在するが、本タスクはPython側のみ対応。Rust側はTask 7以降のONNX統合時に修正予定
+
+### 2026-04-20: Task 2 — HDP-HMM train_hdp_hmm_online() のブロードキャストバグ修正
+
+**What changed:**
+- `research/models/hdp_hmm.py`: `train_hdp_hmm_online()` の勾配計算を修正
+  - 旧: `residual = posterior[k] - posterior` (n_regimes,) × `x[np.newaxis, :]` (1, feature_dim) → (n_regimes, feature_dim) で `params.weights[k]` (feature_dim,) に代入しようとして形状不一致
+  - 新: winner-take-all competitive learning勾配: `gradient = (1.0 if k == winner else 0.0) - posterior[k]` (スカラー) × `x` (feature_dim,) = (feature_dim,)
+  - `winner = argmax(posterior)` で最もlikelyなregimeを選択し、winnerには正の勾配（x方向へ移動）、その他には負の勾配（xから離れる方向へ移動）
+  - 対称性破壊: ゼロ初期化から同一入力でも argmax が index 0 を選び、regime 0 が支配的に学習
+
+**Commands run:**
+- `pytest research/tests/test_hdp_hmm.py::TestTrainHdpHmmOnline -v` — 3 passed, 0 failed
+- `pytest research/tests/test_hdp_hmm.py -v -k 'not Export'` — 31 passed, 3 deselected (ONNX依存未インストール)
+
+**Issues:** なし。ONNX export テスト3件は onnx/onnxruntime 未インストールのため失敗（Task 3で対応）
