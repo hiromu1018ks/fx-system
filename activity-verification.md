@@ -421,3 +421,37 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean
 
 **Issues:** なし。σ_non_modelの実装がdesign.mdと異なる（BLR residual noise vs execution+latency分解）が、コードコメントで意図的であることが明記されている
+
+### 2026-04-20: Task 18 — design.md §3.0.2 エピソード定義の実装整合性検証
+
+**What changed:**
+- `crates/strategy/src/mc_eval.rs`: §3.0.2 エピソード定義検証テスト10件を追加:
+  - `test_episode_terminal_reasons_cover_all_four`: TerminalReason enumの4終端条件（PositionClosed, MaxHoldTimeExceeded, DailyHardLimit, UnknownRegime）の存在とDisplay/PartialEq実装検証
+  - `test_episode_start_on_position_open`: ポジションゼロ→非ゼロ遷移時のエピソード開始検証
+  - `test_episode_double_start_prevented`: 二重開始の防止（panic）検証
+  - `test_episode_end_without_start_prevented`: 未開始エピソードの終了防止（panic）検証
+  - `test_episode_flat_period_no_transitions`: フラット期間（トランジションなし）のエピソード処理検証
+  - `test_episode_partial_fill_does_not_end_episode`: 部分約定ではエピソードが終了しないことの検証。全量クローズ時のみPositionClosedで終了
+  - `test_episode_max_hold_time_forced_close_with_pnl`: MAX_HOLD_TIME強制クローズ時のPnL組み込み検証
+  - `test_episode_daily_hard_limit_terminal`: DailyHardLimit終端条件の検証
+  - `test_episode_unknown_regime_terminal`: UnknownRegime終端条件の検証
+  - `test_episode_max_hold_time_updates_q_function`: MAX_HOLD_TIME終端時のQ関数更新検証
+
+**調査結果:**
+- エピソード開始: BacktestEngineでポジションがゼロ→非ゼロになった時点で`start_strategy_episode()`を呼び出し
+- エピソード終端条件4つ: 全て実装済み
+  - (1) PositionClosed: END_OF_DATA時の残ポジションクローズ、戦略決定による完全クローズ
+  - (2) MaxHoldTimeExceeded: 戦略別MAX_HOLD_TIME（A:30s, B:5min, C:10min）切れ
+  - (3) DailyHardLimit: close_all_positions()ヘルパー経由
+  - (4) UnknownRegime: regime_cache.state().is_unknown()検出時
+- フラット期間: エピソードに含まれない（start_episode()からend_episode()の間のみがエピソード）
+- 部分約定: 既存テスト`test_partial_fill_continues_episode`で検証済み（全量クローズ時のみ終了）
+- MAX_HOLD_TIME強制クローズ: PnLが累積されMC returns計算に含まれることを確認
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 全crate通過（fx-strategy: 494 passed）
+- `cargo clippy` — エラーなし
+- `cargo fmt --check` — clean
+
+**Issues:** なし

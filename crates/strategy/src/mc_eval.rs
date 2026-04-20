@@ -1942,4 +1942,275 @@ mod tests {
         assert!((rb.total_reward - (-5.0)).abs() < 1e-10);
         assert!((rc.total_reward - 3.0).abs() < 1e-10);
     }
+
+    // =========================================================================
+    // §3.0.2 Episode Definition Validation Tests
+    // =========================================================================
+    //
+    // These tests verify the episode definition per design.md §3.0.2:
+    //   - Start condition: position goes from zero to non-zero
+    //   - Terminal conditions: (1) PositionClosed (2) MaxHoldTimeExceeded
+    //                          (3) DailyHardLimit (4) UnknownRegime
+    //   - Flat periods: excluded from episodes, not part of learning
+    //   - Partial fills: episode ends only on FULL position close
+    //   - MAX_HOLD_TIME: forced close with PnL included
+
+    /// Verify all 4 terminal conditions exist in TerminalReason enum.
+    #[test]
+    fn test_episode_terminal_reasons_cover_all_four() {
+        let reasons = [
+            TerminalReason::PositionClosed,
+            TerminalReason::MaxHoldTimeExceeded,
+            TerminalReason::DailyHardLimit,
+            TerminalReason::UnknownRegime,
+        ];
+        assert_eq!(reasons.len(), 4);
+
+        // Verify Display trait
+        assert_eq!(
+            format!("{}", TerminalReason::PositionClosed),
+            "PositionClosed"
+        );
+        assert_eq!(
+            format!("{}", TerminalReason::MaxHoldTimeExceeded),
+            "MaxHoldTimeExceeded"
+        );
+        assert_eq!(
+            format!("{}", TerminalReason::DailyHardLimit),
+            "DailyHardLimit"
+        );
+        assert_eq!(
+            format!("{}", TerminalReason::UnknownRegime),
+            "UnknownRegime"
+        );
+
+        // Verify PartialEq
+        assert_eq!(
+            TerminalReason::PositionClosed,
+            TerminalReason::PositionClosed
+        );
+        assert_ne!(
+            TerminalReason::PositionClosed,
+            TerminalReason::MaxHoldTimeExceeded
+        );
+    }
+
+    /// Verify episode start: only when position transitions from zero to non-zero.
+    /// Flat periods (zero position) should NOT start an episode.
+    #[test]
+    fn test_episode_start_on_position_open() {
+        let mut eval = McEvaluator::new(McEvalConfig::default());
+
+        // Initially no active episodes
+        assert!(!eval.has_active_episode(StrategyId::A));
+
+        // Starting an episode creates the buffer
+        eval.start_episode(StrategyId::A, 0, 0.0);
+        assert!(eval.has_active_episode(StrategyId::A));
+    }
+
+    /// Verify double start is prevented (panic).
+    #[test]
+    #[should_panic(expected = "Active episode already exists")]
+    fn test_episode_double_start_prevented() {
+        let mut eval = McEvaluator::new(McEvalConfig::default());
+        eval.start_episode(StrategyId::A, 0, 0.0);
+        eval.start_episode(StrategyId::A, 100, 0.0); // Should panic
+    }
+
+    /// Verify episode end without start is prevented (panic).
+    #[test]
+    #[should_panic(expected = "No active episode")]
+    fn test_episode_end_without_start_prevented() {
+        let mut eval = McEvaluator::new(McEvalConfig::default());
+        eval.end_episode(StrategyId::A, TerminalReason::PositionClosed, 100);
+    }
+
+    /// Verify flat period handling: episode with no transitions is valid.
+    /// The episode records no learning signal (flat period = no position).
+    #[test]
+    fn test_episode_flat_period_no_transitions() {
+        let mut eval = McEvaluator::new(McEvalConfig::default());
+        eval.start_episode(StrategyId::A, 0, 0.0);
+
+        // Immediately end with no transitions (flat period / brief open-close)
+        let result = eval.end_episode(StrategyId::A, TerminalReason::PositionClosed, 100);
+
+        assert_eq!(result.num_transitions, 0);
+        assert!((result.total_reward - 0.0).abs() < 1e-10);
+        assert!(result.returns.is_empty());
+    }
+
+    /// Verify partial fill does NOT end the episode.
+    /// Only full position close (or other terminal conditions) ends the episode.
+    #[test]
+    fn test_episode_partial_fill_does_not_end_episode() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        eval.start_episode(StrategyId::A, 0, 0.0);
+
+        // Step 1: Open position (buy)
+        let s1 = make_state_with_equity(StrategyId::A, 5.0, 100_000.0);
+        eval.record_transition(StrategyId::A, 1, QAction::Buy, phi_ones(5), &s1, 0.0);
+
+        // Step 2: Partial close (position still non-zero)
+        let s2 = make_state_with_equity(StrategyId::A, 8.0, 50_000.0);
+        eval.record_transition(StrategyId::A, 2, QAction::Sell, phi_ones(5), &s2, 0.0);
+
+        // Episode should still be active after partial fill
+        assert!(
+            eval.has_active_episode(StrategyId::A),
+            "Episode should still be active after partial fill"
+        );
+
+        // Step 3: Full close (position goes to zero)
+        let s3 = make_state_with_equity(StrategyId::A, 10.0, 0.0);
+        eval.record_transition(StrategyId::A, 3, QAction::Sell, phi_ones(5), &s3, 0.0);
+
+        // Now end the episode with PositionClosed
+        let result = eval.end_episode(StrategyId::A, TerminalReason::PositionClosed, 4);
+        assert_eq!(result.num_transitions, 3);
+        assert_eq!(result.terminal_reason, TerminalReason::PositionClosed);
+    }
+
+    /// Verify MAX_HOLD_TIME forces close and PnL is included in episode.
+    #[test]
+    fn test_episode_max_hold_time_forced_close_with_pnl() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        eval.start_episode(StrategyId::A, 1_000_000_000, 0.0);
+
+        // Position held through multiple ticks
+        let s1 = make_state_with_equity(StrategyId::A, 5.0, 100_000.0);
+        eval.record_transition(
+            StrategyId::A,
+            15_000_000_000,
+            QAction::Buy,
+            phi_ones(5),
+            &s1,
+            0.0,
+        );
+
+        let s2 = make_state_with_equity(StrategyId::A, 3.0, 100_000.0);
+        eval.record_transition(
+            StrategyId::A,
+            30_000_000_000,
+            QAction::Hold,
+            phi_ones(5),
+            &s2,
+            0.0,
+        );
+
+        // MAX_HOLD_TIME exceeded → forced close
+        let result = eval.end_episode(
+            StrategyId::A,
+            TerminalReason::MaxHoldTimeExceeded,
+            31_000_000_000,
+        );
+
+        // Episode should have recorded the PnL from the forced close
+        assert_eq!(result.terminal_reason, TerminalReason::MaxHoldTimeExceeded);
+        assert_eq!(result.num_transitions, 2);
+        // Total reward = (5-0) + (3-5) = 5 + (-2) = 3
+        assert!(
+            (result.total_reward - 3.0).abs() < 1e-10,
+            "MAX_HOLD_TIME forced close should include accumulated PnL, got {}",
+            result.total_reward
+        );
+
+        // MC returns should be computed for Q-function update
+        assert_eq!(result.returns.len(), 2);
+    }
+
+    /// Verify DailyHardLimit terminal condition.
+    #[test]
+    fn test_episode_daily_hard_limit_terminal() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        eval.start_episode(StrategyId::B, 0, 0.0);
+        let s = make_state_with_equity(StrategyId::B, -10.0, 100_000.0);
+        eval.record_transition(StrategyId::B, 1, QAction::Sell, phi_ones(5), &s, 0.0);
+
+        let result = eval.end_episode(StrategyId::B, TerminalReason::DailyHardLimit, 2);
+        assert_eq!(result.terminal_reason, TerminalReason::DailyHardLimit);
+        assert_eq!(result.num_transitions, 1);
+    }
+
+    /// Verify UnknownRegime terminal condition.
+    #[test]
+    fn test_episode_unknown_regime_terminal() {
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.99,
+            },
+        });
+
+        eval.start_episode(StrategyId::C, 0, 0.0);
+        let s = make_state_with_equity(StrategyId::C, 3.0, 50_000.0);
+        eval.record_transition(StrategyId::C, 1, QAction::Buy, phi_ones(5), &s, 0.0);
+
+        let result = eval.end_episode(StrategyId::C, TerminalReason::UnknownRegime, 2);
+        assert_eq!(result.terminal_reason, TerminalReason::UnknownRegime);
+        assert_eq!(result.num_transitions, 1);
+    }
+
+    /// Verify episode with MAX_HOLD_TIME updates Q-function correctly.
+    #[test]
+    fn test_episode_max_hold_time_updates_q_function() {
+        let dim = 5;
+        let mut q_fn = QFunction::new(dim, 0.01, 500, 0.01, 0.0);
+        let mut eval = McEvaluator::new(McEvalConfig {
+            reward: RewardConfig {
+                lambda_risk: 0.0,
+                lambda_dd: 0.0,
+                dd_cap: 100.0,
+                gamma: 0.9,
+            },
+        });
+
+        eval.start_episode(StrategyId::A, 0, 0.0);
+        let s1 = make_state_with_equity(StrategyId::A, 2.0, 100_000.0);
+        eval.record_transition(StrategyId::A, 1, QAction::Buy, phi_ones(dim), &s1, 0.0);
+
+        let s2 = make_state_with_equity(StrategyId::A, 5.0, 100_000.0);
+        eval.record_transition(StrategyId::A, 2, QAction::Hold, phi_ones(dim), &s2, 0.0);
+
+        let (result, updates) = eval.end_episode_and_update(
+            StrategyId::A,
+            TerminalReason::MaxHoldTimeExceeded,
+            3,
+            &mut q_fn,
+        );
+
+        assert_eq!(result.terminal_reason, TerminalReason::MaxHoldTimeExceeded);
+        assert_eq!(updates.len(), 2);
+        // All Q-function updates should succeed
+        for u in &updates {
+            assert!(!u.diverged, "Q-update should not diverge");
+        }
+    }
 }

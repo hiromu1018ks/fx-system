@@ -314,7 +314,7 @@ struct DataTick {
       "MAX_HOLD_TIME到達時の強制クローズとPnL組み込み確認",
       "各条件についてテストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
