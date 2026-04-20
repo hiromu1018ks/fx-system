@@ -41,19 +41,12 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
         config.enabled_strategies = parse_strategies(strategies_str)?;
     }
 
-    let ticks = fx_backtest::data::load_csv(&cmd.data)
-        .with_context(|| format!("Failed to load CSV data from: {}", cmd.data.display()))?;
-
-    let total_ticks = ticks.len();
-    info!(tick_count = total_ticks, "Loaded tick data");
-    println!("Loaded {total_ticks} ticks from {}", cmd.data.display());
-
-    let events = fx_backtest::data::ticks_to_events(&ticks);
-    println!("Running backtest on {total_ticks} events...");
+    println!("Running streaming backtest on {}", cmd.data.display());
 
     let start = std::time::Instant::now();
     let mut engine = fx_backtest::engine::BacktestEngine::new(config);
-    let result = engine.run_from_events(&events);
+    let result = engine.run_from_stream_file(&cmd.data)
+        .with_context(|| format!("Failed to run streaming backtest from: {}", cmd.data.display()))?;
     let elapsed = start.elapsed();
 
     let total_trades = result.trades.len();

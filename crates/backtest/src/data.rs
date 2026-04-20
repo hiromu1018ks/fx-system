@@ -182,6 +182,7 @@ pub fn tick_to_event(tick: &ValidatedTick) -> GenericEvent {
 /// and keeps only the most recent `window_size` validated ticks.
 pub struct StreamingCsvReader {
     reader: csv::Reader<std::io::BufReader<std::fs::File>>,
+    normalized_headers: Option<csv::StringRecord>,
     window: VecDeque<ValidatedTick>,
     window_size: usize,
     prev_ts: Option<u64>,
@@ -198,12 +199,17 @@ impl StreamingCsvReader {
         assert!(window_size > 0, "window_size must be positive");
         let file = std::fs::File::open(path.as_ref()).map_err(DataLoadError::Io)?;
         let buf_reader = std::io::BufReader::new(file);
-        let reader = csv::ReaderBuilder::new()
+        let mut reader = csv::ReaderBuilder::new()
             .flexible(true)
             .from_reader(buf_reader);
 
+        // Read and normalize headers (same as load_csv_reader)
+        let headers = reader.headers().map_err(DataLoadError::Csv)?.clone();
+        let normalized: csv::StringRecord = headers.iter().map(normalize_header).collect();
+
         Ok(Self {
             reader,
+            normalized_headers: Some(normalized),
             window: VecDeque::with_capacity(window_size),
             window_size,
             prev_ts: None,
@@ -226,7 +232,7 @@ impl StreamingCsvReader {
                 Err(_) => continue, // skip malformed rows
             };
 
-            let tick: DataTick = match record.deserialize(None) {
+            let tick: DataTick = match record.deserialize(self.normalized_headers.as_ref()) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
@@ -272,6 +278,14 @@ impl StreamingCsvReader {
     /// Access the current window of recent ticks.
     pub fn window_ticks(&self) -> Vec<&ValidatedTick> {
         self.window.iter().collect()
+    }
+}
+
+impl Iterator for StreamingCsvReader {
+    type Item = ValidatedTick;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_tick()
     }
 }
 

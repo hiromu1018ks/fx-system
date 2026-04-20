@@ -298,23 +298,131 @@ impl BacktestEngine {
 
     /// Run backtest from a streaming tick source (e.g. `StreamingCsvReader`).
     ///
-    /// Each tick is converted to a `GenericEvent` and fed to the engine
-    /// without buffering the full dataset in memory.
+    /// Processes ticks in batches to keep memory usage bounded.
+    const STREAM_BATCH_SIZE: usize = 500_000;
+
     pub fn run_from_stream<I>(&mut self, tick_source: I) -> BacktestResult
     where
         I: Iterator<Item = ValidatedTick>,
     {
-        let events: Vec<GenericEvent> = tick_source
-            .map(|tick| tick_to_event(&tick))
-            .filter(|e| {
-                e.header.timestamp_ns >= self.config.start_time_ns
-                    && e.header.timestamp_ns <= self.config.end_time_ns
-            })
-            .collect();
+        let wall_start = Instant::now();
+        let mut total_ticks: u64 = 0;
+        let mut total_decision_ticks: u64 = 0;
+        let mut all_trades: Vec<TradeRecord> = Vec::new();
+        let mut all_decisions: Vec<BacktestDecision> = Vec::new();
+        let mut all_execution_events: Vec<GenericEvent> = Vec::new();
+        let mut first_batch = true;
 
-        info!(events_loaded = events.len(), "Running backtest from stream");
+        let mut batch: Vec<GenericEvent> = Vec::with_capacity(Self::STREAM_BATCH_SIZE);
 
-        self.run_from_events(&events)
+        for tick in tick_source {
+            let event = tick_to_event(&tick);
+            if event.header.timestamp_ns < self.config.start_time_ns
+                || event.header.timestamp_ns > self.config.end_time_ns
+            {
+                continue;
+            }
+            batch.push(event);
+
+            if batch.len() >= Self::STREAM_BATCH_SIZE {
+                let batch_result = self.process_batch(&batch, first_batch);
+                total_ticks += batch_result.total_ticks;
+                total_decision_ticks += batch_result.total_decision_ticks;
+                all_trades.extend(batch_result.trades);
+                all_decisions.extend(batch_result.decisions);
+                all_execution_events.extend(batch_result.execution_events);
+                first_batch = false;
+                batch.clear();
+            }
+        }
+
+        // Process remaining ticks in final batch
+        if !batch.is_empty() {
+            let batch_result = self.process_batch(&batch, first_batch);
+            total_ticks += batch_result.total_ticks;
+            total_decision_ticks += batch_result.total_decision_ticks;
+            all_trades.extend(batch_result.trades);
+            all_decisions.extend(batch_result.decisions);
+            all_execution_events.extend(batch_result.execution_events);
+        }
+
+        let wall_time_ms = wall_start.elapsed().as_millis() as u64;
+        let summary = TradeSummary::from_trades(&all_trades);
+        let execution_stats = ExecutionStats::empty();
+
+        info!(
+            total_ticks,
+            total_trades = all_trades.len(),
+            total_decisions = all_decisions.len(),
+            wall_time_ms,
+            "Backtest complete (streaming)"
+        );
+
+        BacktestResult {
+            config: self.config.clone(),
+            trades: all_trades,
+            decisions: all_decisions,
+            total_ticks,
+            total_decision_ticks,
+            wall_time_ms,
+            summary,
+            execution_stats,
+            execution_events: all_execution_events,
+        }
+    }
+
+    /// Process a batch of events, returning partial results.
+    /// Engine state (BLR posteriors, positions, regime) is preserved across batches.
+    fn process_batch(
+        &mut self,
+        events: &[GenericEvent],
+        is_first: bool,
+    ) -> BacktestResult {
+        if is_first {
+            // First batch: use full run_inner for initialization
+            let wall_start = Instant::now();
+            let market_events: Vec<GenericEvent> = events
+                .iter()
+                .filter(|e| e.header.stream_id == StreamId::Market)
+                .cloned()
+                .collect();
+            let mut result = self.run_inner(&market_events, wall_start);
+            result.wall_time_ms = 0; // don't count wall time per batch
+            result
+        } else {
+            // Subsequent batches: reuse existing engine state
+            let wall_start = Instant::now();
+            let market_events: Vec<GenericEvent> = events
+                .iter()
+                .filter(|e| e.header.stream_id == StreamId::Market)
+                .cloned()
+                .collect();
+            if market_events.is_empty() {
+                return BacktestResult {
+                    config: self.config.clone(),
+                    trades: Vec::new(),
+                    decisions: Vec::new(),
+                    total_ticks: 0,
+                    total_decision_ticks: 0,
+                    wall_time_ms: 0,
+                    summary: TradeSummary::empty(),
+                    execution_stats: ExecutionStats::empty(),
+                    execution_events: Vec::new(),
+                };
+            }
+            let mut result = self.run_inner(&market_events, wall_start);
+            result.wall_time_ms = 0;
+            result
+        }
+    }
+
+    /// Run backtest directly from a CSV file path using StreamingCsvReader.
+    pub fn run_from_stream_file<P: AsRef<std::path::Path>>(
+        &mut self,
+        path: P,
+    ) -> anyhow::Result<BacktestResult> {
+        let reader = crate::data::StreamingCsvReader::new(path, 100)?;
+        Ok(self.run_from_stream(reader))
     }
 
     /// Run backtest with a pre-loaded slice of market events.
