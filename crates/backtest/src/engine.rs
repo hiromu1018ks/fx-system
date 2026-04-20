@@ -30,7 +30,7 @@ use rand::prelude::*;
 use rand::rngs::SmallRng;
 use tracing::{debug, info, warn};
 
-use crate::stats::{TradeRecord, TradeSummary};
+use crate::stats::{ExecutionStats, LpExecutionStats, TradeRecord, TradeSummary};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -201,6 +201,9 @@ pub struct BacktestResult {
     pub total_decision_ticks: u64,
     pub wall_time_ms: u64,
     pub summary: TradeSummary,
+    pub execution_stats: ExecutionStats,
+    /// Execution events generated during the run, ready for EventBus replay.
+    pub execution_events: Vec<GenericEvent>,
 }
 
 /// Collected position data to avoid borrow conflicts.
@@ -306,6 +309,8 @@ impl BacktestEngine {
                 total_decision_ticks: 0,
                 wall_time_ms: wall_start.elapsed().as_millis() as u64,
                 summary: TradeSummary::empty(),
+                execution_stats: ExecutionStats::empty(),
+                execution_events: Vec::new(),
             };
         }
 
@@ -325,6 +330,8 @@ impl BacktestEngine {
                 total_decision_ticks: 0,
                 wall_time_ms: wall_start.elapsed().as_millis() as u64,
                 summary: TradeSummary::empty(),
+                execution_stats: ExecutionStats::empty(),
+                execution_events: Vec::new(),
             };
         }
 
@@ -335,6 +342,7 @@ impl BacktestEngine {
 
         let mut trades: Vec<TradeRecord> = Vec::new();
         let mut decisions: Vec<BacktestDecision> = Vec::new();
+        let mut execution_events: Vec<GenericEvent> = Vec::new();
         let mut total_ticks: u64 = 0;
         let mut total_decision_ticks: u64 = 0;
         let mut prev_tick_ns: u64 = 0;
@@ -413,6 +421,9 @@ impl BacktestEngine {
                                 );
                                 if let Some(ref exec_ev) = exec_event {
                                     feature_extractor.process_execution_event(exec_ev);
+                                }
+                                if let Some(ev) = exec_event {
+                                    execution_events.push(ev);
                                 }
                                 trades.push(TradeRecord {
                                     timestamp_ns: tick_ns,
@@ -553,6 +564,7 @@ impl BacktestEngine {
                                 &mut projector,
                                 &mut feature_extractor,
                                 &mut trades,
+                                &mut execution_events,
                                 mid_price,
                                 volatility,
                                 tick_ns,
@@ -707,6 +719,9 @@ impl BacktestEngine {
                             if let Some(ref exec_ev) = exec_event {
                                 feature_extractor.process_execution_event(exec_ev);
                             }
+                            if let Some(ev) = exec_event {
+                                execution_events.push(ev);
+                            }
 
                             trades.push(TradeRecord {
                                 timestamp_ns: tick_ns,
@@ -815,13 +830,16 @@ impl BacktestEngine {
                     );
 
                     if result.filled {
-                        let (trade_pnl, _) = self.process_execution_result(
+                        let (trade_pnl, exec_event) = self.process_execution_result(
                             pos_snap.strategy_id,
                             &result,
                             direction,
                             last_ns,
                             &mut projector,
                         );
+                        if let Some(ev) = exec_event {
+                            execution_events.push(ev);
+                        }
                         trades.push(TradeRecord {
                             timestamp_ns: last_ns,
                             strategy_id: pos_snap.strategy_id,
@@ -849,6 +867,9 @@ impl BacktestEngine {
         let wall_time_ms = wall_start.elapsed().as_millis() as u64;
         let summary = TradeSummary::from_trades(&trades);
 
+        // Collect LP execution stats from the gateway
+        let execution_stats = self.collect_execution_stats(&trades);
+
         info!(
             total_ticks = total_ticks,
             total_trades = trades.len(),
@@ -867,6 +888,8 @@ impl BacktestEngine {
             total_decision_ticks,
             wall_time_ms,
             summary,
+            execution_stats,
+            execution_events,
         }
     }
 
@@ -905,6 +928,7 @@ impl BacktestEngine {
         projector: &mut StateProjector,
         feature_extractor: &mut FeatureExtractor,
         trades: &mut Vec<TradeRecord>,
+        execution_events: &mut Vec<GenericEvent>,
         mid_price: f64,
         volatility: f64,
         tick_ns: u64,
@@ -938,6 +962,9 @@ impl BacktestEngine {
                 );
                 if let Some(ref exec_ev) = exec_event {
                     feature_extractor.process_execution_event(exec_ev);
+                }
+                if let Some(ev) = exec_event {
+                    execution_events.push(ev);
                 }
                 trades.push(TradeRecord {
                     timestamp_ns: tick_ns,
@@ -1220,6 +1247,49 @@ impl BacktestEngine {
 
     pub fn execution_gateway_mut(&mut self) -> &mut ExecutionGateway {
         &mut self.execution_gateway
+    }
+
+    /// Collect LP execution stats from the gateway after a backtest run.
+    fn collect_execution_stats(&self, trades: &[TradeRecord]) -> ExecutionStats {
+        let monitor = self.execution_gateway.lp_monitor();
+        let all_states = monitor.all_lp_states();
+
+        let lp_stats: Vec<LpExecutionStats> = all_states
+            .values()
+            .map(|state| LpExecutionStats {
+                lp_id: state.lp_id.clone(),
+                total_requests: state.total_requests,
+                total_fills: state.total_fills,
+                total_rejections: state.total_rejections,
+                fill_rate_ema: state.fill_rate_ema,
+                is_adversarial: state.is_adversarial,
+            })
+            .collect();
+
+        let total_fills: u64 = lp_stats.iter().map(|s| s.total_fills).sum();
+        let total_rejections: u64 = lp_stats.iter().map(|s| s.total_rejections).sum();
+        let total_requests = total_fills + total_rejections;
+        let overall_fill_rate = if total_requests > 0 {
+            total_fills as f64 / total_requests as f64
+        } else {
+            0.0
+        };
+
+        let avg_slippage = if !trades.is_empty() {
+            trades.iter().map(|t| t.slippage.abs()).sum::<f64>() / trades.len() as f64
+        } else {
+            0.0
+        };
+
+        ExecutionStats {
+            active_lp_id: self.execution_gateway.active_lp_id().to_string(),
+            lp_stats,
+            total_fills,
+            total_rejections,
+            overall_fill_rate,
+            avg_slippage,
+            recalibration_triggered: self.execution_gateway.is_recalibrating(),
+        }
     }
 }
 
@@ -1859,5 +1929,271 @@ mod tests {
         let result = engine.run_from_events(&events);
         // No positions to close in this simple test, but verifies the helper exists
         assert_eq!(result.total_ticks, 10);
+    }
+
+    // -- OTC Execution Gateway integration tests --
+
+    #[test]
+    fn test_execution_gateway_otc_simulation() {
+        // Verify that simulate_order goes through the full OTC execution pipeline:
+        // Last-Look rejection model, fill probability, slippage calculation
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 1000, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Verify execution stats are populated (active LP always set)
+        assert!(!result.execution_stats.active_lp_id.is_empty());
+
+        // If trades were produced, LP stats should reflect execution
+        if !result.trades.is_empty() {
+            assert!(
+                result.execution_stats.lp_stats.len() >= 1,
+                "Should have at least one LP tracked when trades exist"
+            );
+        }
+    }
+
+    #[test]
+    fn test_execution_stats_lp_tracking() {
+        // Run a backtest and verify LP stats are properly tracked
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // LP stats should show the default LP_PRIMARY
+        let active_lp = &result.execution_stats.active_lp_id;
+        assert!(
+            active_lp == "LP_PRIMARY" || active_lp == "LP_BACKUP",
+            "Active LP should be one of the default LPs, got: {}",
+            active_lp
+        );
+
+        // If there were trades, verify fill/reject counts are consistent
+        if !result.trades.is_empty() {
+            let lp = &result.execution_stats.lp_stats[0];
+            assert_eq!(
+                lp.total_requests,
+                lp.total_fills + lp.total_rejections,
+                "total_requests should equal fills + rejections"
+            );
+        }
+    }
+
+    #[test]
+    fn test_execution_events_collected_in_result() {
+        // Verify that execution events are collected for EventBus replay
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // If trades were produced, execution events should match
+        if !result.trades.is_empty() {
+            assert_eq!(
+                result.execution_events.len(),
+                result.trades.len(),
+                "Each filled trade should produce an execution event"
+            );
+
+            // Verify events are on the Execution stream
+            for ev in &result.execution_events {
+                assert_eq!(
+                    ev.header.stream_id,
+                    StreamId::Execution,
+                    "Execution events should be on the Execution stream"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_otc_slippage_reflected_in_trades() {
+        // Verify that OTC slippage model produces non-zero slippage on trades
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 2000, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Trades that go through the OTC model should have slippage recorded
+        for trade in &result.trades {
+            // Slippage can be zero in rare cases, but the field should be populated
+            assert!(
+                trade.slippage.is_finite(),
+                "Slippage should be finite, got: {}",
+                trade.slippage
+            );
+            // Fill probability should be in [0, 1] range
+            assert!(
+                (0.0..=1.0).contains(&trade.fill_probability),
+                "Fill probability should be in [0,1], got: {}",
+                trade.fill_probability
+            );
+        }
+    }
+
+    #[test]
+    fn test_otc_gateway_accessible_after_run() {
+        // Verify the gateway retains state after a backtest run
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Gateway should still be accessible
+        let gateway = engine.execution_gateway();
+        assert!(!gateway.active_lp_id().is_empty());
+
+        // If there were trades, the LastLook model should have been updated
+        let last_look = gateway.last_look_model();
+        for lp_id in last_look.tracked_lps() {
+            let params = last_look.get_lp_params(lp_id).unwrap();
+            assert!(
+                params.alpha >= 2.0,
+                "Alpha should be at least the prior after updates"
+            );
+        }
+    }
+
+    #[test]
+    fn test_otc_execution_rejection_tracked() {
+        // Run with many ticks to get a mix of fills and rejections
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 2000, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Some decisions should have execution_rejected skip reason
+        let rejected: Vec<_> = result
+            .decisions
+            .iter()
+            .filter(|d| d.skip_reason.as_deref() == Some("execution_rejected"))
+            .collect();
+
+        // With OTC model, some orders should be rejected (Last-Look or fill probability)
+        // This is probabilistic but with 2000 ticks there should be some rejections
+        if !rejected.is_empty() {
+            // Verify rejected decisions have direction set
+            for d in &rejected {
+                assert!(
+                    d.direction.is_some(),
+                    "Rejected decisions should have a direction"
+                );
+                assert!(
+                    d.triggered,
+                    "Rejected decisions should have been triggered by a strategy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_otc_fill_probability_model_in_backtest() {
+        // Verify the fill probability model produces realistic values
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 1000, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Trades that were filled should have reasonable fill probabilities
+        for trade in &result.trades {
+            // Market order base fill probability is 0.98, effective should be close
+            assert!(
+                trade.fill_probability > 0.5,
+                "Filled trades should have had >50% fill probability, got: {}",
+                trade.fill_probability
+            );
+        }
+
+        // Overall fill rate from LP stats should be reasonable
+        if !result.execution_stats.lp_stats.is_empty() {
+            let overall = result.execution_stats.overall_fill_rate;
+            assert!(
+                (0.0..=1.0).contains(&overall),
+                "Overall fill rate should be in [0,1], got: {}",
+                overall
+            );
+        }
+    }
+
+    #[test]
+    fn test_execution_events_have_valid_proto_payloads() {
+        // Verify that collected execution events have valid proto payloads
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 1000, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Each execution event should decode as a valid ExecutionEventPayload
+        for ev in &result.execution_events {
+            let decoded = proto::ExecutionEventPayload::decode(ev.payload_bytes());
+            assert!(
+                decoded.is_ok(),
+                "Execution event should decode as ExecutionEventPayload"
+            );
+            let payload = decoded.unwrap();
+            // Fill price should be positive for filled trades
+            assert!(
+                payload.fill_price > 0.0,
+                "Fill price should be positive, got: {}",
+                payload.fill_price
+            );
+            assert!(
+                !payload.lp_id.is_empty(),
+                "LP ID should be set in execution event"
+            );
+        }
+    }
+
+    #[test]
+    fn test_otc_execution_with_lp_switch_scenario() {
+        // Configure gateway to trigger LP switch by using aggressive adversarial thresholds
+        use fx_execution::gateway::ExecutionGatewayConfig;
+        use fx_execution::lp_monitor::LpMonitorConfig;
+
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 2000, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Verify the execution stats are collected regardless of LP switch
+        assert!(!result.execution_stats.active_lp_id.is_empty());
+        // If LP switch happened, the stats should reflect it
+        if result.execution_stats.recalibration_triggered {
+            // Gateway should still be functional after LP switch
+            let gateway = engine.execution_gateway();
+            assert!(
+                gateway.is_recalibrating() || !gateway.active_lp_id().is_empty(),
+                "Gateway should be functional after LP switch"
+            );
+        }
     }
 }

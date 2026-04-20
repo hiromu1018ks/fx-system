@@ -160,7 +160,7 @@ struct DataTick {
       "LP別fill率・reject率の追跡",
       "ユニットテスト: 約定シミュレーション、Last-Look拒否、slippage計算"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

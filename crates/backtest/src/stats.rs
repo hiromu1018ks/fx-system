@@ -1,6 +1,47 @@
 use fx_core::types::{Direction, StrategyId};
 
 // ---------------------------------------------------------------------------
+// LP Execution Stats
+// ---------------------------------------------------------------------------
+
+/// Per-LP execution statistics tracked during a backtest run.
+#[derive(Debug, Clone)]
+pub struct LpExecutionStats {
+    pub lp_id: String,
+    pub total_requests: u64,
+    pub total_fills: u64,
+    pub total_rejections: u64,
+    pub fill_rate_ema: f64,
+    pub is_adversarial: bool,
+}
+
+/// Aggregate execution statistics across all LPs.
+#[derive(Debug, Clone)]
+pub struct ExecutionStats {
+    pub lp_stats: Vec<LpExecutionStats>,
+    pub active_lp_id: String,
+    pub total_fills: u64,
+    pub total_rejections: u64,
+    pub overall_fill_rate: f64,
+    pub avg_slippage: f64,
+    pub recalibration_triggered: bool,
+}
+
+impl ExecutionStats {
+    pub fn empty() -> Self {
+        Self {
+            lp_stats: Vec::new(),
+            active_lp_id: String::new(),
+            total_fills: 0,
+            total_rejections: 0,
+            overall_fill_rate: 0.0,
+            avg_slippage: 0.0,
+            recalibration_triggered: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Trade Record
 // ---------------------------------------------------------------------------
 

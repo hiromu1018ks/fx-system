@@ -104,3 +104,32 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし
+
+### 2026-04-20: Task 7 — BacktestEngineへのOTC Execution Gateway統合
+
+**What changed:**
+- `crates/backtest/src/stats.rs`: `LpExecutionStats` struct と `ExecutionStats` struct を追加。LPごとのfill/reject率追跡、アクティブLP ID、全体fill率、平均slippage、再校正状態を記録
+- `crates/backtest/src/engine.rs`:
+  - `BacktestResult` に `execution_stats: ExecutionStats` フィールドと `execution_events: Vec<GenericEvent>` フィールドを追加
+  - `run_inner()` 内で約定結果（`GenericEvent`）を `execution_events` ベクタに収集するよう変更。全4箇所（MAX_HOLD_TIME close, Phase 3 strategy execution, `close_all_positions` helper, END_OF_DATA close）でイベントを収集
+  - `close_all_positions` ヘルパーに `execution_events` パラメータを追加
+  - `collect_execution_stats()` プライベートメソッドを追加: 実行後に`ExecutionGateway`の`LpRiskMonitor`からLP統計を抽出
+  - 既存のOTC約定モデル（Last-Look拒否、fill確率、slippage計算）は`ExecutionGateway::simulate_execution()`経由で既に統合済み
+- テスト追加（9件）:
+  - `test_execution_gateway_otc_simulation`: OTCパイプライン統合確認
+  - `test_execution_stats_lp_tracking`: LP統計追跡の検証
+  - `test_execution_events_collected_in_result`: 実行イベント収集とEventBus用ストリーム確認
+  - `test_otc_slippage_reflected_in_trades`: slippage値の現実性確認
+  - `test_otc_gateway_accessible_after_run`: 実行後のゲートウェイ状態アクセス確認
+  - `test_otc_execution_rejection_tracked`: Last-Look拒否の追跡確認
+  - `test_otc_fill_probability_model_in_backtest`: fill確率モデルの妥当性確認
+  - `test_execution_events_have_valid_proto_payloads`: protoペイロードの正常性確認
+  - `test_otc_execution_with_lp_switch_scenario`: LP切り替えシナリオテスト
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 463 passed (9 new in backtest lib), 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+
+**Issues:** なし。既存の`ExecutionGateway::simulate_execution()`がLast-Look、fill確率、slippage計算を完全に処理しており、追加の統合作業はLP統計の公開とイベント収集に集中した
