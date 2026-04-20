@@ -1298,7 +1298,7 @@ impl BacktestEngine {
             order_type: proto::OrderType::OrderMarket as i32,
             fill_status: proto::FillStatus::Filled as i32,
             fill_price: result.fill_price,
-            fill_size: signed_size.abs(),
+            fill_size: signed_size,
             slippage: result.slippage,
             requested_price: result.requested_price,
             requested_size: result.requested_size,

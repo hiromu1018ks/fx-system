@@ -11,6 +11,9 @@ use prost::Message as _;
 use serde::Deserialize;
 
 /// A single row of tick data loaded from CSV.
+///
+/// Expected column names (after header normalization):
+/// `timestamp`, `bid`, `ask`, `bid_volume` (opt), `ask_volume` (opt), `symbol` (opt)
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataTick {
     pub timestamp: String,
@@ -52,73 +55,32 @@ pub enum DataLoadError {
     Csv(#[from] csv::Error),
 }
 
+/// Normalize CSV header names to canonical field names.
+fn normalize_header(header: &str) -> String {
+    match header.trim().to_lowercase().replace(' ', "_").as_str() {
+        "local_time" | "time" | "timestamp" | "datetime" | "date" => "timestamp".to_string(),
+        "bid" => "bid".to_string(),
+        "ask" => "ask".to_string(),
+        "bidvolume" | "bid_vol" | "bid_size" => "bid_volume".to_string(),
+        "askvolume" | "ask_vol" | "ask_size" => "ask_volume".to_string(),
+        "symbol" | "ticker" | "pair" => "symbol".to_string(),
+        other => other.to_string(),
+    }
+}
+
 /// Load ticks from a CSV file and validate them.
 pub fn load_csv<P: AsRef<Path>>(path: P) -> Result<Vec<ValidatedTick>, DataLoadError> {
-    let mut reader = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_path(path)
-        .map_err(DataLoadError::Csv)?;
-
-    let mut ticks = Vec::new();
-    let mut prev_ts: Option<u64> = None;
-
-    for (idx, result) in reader.records().enumerate() {
-        let record = result.map_err(|e| DataLoadError::CsvParse {
-            row: idx + 2, // +2 for header + 0-indexed
-            message: e.to_string(),
-        })?;
-
-        let tick: DataTick = record
-            .deserialize(None)
-            .map_err(|e| DataLoadError::CsvParse {
-                row: idx + 2,
-                message: e.to_string(),
-            })?;
-
-        let ts_ns = parse_timestamp(&tick.timestamp).map_err(|e| DataLoadError::Validation {
-            row: idx + 2,
-            message: format!("invalid timestamp '{}': {}", tick.timestamp, e),
-        })?;
-
-        // Validate bid < ask
-        if tick.bid >= tick.ask {
-            return Err(DataLoadError::Validation {
-                row: idx + 2,
-                message: format!("bid ({}) must be < ask ({})", tick.bid, tick.ask),
-            });
-        }
-
-        // Validate monotonic timestamps
-        if let Some(prev) = prev_ts {
-            if ts_ns <= prev {
-                return Err(DataLoadError::Validation {
-                    row: idx + 2,
-                    message: format!(
-                        "timestamp {} (ns) is not monotonically increasing (prev: {})",
-                        ts_ns, prev
-                    ),
-                });
-            }
-        }
-
-        ticks.push(ValidatedTick {
-            timestamp_ns: ts_ns,
-            bid: tick.bid,
-            ask: tick.ask,
-            bid_volume: tick.bid_volume.unwrap_or(0.0),
-            ask_volume: tick.ask_volume.unwrap_or(0.0),
-            symbol: tick.symbol,
-        });
-
-        prev_ts = Some(ts_ns);
-    }
-
-    Ok(ticks)
+    let data = std::fs::read_to_string(path).map_err(DataLoadError::Io)?;
+    load_csv_reader(data.as_bytes())
 }
 
 /// Load ticks from a CSV reader (for in-memory/testing).
 pub fn load_csv_reader<R: Read>(reader: R) -> Result<Vec<ValidatedTick>, DataLoadError> {
     let mut rdr = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
+
+    // Read and normalize headers
+    let headers = rdr.headers().map_err(DataLoadError::Csv)?.clone();
+    let normalized: csv::StringRecord = headers.iter().map(normalize_header).collect();
 
     let mut ticks = Vec::new();
     let mut prev_ts: Option<u64> = None;
@@ -130,7 +92,7 @@ pub fn load_csv_reader<R: Read>(reader: R) -> Result<Vec<ValidatedTick>, DataLoa
         })?;
 
         let tick: DataTick = record
-            .deserialize(None)
+            .deserialize(Some(&normalized))
             .map_err(|e| DataLoadError::CsvParse {
                 row: idx + 2,
                 message: e.to_string(),
@@ -226,6 +188,28 @@ fn parse_timestamp(s: &str) -> Result<u64> {
             return Ok(val);
         }
         return Ok(val * 1_000_000_000);
+    }
+
+    // DD.MM.YYYY HH:MM:SS.mmm GMT+HHMM (e.g. "13.04.2026 06:00:30.789 GMT+0900")
+    if let Some(gmt_pos) = s.find("GMT") {
+        let datetime_part = s[..gmt_pos].trim();
+        let tz_str = &s[gmt_pos + 3..];
+        let tz_offset_secs: i32 = if !tz_str.is_empty() {
+            let sign = if tz_str.starts_with('-') { -1 } else { 1i32 };
+            let digits = tz_str.trim_start_matches('+').trim_start_matches('-');
+            sign * digits.get(..2).and_then(|h| h.parse::<i32>().ok()).unwrap_or(0) * 3600
+                + sign * digits.get(2..).and_then(|m| m.parse::<i32>().ok()).unwrap_or(0) * 60
+        } else {
+            0
+        };
+
+        for fmt in ["%d.%m.%Y %H:%M:%S%.f", "%d.%m.%Y %H:%M:%S"] {
+            if let Ok(dt) = NaiveDateTime::parse_from_str(datetime_part, fmt) {
+                let utc_ns = dt.and_utc().timestamp_nanos_opt().unwrap_or(0) as i64
+                    - (tz_offset_secs as i64) * 1_000_000_000;
+                return Ok(utc_ns as u64);
+            }
+        }
     }
 
     // Try ISO 8601 with T separator
