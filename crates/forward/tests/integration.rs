@@ -9,12 +9,10 @@ use fx_events::event::GenericEvent;
 use fx_forward::alert::{
     Alert, AlertEvaluator, AlertSeverity, AlertSystem, AlertType, LogAlertChannel,
 };
-use fx_forward::comparison::{
-    ComparisonEngine, ComparisonThresholds, PerformanceMetrics,
-};
+use fx_forward::comparison::{ComparisonEngine, ComparisonThresholds, PerformanceMetrics};
 use fx_forward::config::{
-    AlertChannelConfig, AlertConfig, ForwardRiskConfig,
-    ForwardTestConfig, ReportConfig, ReportFormat,
+    AlertChannelConfig, AlertConfig, ForwardRiskConfig, ForwardTestConfig, ReportConfig,
+    ReportFormat,
 };
 use fx_forward::feed::{DataSourceConfig, RecordedDataFeed, VecEventStore};
 use fx_forward::report::{ReportGenerator, SessionReport, TradeRecord};
@@ -72,7 +70,13 @@ fn generate_market_events(count: usize, interval_ms: u64, base_price: f64) -> Ve
         let noise = ((i % 7) as f64 - 3.0) * 0.001;
         let mid = base_price + noise;
         let half_spread = 0.0005;
-        events.push(make_market_event(ts, mid - half_spread, mid + half_spread, 1e6, 1e6));
+        events.push(make_market_event(
+            ts,
+            mid - half_spread,
+            mid + half_spread,
+            1e6,
+            1e6,
+        ));
     }
     events
 }
@@ -174,12 +178,7 @@ fn test_strategy_subset_bc() {
 
 #[test]
 fn test_alert_evaluator_risk_limit() {
-    let mut evaluator = AlertEvaluator::new(
-        Duration::from_millis(100),
-        0.8,
-        2.0,
-        0.3,
-    );
+    let mut evaluator = AlertEvaluator::new(Duration::from_millis(100), 0.8, 2.0, 0.3);
 
     // Below threshold — no alert
     let alert = evaluator.evaluate_risk_limit(50.0, 500.0, NS_BASE);
@@ -190,17 +189,15 @@ fn test_alert_evaluator_risk_limit() {
     assert!(alert.is_some());
     let a = alert.unwrap();
     assert!(matches!(a.alert_type, AlertType::RiskLimit));
-    assert!(matches!(a.severity, AlertSeverity::Warning | AlertSeverity::Critical));
+    assert!(matches!(
+        a.severity,
+        AlertSeverity::Warning | AlertSeverity::Critical
+    ));
 }
 
 #[test]
 fn test_alert_evaluator_execution_drift() {
-    let mut evaluator = AlertEvaluator::new(
-        Duration::from_millis(100),
-        0.8,
-        2.0,
-        0.3,
-    );
+    let mut evaluator = AlertEvaluator::new(Duration::from_millis(100), 0.8, 2.0, 0.3);
 
     // Below threshold — no alert
     let alert = evaluator.evaluate_execution_drift(0.001, 0.01, NS_BASE);
@@ -215,12 +212,7 @@ fn test_alert_evaluator_execution_drift() {
 
 #[test]
 fn test_alert_evaluator_sharpe_degradation() {
-    let mut evaluator = AlertEvaluator::new(
-        Duration::from_millis(100),
-        0.8,
-        2.0,
-        0.3,
-    );
+    let mut evaluator = AlertEvaluator::new(Duration::from_millis(100), 0.8, 2.0, 0.3);
 
     // Small degradation — no alert
     let alert = evaluator.evaluate_sharpe_degradation(0.9, 1.0, NS_BASE);
@@ -236,12 +228,7 @@ fn test_alert_evaluator_sharpe_degradation() {
 #[test]
 fn test_alert_system_log_channel() {
     let log_channel = LogAlertChannel;
-    let evaluator = AlertEvaluator::new(
-        Duration::from_millis(100),
-        0.8,
-        2.0,
-        0.3,
-    );
+    let evaluator = AlertEvaluator::new(Duration::from_millis(100), 0.8, 2.0, 0.3);
     let system = AlertSystem::new(vec![Box::new(log_channel)], evaluator);
 
     let alert = Alert {
@@ -258,7 +245,8 @@ fn test_alert_system_log_channel() {
 #[test]
 fn test_alert_system_webhook_channel_creation() {
     // Verify WebhookAlertChannel can be created (actual HTTP call not tested)
-    let channel = fx_forward::alert::WebhookAlertChannel::new("http://localhost:9999/alert".to_string());
+    let channel =
+        fx_forward::alert::WebhookAlertChannel::new("http://localhost:9999/alert".to_string());
     // Channel is created — the actual send would fail without a server
     // but construction should succeed
     let _ = channel;
@@ -314,7 +302,7 @@ fn test_comparison_engine_detects_divergence() {
 
     let forward = PerformanceMetrics {
         total_pnl: -200.0, // Large divergence
-        win_rate: 0.3, // Large divergence
+        win_rate: 0.3,     // Large divergence
         sharpe_ratio: 0.3,
         max_drawdown: -150.0,
         fill_rate: 0.7,
@@ -457,11 +445,14 @@ fn test_report_generator_json_output() {
         generated_at_ns: NS_BASE,
     };
 
-    let generator =
-        ReportGenerator::new(report_path.display().to_string(), ReportFormat::Json);
+    let generator = ReportGenerator::new(report_path.display().to_string(), ReportFormat::Json);
     let result = generator.generate(&report);
 
-    assert!(result.is_ok(), "JSON report generation failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "JSON report generation failed: {:?}",
+        result.err()
+    );
 
     // Verify JSON file was created
     let json_path = report_path.join("session_report.json");
@@ -491,11 +482,14 @@ fn test_report_generator_csv_output() {
         generated_at_ns: NS_BASE,
     };
 
-    let generator =
-        ReportGenerator::new(report_path.display().to_string(), ReportFormat::Csv);
+    let generator = ReportGenerator::new(report_path.display().to_string(), ReportFormat::Csv);
     let result = generator.generate(&report);
 
-    assert!(result.is_ok(), "CSV report generation failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "CSV report generation failed: {:?}",
+        result.err()
+    );
 
     // Verify CSV file was created
     let csv_path = report_path.join("performance_summary.csv");
@@ -532,11 +526,14 @@ fn test_report_generator_trades_csv() {
         },
     ];
 
-    let generator =
-        ReportGenerator::new(report_path.display().to_string(), ReportFormat::Csv);
+    let generator = ReportGenerator::new(report_path.display().to_string(), ReportFormat::Csv);
     let result = generator.write_trades_csv(&trades);
 
-    assert!(result.is_ok(), "Trades CSV generation failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Trades CSV generation failed: {:?}",
+        result.err()
+    );
 
     let csv_path = report_path.join("trades.csv");
     assert!(csv_path.exists(), "Trades CSV file should exist");

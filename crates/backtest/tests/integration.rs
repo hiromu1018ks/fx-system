@@ -16,6 +16,7 @@ use fx_events::projector::{LimitStateData, StateProjector};
 use fx_events::proto;
 use fx_events::store::{EventStore, Tier3Store};
 use fx_execution::gateway::{ExecutionGateway, ExecutionGatewayConfig, ExecutionRequest};
+use fx_execution::lp_monitor::{LpMonitorConfig, LpRiskMonitor};
 use fx_risk::barrier::{BarrierStatus, DynamicRiskBarrier, DynamicRiskBarrierConfig};
 use fx_risk::global_position::{GlobalPositionChecker, GlobalPositionConfig};
 use fx_risk::kill_switch::{KillSwitch, KillSwitchConfig};
@@ -23,8 +24,6 @@ use fx_risk::lifecycle::{EpisodeSummary, LifecycleConfig, LifecycleManager};
 use fx_risk::limits::{CloseReason, HierarchicalRiskLimiter, RiskError, RiskLimitsConfig};
 use fx_strategy::bayesian_lr::{QAction, QFunction};
 use fx_strategy::change_point::{ChangePointConfig, ChangePointDetector};
-use fx_strategy::thompson_sampling::{ThompsonSamplingConfig, ThompsonSamplingPolicy};
-use fx_execution::lp_monitor::{LpMonitorConfig, LpRiskMonitor};
 use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
 use fx_strategy::features::FeatureVector;
 use fx_strategy::mc_eval::{McEvaluator, RewardConfig, TerminalReason};
@@ -32,6 +31,7 @@ use fx_strategy::policy::Action;
 use fx_strategy::strategy_a::{StrategyA, StrategyAConfig};
 use fx_strategy::strategy_b::{StrategyB, StrategyBConfig};
 use fx_strategy::strategy_c::{StrategyC, StrategyCConfig};
+use fx_strategy::thompson_sampling::{ThompsonSamplingConfig, ThompsonSamplingPolicy};
 use prost::Message as _;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -3134,7 +3134,11 @@ fn test_domain_rule_release_build_safety() {
 // 13. Stress Tests: design.md §12 破綻シナリオ
 // ---------------------------------------------------------------------------
 
-fn make_test_state(global_position: f64, global_limit: f64, lot_multiplier: f64) -> fx_events::projector::StateSnapshot {
+fn make_test_state(
+    global_position: f64,
+    global_limit: f64,
+    lot_multiplier: f64,
+) -> fx_events::projector::StateSnapshot {
     fx_events::projector::StateSnapshot {
         positions: HashMap::new(),
         global_position,
@@ -3257,22 +3261,32 @@ fn test_s12_volatility_shift_q_goes_negative() {
     for _ in 0..20 {
         let mut fv = FeatureVector::zero();
         fv.volatility_ratio = 1.0;
-        let _ = policy.q_function_mut().update(QAction::Buy, &fv.flattened(), 1.0);
-        let _ = policy.q_function_mut().update(QAction::Sell, &fv.flattened(), 0.5);
+        let _ = policy
+            .q_function_mut()
+            .update(QAction::Buy, &fv.flattened(), 1.0);
+        let _ = policy
+            .q_function_mut()
+            .update(QAction::Sell, &fv.flattened(), 0.5);
     }
 
     // Regime shift: high volatility causes losses
     for _ in 0..20 {
         let mut fv = FeatureVector::zero();
         fv.volatility_ratio = 5.0;
-        let _ = policy.q_function_mut().update(QAction::Buy, &fv.flattened(), -3.0);
-        let _ = policy.q_function_mut().update(QAction::Sell, &fv.flattened(), -2.0);
+        let _ = policy
+            .q_function_mut()
+            .update(QAction::Buy, &fv.flattened(), -3.0);
+        let _ = policy
+            .q_function_mut()
+            .update(QAction::Sell, &fv.flattened(), -2.0);
     }
 
     // Q-values under high volatility should be degraded
     let mut high_vol_fv = FeatureVector::zero();
     high_vol_fv.volatility_ratio = 5.0;
-    let q_buy_high_vol = policy.q_function().q_value(QAction::Buy, &high_vol_fv.flattened());
+    let q_buy_high_vol = policy
+        .q_function()
+        .q_value(QAction::Buy, &high_vol_fv.flattened());
 
     assert!(
         q_buy_high_vol < 0.0,
@@ -3320,7 +3334,10 @@ fn test_s12_volatility_shift_triggers_change_point() {
         fv.volatility_ratio = 5.0 + rng.gen::<f64>() * 0.5;
         let detected = detector.observe(&fv.flattened(), NS_BASE + t * 100_000_000);
         if let Some(cp) = detected {
-            assert!(cp.mean_diff.abs() > 0.0, "Detected change should have non-zero mean diff");
+            assert!(
+                cp.mean_diff.abs() > 0.0,
+                "Detected change should have non-zero mean diff"
+            );
         }
     }
 
@@ -3374,7 +3391,10 @@ fn test_s12_lp_adversarial_detection_and_switch() {
     );
     let sig = signal.unwrap();
     assert_eq!(sig.from_lp_id, "lp_primary");
-    assert_ne!(sig.to_lp_id, "lp_primary", "Should switch away from adversarial LP");
+    assert_ne!(
+        sig.to_lp_id, "lp_primary",
+        "Should switch away from adversarial LP"
+    );
 }
 
 #[test]
@@ -3409,7 +3429,10 @@ fn test_s12_lp_adversarial_consecutive_rejections() {
     );
 
     let signal = monitor.check_adversarial();
-    assert!(signal.is_some(), "Consecutive rejections should trigger switch");
+    assert!(
+        signal.is_some(),
+        "Consecutive rejections should trigger switch"
+    );
 }
 
 #[test]
@@ -3430,9 +3453,15 @@ fn test_s12_hold_degeneration_optimistic_init_and_recovery() {
 
     // Verify optimistic initialization: Buy/Sell Q > Hold Q
     let features = FeatureVector::zero();
-    let q_buy = policy.q_function().q_value(QAction::Buy, &features.flattened());
-    let q_sell = policy.q_function().q_value(QAction::Sell, &features.flattened());
-    let q_hold = policy.q_function().q_value(QAction::Hold, &features.flattened());
+    let q_buy = policy
+        .q_function()
+        .q_value(QAction::Buy, &features.flattened());
+    let q_sell = policy
+        .q_function()
+        .q_value(QAction::Sell, &features.flattened());
+    let q_hold = policy
+        .q_function()
+        .q_value(QAction::Hold, &features.flattened());
 
     assert!(
         q_buy > q_hold,
@@ -3523,7 +3552,10 @@ fn test_s12_lifecycle_culling_from_consecutive_losses() {
 
     // Validate that culled strategy cannot trade
     let result = mgr.validate_order(StrategyId::A);
-    assert!(result.is_err(), "Culled strategy should fail order validation");
+    assert!(
+        result.is_err(),
+        "Culled strategy should fail order validation"
+    );
 }
 
 #[test]
@@ -3542,7 +3574,11 @@ fn test_s12_drawdown_self_freeze_recovery() {
     let normal_state = LimitStateData::default();
     assert!(!HierarchicalRiskLimiter::is_halted(&normal_state));
     let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &normal_state);
-    assert!(result.is_ok(), "Initial state should allow orders: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Initial state should allow orders: {:?}",
+        result
+    );
     assert!(close.is_none(), "No close reason initially");
 
     // Phase 2: Heavy daily realized loss triggers halt via evaluate()
@@ -3556,15 +3592,11 @@ fn test_s12_drawdown_self_freeze_recovery() {
         "Heavy daily losses should trigger halt: {:?}",
         result_halted
     );
-    assert!(
-        close_halted.is_some(),
-        "Halt should produce close reason"
-    );
+    assert!(close_halted.is_some(), "Halt should produce close reason");
 
     // Phase 3: Use compute_limit_state to derive halted flags from PnL
-    let halted_state = HierarchicalRiskLimiter::compute_limit_state(
-        &config, 0.0, -1500.0, 0.0, 0.0,
-    );
+    let halted_state =
+        HierarchicalRiskLimiter::compute_limit_state(&config, 0.0, -1500.0, 0.0, 0.0);
     assert!(
         HierarchicalRiskLimiter::is_halted(&halted_state),
         "compute_limit_state should set halt flag when PnL breaches threshold"
@@ -3576,9 +3608,8 @@ fn test_s12_drawdown_self_freeze_recovery() {
 
     // Phase 4: PnL recovers but halt flag persists (is_halted remains true)
     // because halt flags are only cleared by explicit reset, not by PnL improvement
-    let recovered_pnl_state = HierarchicalRiskLimiter::compute_limit_state(
-        &config, 0.0, -500.0, 0.0, 0.0,
-    );
+    let recovered_pnl_state =
+        HierarchicalRiskLimiter::compute_limit_state(&config, 0.0, -500.0, 0.0, 0.0);
     // With recovered PnL, the halt flag is NOT set (PnL above threshold)
     assert!(
         !HierarchicalRiskLimiter::is_halted(&recovered_pnl_state),
