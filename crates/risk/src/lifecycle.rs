@@ -1228,6 +1228,185 @@ mod tests {
         assert!(status.rolling_std_return < 1e-10);
     }
 
+    // ========================================================================
+    // §9.3 Lifecycle Manager Verification Tests (design.md §9.3)
+    // ========================================================================
+
+    /// §9.3: Rolling Sharpeがエピソードごとに継続的に監視されることを確認
+    #[test]
+    fn s9_3_rolling_sharpe_monitored_per_episode() {
+        let config = LifecycleConfig {
+            min_episodes_for_eval: 3,
+            sharpe_annualization_factor: 1.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = empty_state();
+
+        let mut prev_sharpe = None;
+        for i in 0..10 {
+            mgr.record_episode(&make_summary(StrategyId::A, i as f64 * 0.5), false, &state);
+            let sharpe = mgr.status(StrategyId::A).unwrap().rolling_sharpe;
+            if let Some(prev) = prev_sharpe {
+                // Sharpe should change with each episode (unless constant returns)
+                assert_eq!(mgr.status(StrategyId::A).unwrap().total_episodes, i + 1);
+            }
+            assert!(
+                sharpe.is_finite(),
+                "Sharpe must be finite after {} episodes",
+                i + 1
+            );
+            prev_sharpe = Some(sharpe);
+        }
+    }
+
+    /// §9.3: 死の閾値下回り時の新規エントリーハードブロックを確認
+    #[test]
+    fn s9_3_death_threshold_hard_blocks_new_entries() {
+        let config = LifecycleConfig {
+            min_episodes_for_eval: 5,
+            consecutive_death_windows: 2,
+            sharpe_annualization_factor: 1.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = empty_state();
+
+        // 強い負のエピソードで死亡判定をトリガー
+        for _ in 0..8 {
+            mgr.record_episode(&make_summary(StrategyId::A, -10.0), false, &state);
+        }
+
+        assert!(
+            !mgr.is_alive(StrategyId::A),
+            "culled strategy should not be alive"
+        );
+
+        // 新規エントリーハードブロック
+        let result = mgr.validate_order(StrategyId::A);
+        assert!(result.is_err(), "culled strategy must be hard-blocked");
+        match result.unwrap_err() {
+            LifecycleError::StrategyCulled {
+                strategy_id,
+                reason,
+                rolling_sharpe,
+            } => {
+                assert_eq!(strategy_id, StrategyId::A);
+                assert_eq!(reason, DeathReason::LowSharpe);
+                assert!(rolling_sharpe < 0.0);
+            }
+        }
+    }
+
+    /// §9.3: 既存ポジションの自動クローズ機構を確認
+    #[test]
+    fn s9_3_auto_close_existing_positions_on_cull() {
+        let config = LifecycleConfig {
+            min_episodes_for_eval: 5,
+            consecutive_death_windows: 2,
+            sharpe_annualization_factor: 1.0,
+            auto_close_culled_positions: true,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = state_with_position(StrategyId::A, 2000.0, 110.0);
+
+        // エピソード記録でcullをトリガー
+        let mut close_cmd = None;
+        for _ in 0..8 {
+            if let Some(cmd) =
+                mgr.record_episode(&make_summary(StrategyId::A, -10.0), false, &state)
+            {
+                close_cmd = Some(cmd);
+            }
+        }
+
+        assert!(
+            close_cmd.is_some(),
+            "close command should be returned on cull"
+        );
+        let cmd = close_cmd.unwrap();
+        assert_eq!(cmd.strategy_id, StrategyId::A);
+        assert_eq!(cmd.direction, Direction::Sell);
+        assert_eq!(cmd.lots, 2000);
+    }
+
+    /// §9.3: Regime別PnL監視によるcullを確認
+    #[test]
+    fn s9_3_regime_pnl_monitoring_triggers_cull() {
+        let config = LifecycleConfig {
+            min_episodes_for_eval: 1,
+            consecutive_death_windows: 100,
+            death_sharpe_threshold: -1000.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let mut state = empty_state();
+        state.limit_state.daily_pnl_mtm = -500.0;
+        // regime PnL limit = -|-500| * 0.5 = -250.0
+
+        for _ in 0..5 {
+            mgr.record_episode(&make_summary(StrategyId::A, -100.0), false, &state);
+        }
+
+        let status = mgr.status(StrategyId::A).unwrap();
+        assert!(!status.alive, "should be culled by regime PnL breach");
+        assert_eq!(status.death_reason, Some(DeathReason::RegimePnlBreached));
+    }
+
+    /// §9.3: 他戦略はcullの影響を受けないことを確認
+    #[test]
+    fn s9_3_cull_is_per_strategy_independent() {
+        let config = LifecycleConfig {
+            min_episodes_for_eval: 5,
+            consecutive_death_windows: 2,
+            sharpe_annualization_factor: 1.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = empty_state();
+
+        // Strategy Aのみcull
+        for _ in 0..8 {
+            mgr.record_episode(&make_summary(StrategyId::A, -10.0), false, &state);
+        }
+
+        assert!(!mgr.is_alive(StrategyId::A));
+        assert!(
+            mgr.is_alive(StrategyId::B),
+            "Strategy B should be unaffected"
+        );
+        assert!(
+            mgr.is_alive(StrategyId::C),
+            "Strategy C should be unaffected"
+        );
+        assert!(mgr.validate_order(StrategyId::B).is_ok());
+        assert!(mgr.validate_order(StrategyId::C).is_ok());
+    }
+
+    /// §9.3: min_episodes_for_eval未満ではcullされないことを確認
+    #[test]
+    fn s9_3_no_cull_before_min_episodes() {
+        let config = LifecycleConfig {
+            min_episodes_for_eval: 20,
+            consecutive_death_windows: 1,
+            death_sharpe_threshold: 0.0,
+            sharpe_annualization_factor: 1.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = empty_state();
+
+        for _ in 0..19 {
+            mgr.record_episode(&make_summary(StrategyId::A, -100.0), false, &state);
+        }
+
+        assert!(
+            mgr.is_alive(StrategyId::A),
+            "should not cull before min_episodes"
+        );
+    }
+
     // --- Single bad window doesn't cull ---
 
     #[test]

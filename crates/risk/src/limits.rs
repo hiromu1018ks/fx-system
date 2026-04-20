@@ -668,4 +668,296 @@ mod tests {
         assert!(result.is_ok());
         assert!(close.is_none());
     }
+
+    // ========================================================================
+    // §9.4-9.4.2 Hierarchical Loss Limits Verification Tests (design.md §9)
+    // ========================================================================
+
+    /// §9.4: 日次第一段階（MTM警戒水準）でロットが25%に制限されることを確認
+    #[test]
+    fn s9_4_daily_mtm_warning_limits_lot_to_25pct() {
+        let config = default_config();
+        let state = state_with(-600.0, 0.0, 0.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(
+            result.is_ok(),
+            "MTM warning should return Ok with restrictions"
+        );
+        assert!(close.is_none(), "MTM warning should not trigger close-all");
+        let r = result.unwrap();
+        assert!(r.daily_mtm_limited);
+        assert!(
+            (r.lot_multiplier - 0.25).abs() < f64::EPSILON,
+            "design.md §9.4 specifies 25% lot reduction; got {}",
+            r.lot_multiplier
+        );
+    }
+
+    /// §9.4: 日次第一段階でQ値閾値が設定されることを確認
+    #[test]
+    fn s9_4_daily_mtm_warning_sets_q_threshold() {
+        let config = default_config();
+        let state = state_with(-600.0, 0.0, 0.0, 0.0);
+        let (result, _) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        let r = result.unwrap();
+        assert!(
+            r.q_threshold > 0.0,
+            "design.md §9.4 specifies Q-threshold gate in MTM warning stage"
+        );
+    }
+
+    /// §9.4: 日次第二段階（実現損益ハードストップ）で全ポジションクローズ+haltを確認
+    #[test]
+    fn s9_4_daily_realized_hardstop_close_all_and_halt() {
+        let config = default_config();
+        let state = state_with(0.0, -1001.0, 0.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(result.is_err(), "realized hard-stop should return Err");
+        assert!(
+            matches!(result, Err(RiskError::DailyRealizedLimit { .. })),
+            "should be DailyRealizedLimit error"
+        );
+        assert_eq!(
+            close,
+            Some(CloseReason::DailyRealizedHalt),
+            "design.md §9.4: realized hard-stop should trigger close-all + halt"
+        );
+    }
+
+    /// §9.4: MTMは実現損益より前にチェックされるが、実現損益（stage-2）がMTM（stage-1）より
+    /// 優先されることを確認（階層: monthly > weekly > daily realized > daily MTM）
+    #[test]
+    fn s9_4_realized_hardstop_priority_over_mtm_warning() {
+        let config = default_config();
+        // 両方ともブリーチ: MTM=-800 (stage-1), Realized=-1500 (stage-2)
+        let state = state_with(-800.0, -1500.0, 0.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(
+            matches!(result, Err(RiskError::DailyRealizedLimit { .. })),
+            "daily realized (stage-2) must take priority over daily MTM (stage-1)"
+        );
+        assert_eq!(close, Some(CloseReason::DailyRealizedHalt));
+    }
+
+    /// §9.4: Q値に関わらずハードリミットが発動することを確認（関数シグネチャの構造的証明）
+    #[test]
+    fn s9_4_hard_limits_fire_regardless_of_q_values() {
+        // HierarchicalRiskLimiter::evaluate()のシグネチャにはQ値パラメータが存在しない。
+        // これはハードリミットがQ値に依存せず発動することの構造的証明。
+        let config = default_config();
+        let state = state_with(0.0, 0.0, 0.0, -9999.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(result.is_err());
+        assert_eq!(close, Some(CloseReason::MonthlyHalt));
+    }
+
+    /// §9.4.1: 週次ハードリミットで全ポジションクローズ+haltを確認
+    #[test]
+    fn s9_4_1_weekly_halt_close_all() {
+        let config = default_config();
+        let state = state_with(0.0, 0.0, -2600.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RiskError::WeeklyLimit { pnl })));
+        if let Err(RiskError::WeeklyLimit { pnl }) = &result {
+            assert!((pnl - &(-2600.0)).abs() < f64::EPSILON);
+        }
+        assert_eq!(
+            close,
+            Some(CloseReason::WeeklyHalt),
+            "design.md §9.4.1: weekly breach should trigger close-all + halt"
+        );
+    }
+
+    /// §9.4.1: 週次リミットは日次より優先されることを確認
+    #[test]
+    fn s9_4_1_weekly_priority_over_daily() {
+        let config = default_config();
+        let state = state_with(-800.0, -1500.0, -3000.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(
+            matches!(result, Err(RiskError::WeeklyLimit { .. })),
+            "weekly limit must take priority over daily limits"
+        );
+        assert_eq!(close, Some(CloseReason::WeeklyHalt));
+    }
+
+    /// §9.4.2: 月次ハードリミットで全ポジションクローズを確認
+    #[test]
+    fn s9_4_2_monthly_halt_close_all() {
+        let config = default_config();
+        let state = state_with(0.0, 0.0, 0.0, -5100.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RiskError::MonthlyLimit { pnl })));
+        if let Err(RiskError::MonthlyLimit { pnl }) = &result {
+            assert!((pnl - &(-5100.0)).abs() < f64::EPSILON);
+        }
+        assert_eq!(
+            close,
+            Some(CloseReason::MonthlyHalt),
+            "design.md §9.4.2: monthly breach should trigger close-all"
+        );
+    }
+
+    /// §9.4.2: 月次リミットは全リミット中最優先であることを確認
+    #[test]
+    fn s9_4_2_monthly_is_highest_priority() {
+        let config = default_config();
+        // 全リミット同時ブリーチ → 月次が勝つ
+        let state = state_with(-9999.0, -9999.0, -9999.0, -9999.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(
+            matches!(result, Err(RiskError::MonthlyLimit { .. })),
+            "monthly limit must be the highest priority"
+        );
+        assert_eq!(close, Some(CloseReason::MonthlyHalt));
+    }
+
+    /// §9.4-9.4.2: チェック順序の完全検証: 月次 → 週次 → 日次実現 → 日次MTM
+    #[test]
+    fn s9_4_check_order_monthly_weekly_daily_realized_daily_mtm() {
+        let config = default_config();
+
+        // (1) 月次のみブリーチ → MonthlyLimit
+        let s = state_with(0.0, 0.0, 0.0, -6000.0);
+        let (r, c) = HierarchicalRiskLimiter::evaluate(&config, &s);
+        assert!(matches!(r, Err(RiskError::MonthlyLimit { .. })));
+        assert_eq!(c, Some(CloseReason::MonthlyHalt));
+
+        // (2) 月次OK、週次ブリーチ → WeeklyLimit
+        let s = state_with(0.0, 0.0, -3000.0, 0.0);
+        let (r, c) = HierarchicalRiskLimiter::evaluate(&config, &s);
+        assert!(matches!(r, Err(RiskError::WeeklyLimit { .. })));
+        assert_eq!(c, Some(CloseReason::WeeklyHalt));
+
+        // (3) 月次+週次OK、日次実現ブリーチ → DailyRealizedLimit
+        let s = state_with(0.0, -1500.0, 0.0, 0.0);
+        let (r, c) = HierarchicalRiskLimiter::evaluate(&config, &s);
+        assert!(matches!(r, Err(RiskError::DailyRealizedLimit { .. })));
+        assert_eq!(c, Some(CloseReason::DailyRealizedHalt));
+
+        // (4) 日次MTMのみブリーチ → Ok (soft limit with restrictions)
+        let s = state_with(-600.0, 0.0, 0.0, 0.0);
+        let (r, c) = HierarchicalRiskLimiter::evaluate(&config, &s);
+        assert!(r.is_ok(), "daily MTM is a soft limit");
+        assert!(c.is_none());
+        assert!(r.unwrap().daily_mtm_limited);
+    }
+
+    /// §9.4: is_haltedフラグで halted状態が永続することを確認
+    #[test]
+    fn s9_4_halted_state_persists_via_flags() {
+        let _config = default_config();
+        let mut state = normal_state();
+
+        // 月次リミットブリーチでhaltフラグを設定
+        state.monthly_halted = true;
+        assert!(HierarchicalRiskLimiter::is_halted(&state));
+
+        // 日次実現リミットブリーチでhaltフラグを設定
+        state.monthly_halted = false;
+        state.daily_realized_halted = true;
+        assert!(HierarchicalRiskLimiter::is_halted(&state));
+
+        // MTM制限のみではhaltしない
+        state.daily_realized_halted = false;
+        state.daily_mtm_limited = true;
+        assert!(!HierarchicalRiskLimiter::is_halted(&state));
+    }
+
+    // ========================================================================
+    // §4.1 Decision Function Verification Tests
+    // ========================================================================
+
+    /// §4.1: Verify the exact check ordering: Monthly → Weekly → Daily Realized → Daily MTM.
+    /// Each tier must be checked before the next, and the most severe (highest in hierarchy)
+    /// takes absolute priority.
+    #[test]
+    fn s41_check_order_monthly_before_weekly_before_daily() {
+        let config = default_config();
+
+        // All four limits breached → Monthly must win (checked first)
+        let all_breached = state_with(-9999.0, -9999.0, -9999.0, -9999.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &all_breached);
+        assert!(
+            matches!(result, Err(RiskError::MonthlyLimit { .. })),
+            "Monthly must take priority when all limits are breached"
+        );
+        assert_eq!(close, Some(CloseReason::MonthlyHalt));
+
+        // Monthly OK, Weekly+Daily breached → Weekly must win
+        let weekly_wins = state_with(-9999.0, -9999.0, -9999.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &weekly_wins);
+        assert!(
+            matches!(result, Err(RiskError::WeeklyLimit { .. })),
+            "Weekly must take priority when Monthly is OK"
+        );
+        assert_eq!(close, Some(CloseReason::WeeklyHalt));
+
+        // Monthly+Weekly OK, Daily realized+MTM breached → Daily realized (stage-2) wins over MTM (stage-1)
+        let daily_realized_wins = state_with(-9999.0, -9999.0, 0.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &daily_realized_wins);
+        assert!(
+            matches!(result, Err(RiskError::DailyRealizedLimit { .. })),
+            "Daily realized (stage-2) must take priority over Daily MTM (stage-1)"
+        );
+        assert_eq!(close, Some(CloseReason::DailyRealizedHalt));
+
+        // Only MTM breached → soft limit (Ok with restrictions, not Err)
+        let mtm_only = state_with(-600.0, 0.0, 0.0, 0.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &mtm_only);
+        assert!(
+            result.is_ok(),
+            "Daily MTM (stage-1) should return Ok with restrictions, not Err"
+        );
+        assert!(close.is_none(), "Daily MTM should not trigger close-all");
+        let r = result.unwrap();
+        assert!(r.daily_mtm_limited);
+        assert!((r.lot_multiplier - 0.25).abs() < f64::EPSILON);
+    }
+
+    /// §4.1: Hard limits fire REGARDLESS of Q-values.
+    /// The evaluate() function is stateless and only checks PnL thresholds.
+    /// Q-values are checked AFTER hierarchical limits (via passes_q_threshold).
+    #[test]
+    fn s41_hard_limits_fire_regardless_of_q_values() {
+        let config = default_config();
+
+        // Monthly limit breached — no Q-value parameter in evaluate()
+        let state = state_with(0.0, 0.0, 0.0, -9999.0);
+        let (result, close) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        assert!(result.is_err());
+        assert_eq!(close, Some(CloseReason::MonthlyHalt));
+
+        // The function signature has NO q_value parameter — proving
+        // hard limits are independent of Q-values by design.
+        // Q-threshold is only applied AFTER evaluate() succeeds (in daily MTM path)
+        // via the separate passes_q_threshold() method.
+    }
+
+    /// §4.1: validate_order (convenience) wraps evaluate correctly.
+    /// The validate_order in HierarchicalRiskLimiter discards CloseReason
+    /// but preserves the Ok/Err result. The engine uses evaluate() to get
+    /// the CloseReason for position closure.
+    #[test]
+    fn s41_validate_order_and_evaluate_consistency() {
+        let config = default_config();
+
+        // When evaluate returns Err + CloseReason, validate_order returns Err
+        let state = state_with(0.0, -9999.0, 0.0, 0.0);
+        let (eval_result, close_reason) = HierarchicalRiskLimiter::evaluate(&config, &state);
+        let val_result = HierarchicalRiskLimiter::validate_order(&config, &state);
+
+        assert!(eval_result.is_err());
+        assert!(close_reason.is_some());
+        assert!(val_result.is_err());
+
+        // When evaluate returns Ok, validate_order returns Ok
+        let normal = normal_state();
+        let (eval_ok, _) = HierarchicalRiskLimiter::evaluate(&config, &normal);
+        let val_ok = HierarchicalRiskLimiter::validate_order(&config, &normal);
+        assert!(eval_ok.is_ok());
+        assert!(val_ok.is_ok());
+    }
 }

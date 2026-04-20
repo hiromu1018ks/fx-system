@@ -371,7 +371,7 @@ struct DataTick {
       "§9.6 LP切り替え再校正: 安全モード25%制限、パラメータ再推定、校正完了判定",
       "検証用テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",

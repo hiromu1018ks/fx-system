@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 17
-**Current Task:** Task 22 — design.md §9 リスク管理の実装整合性検証
+**Tasks Completed:** 18
+**Current Task:** Task 23 — design.md §8 Observability・Pre-Failure Signatureの実装検証
 
 ---
 
@@ -563,3 +563,81 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean（`cargo fmt`で1箇所修正）
 
 **Issues:** pre-existing test failure in `change_point::tests::test_observe_and_respond_no_change` (fx-strategy) — 本タスクとは無関係。`rand` crateに`small_rng` featureを追加（既存テストの`SmallRng`使用に必要）
+
+### 2026-04-20: Task 22 — design.md §9 リスク管理の実装整合性検証
+
+**What changed:**
+
+§9.1 Kill Switch検証テスト7件（`crates/risk/src/kill_switch.rs`）:
+- `s9_1_default_z_score_threshold_is_3sigma`: デフォルトz_score_threshold=3.0を検証
+- `s9_1_mask_duration_within_10_to_50ms`: マスク期間が10-50ms範囲内であることを検証
+- `s9_1_welford_produces_correct_statistics`: Welford online algorithmで正しいmean/varianceが計算されることを検証
+- `s9_1_anomaly_triggers_mask_and_blocks_orders`: z-score閾値逸脱でマスクが発動し発注がブロックされることを検証
+- `s9_1_validate_order_uses_atomic_lock_free_check`: validate_orderがatomic lock-free checkであることを検証
+- `s9_1_no_detection_before_min_samples`: 最小サンプル数未満では検出されないことを検証
+- `s9_1_manual_trigger_and_reset_operator_control`: 手動トリガーとリセットのオペレーター制御を検証
+
+§9.2 Online Change Point Detection検証テスト6件（`crates/strategy/src/change_point.rs`）:
+- `s9_2_adwin_uses_hoeffding_bound`: ADWINがHoeffding boundに基づく変化点検出を行うことを検証（delta=0.0001、ランダムノイズ）
+- `s9_2_detection_triggers_posterior_response`: 変化点検出時の事後分布応答（共分散膨張によるreset）を検証
+- `s9_2_grace_period_prevents_detection_cascade`: グレースピリオドで連鎖検出が防止されることを検証
+- `s9_2_consecutive_changes_trigger_retraining`: 連続変化点でretrainingがトリガーされることを検証
+- `s9_2_severity_classification_minor_vs_major`: 軽微/重大の深刻度分類を検証
+
+§9.3 Lifecycle Manager検証テスト6件（`crates/risk/src/lifecycle.rs`）:
+- `s9_3_rolling_sharpe_monitored_per_episode`: エピソードごとのRolling Sharpe監視を検証
+- `s9_3_death_threshold_hard_blocks_new_entries`: 死の閾値下回り時のハードブロックを検証
+- `s9_3_auto_close_existing_positions_on_cull`: 淘汰時の既存ポジション自動クローズを検証
+- `s9_3_regime_pnl_monitoring_triggers_cull`: Regime別PnL監視による淘汰トリガーを検証
+- `s9_3_cull_is_per_strategy_independent`: 戦略別独立の淘汰判定を検証
+- `s9_3_no_cull_before_min_episodes`: 最小エピソード数未満では淘汰されないことを検証
+
+§9.4-9.4.2 Hierarchical Loss Limits検証テスト11件（`crates/risk/src/limits.rs`）:
+- `s9_4_daily_mtm_warning_limits_lot_to_25pct`: MTM警戒水準でlotが25%に制限されることを検証
+- `s9_4_daily_mtm_warning_sets_q_threshold`: MTM警戒時にQ値閾値が設定されることを検証
+- `s9_4_daily_realized_hardstop_close_all_and_halt`: 日次実現ハードストップで全クローズ+停止を検証
+- `s9_4_realized_hardstop_priority_over_mtm_warning`: 実現リミットがMTM警戒より優先されることを検証
+- `s9_4_hard_limits_fire_regardless_of_q_values`: ハードリミットがQ値に関係なく発動することを検証
+- `s9_4_1_weekly_halt_close_all`: 週次ハードリミットで全クローズ+停止を検証
+- `s9_4_1_weekly_priority_over_daily`: 週次が日次より優先されることを検証
+- `s9_4_2_monthly_halt_close_all`: 月次ハードリミットで全クローズ+停止を検証
+- `s9_4_2_monthly_is_highest_priority`: 月次が最高優先度であることを検証
+- `s9_4_check_order_monthly_weekly_daily_realized_daily_mtm`: 全段階チェック順序を検証
+- `s9_4_halted_state_persists_via_flags`: 停止状態がフラグで永続することを検証
+
+§9.5 Global Position検証テスト7件（`crates/risk/src/global_position.rs`）:
+- `s9_5_global_limit_formula_matches_design_doc`: P_max^global = ΣP_max^i / max(corr, floor)の公式検証
+- `s9_5_floor_correlation_prevents_over_allocation`: FLOOR_CORRELATIONによる過大割当防止を検証
+- `s9_5_hard_constraint_blocks_excess_position`: 制約超過のハードブロックを検証
+- `s9_5_boundary_exact_limit_allowed`: 制限境界値での許可を検証
+- `s9_5_highest_q_strategy_gets_full_lot`: 最高Q値戦略がフルロットを取得することを検証
+- `s9_5_lower_priority_strategies_get_reduced_lots`: 低優先度戦略のロット削減（0.5^rank）を検証
+- `s9_5_negative_position_symmetric_constraint`: 負ポジションの対称制約を検証
+
+§9.6 LP Recalibration検証テスト7件（`crates/execution/src/lp_recalibration.rs`）:
+- `s9_6_safe_mode_25pct_lot_on_lp_switch`: LP切り替え時の25% lot制限を検証
+- `s9_6_safe_mode_doubles_sigma_execution`: 安全モードでσ_executionが2倍になることを検証
+- `s9_6_completion_based_on_error_thresholds`: 誤差閾値ベースの校正完了判定を検証
+- `s9_6_min_observations_required_for_completion`: 最小観測数要求を検証
+- `s9_6_multipliers_restored_after_completion`: 完了後の乗数復帰を検証
+- `s9_6_observations_only_for_target_lp`: ターゲットLPのみ観測されることを検証
+- `s9_6_forced_completion_at_max_duration`: 最大期間での強制完了を検証
+
+**調査結果:**
+- §9.1 Kill Switch: Welford online algorithm、z-score閾値3.0（mean ± 3σ）、10-50msマスク期間、atomic lock-free validation、手動トリガー/リセット — 全項目完全実装
+- §9.2 Change Point Detection: ADWINアルゴリズム、Hoeffding bound、Bonferroni補正、グレースピリオド、posterior partial reset（共分散膨張）— 完全実装
+- §9.3 Lifecycle Manager: Rolling Sharpe監視、死の閾値、連続悪いウィンドウ、自動クローズ、regime別PnL監視 — 完全実装
+- §9.4 Hierarchical Loss Limits: 月次→週次→日次実現→日次MTMのチェック順序、25% lot削減、hard-stop close-all + halt — 完全実装
+- §9.4.1 週次: 全クローズ + 翌週までhalt — 完全実装
+- §9.4.2 月次: 全クローズ + 月内再開禁止 — 完全実装
+- §9.5 Global Position: P_max^global公式、FLOOR_CORRELATION、優先度ベースlot削減（0.5^rank）— 完全実装
+- §9.6 LP Recalibration: 安全モード25% lot + 2x σ_execution、最小観測数、誤差閾値完了、最大期間強制完了 — 完全実装
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 515 passed, 0 failed（44 new §9 tests across 5 crates）
+- `cargo clippy` — エラーなし
+- `cargo fmt` — applied（multi-line assertions formatting）
+- `cargo fmt --check` — clean
+
+**Issues:** なし

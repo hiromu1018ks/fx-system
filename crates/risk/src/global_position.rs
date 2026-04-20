@@ -866,6 +866,178 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ========================================================================
+    // §9.5 Global Position Constraint Verification Tests (design.md §9.5)
+    // ========================================================================
+
+    /// §9.5: グローバルポジション制約公式 P_max^global = ΣP_max^i / max(corr, floor) を確認
+    #[test]
+    fn s9_5_global_limit_formula_matches_design_doc() {
+        let config = default_config();
+        // ΣP_max = 5+5+5 = 15, correlation_factor=1.0, floor=1.5
+        // divisor = max(1.0, 1.5) = 1.5, limit = 15/1.5 = 10.0
+        let limit = GlobalPositionChecker::compute_global_limit(&config);
+        let sum_max: f64 = config.strategy_max_positions.values().sum();
+        let divisor = config.correlation_factor.max(config.floor_correlation);
+        let expected = sum_max / divisor;
+        assert!(
+            (limit - expected).abs() < f64::EPSILON,
+            "P_max^global = ΣP_max^i / max(corr, floor): expected {}, got {}",
+            expected,
+            limit
+        );
+    }
+
+    /// §9.5: FLOOR_CORRELATIONがストレス時の過大許容を防止することを確認
+    #[test]
+    fn s9_5_floor_correlation_prevents_over_allocation() {
+        let mut config = default_config();
+        // 平穏時に推定された低いcorrelation_factor
+        config.correlation_factor = 0.3;
+        config.floor_correlation = 1.5;
+
+        // floorが適用される: divisor = max(0.3, 1.5) = 1.5
+        let limit = GlobalPositionChecker::compute_global_limit(&config);
+        assert!(
+            (limit - 10.0).abs() < f64::EPSILON,
+            "floor should prevent excessive allocation: got {}",
+            limit
+        );
+
+        // floorなしの場合: divisor = 0.3, limit = 15/0.3 = 50 (危険)
+        config.floor_correlation = 0.0;
+        let limit_no_floor = GlobalPositionChecker::compute_global_limit(&config);
+        assert!(
+            limit_no_floor > limit * 4.0,
+            "without floor, limit would be much higher"
+        );
+    }
+
+    /// §9.5: |Σp_i| ≤ P_max^global のハード制約を確認
+    #[test]
+    fn s9_5_hard_constraint_blocks_excess_position() {
+        let config = default_config();
+        // global_limit = 10.0
+        let snap = snapshot_with_global(9.5);
+        let q = all_q_flat(0.1);
+
+        // 9.5 + 1.0 = 10.5 > 10.0 → blocked
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::A,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(
+            result.is_err(),
+            "|Σp_i + δ| ≤ P_max^global should block excess position"
+        );
+    }
+
+    /// §9.5: 境界値での許可を確認（|Σp_i + δ| == P_max^global）
+    #[test]
+    fn s9_5_boundary_exact_limit_allowed() {
+        let config = default_config();
+        let snap = snapshot_with_global(9.0);
+        let q = all_q_flat(0.1);
+
+        // 9.0 + 1.0 = 10.0 ≤ 10.0 → allowed (exact boundary)
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::A,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(result.is_ok(), "exact boundary should be allowed");
+    }
+
+    /// §9.5: Q値最上位戦略が優先されロット削減されないことを確認
+    #[test]
+    fn s9_5_highest_q_strategy_gets_full_lot() {
+        let config = default_config();
+        let snap = empty_snapshot();
+        let q = all_q(0.5, 0.1, 0.05);
+
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::A,
+            Direction::Buy,
+            100_000.0,
+            0.5,
+            &q,
+        );
+        let r = result.unwrap();
+        assert_eq!(r.priority_rank, 0, "highest Q strategy should be rank 0");
+        assert!(
+            (r.effective_lot - 100_000.0).abs() < f64::EPSILON,
+            "rank 0 strategy should get full lot"
+        );
+    }
+
+    /// §9.5: 下位戦略のロット削減（0.5^n）を確認
+    #[test]
+    fn s9_5_lower_priority_strategies_get_reduced_lots() {
+        let config = default_config();
+        let snap = empty_snapshot();
+        let q = all_q(0.5, 0.1, 0.05);
+
+        // Strategy B: rank 1 → 50%
+        let result_b = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::B,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert_eq!(result_b.as_ref().unwrap().priority_rank, 1);
+        assert!((result_b.as_ref().unwrap().effective_lot - 50_000.0).abs() < f64::EPSILON);
+
+        // Strategy C: rank 2 → 25%
+        let result_c = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::C,
+            Direction::Buy,
+            100_000.0,
+            0.05,
+            &q,
+        );
+        assert_eq!(result_c.as_ref().unwrap().priority_rank, 2);
+        assert!((result_c.as_ref().unwrap().effective_lot - 25_000.0).abs() < f64::EPSILON);
+    }
+
+    /// §9.5: 負のグローバルポジションでも制約が対称に機能することを確認
+    #[test]
+    fn s9_5_negative_position_symmetric_constraint() {
+        let config = default_config();
+        let snap = snapshot_with_global(-9.5);
+        let q = all_q_flat(0.1);
+
+        // -9.5 - 1.0 = -10.5, |-10.5| = 10.5 > 10.0 → blocked
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::A,
+            Direction::Sell,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(
+            result.is_err(),
+            "negative position constraint should be symmetric"
+        );
+    }
+
     // -- Floor correlation stress scenario ------------------------------------
 
     #[test]

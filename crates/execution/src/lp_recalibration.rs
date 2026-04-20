@@ -944,4 +944,154 @@ mod tests {
         // Force complete at max duration
         assert!(mgr.check_completion(1_000_000_000_000 + 101_000_000_000));
     }
+
+    // ========================================================================
+    // §9.6 LP Recalibration Protocol Verification Tests (design.md §9.6)
+    // ========================================================================
+
+    /// §9.6: LP切り替え直後に安全モード（25%ロット制限）に移行することを確認
+    #[test]
+    fn s9_6_safe_mode_25pct_lot_on_lp_switch() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig::default());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        assert!(mgr.is_safe_mode());
+        assert_eq!(
+            mgr.lot_multiplier(),
+            0.25,
+            "design.md §9.6: safe mode should limit lots to 25%"
+        );
+    }
+
+    /// §9.6: 安全モード中にσ_executionが2倍に設定されることを確認
+    #[test]
+    fn s9_6_safe_mode_doubles_sigma_execution() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig::default());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        assert_eq!(
+            mgr.sigma_multiplier(),
+            2.0,
+            "design.md §9.6: safe mode should double σ_execution"
+        );
+    }
+
+    /// §9.6: 校正完了判定が推定誤差閾値に基づくことを確認
+    #[test]
+    fn s9_6_completion_based_on_error_thresholds() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig {
+            min_recalibration_observations: 10,
+            slippage_error_threshold: 0.01,
+            fill_rate_error_threshold: 0.01,
+            max_recalibration_duration_ns: 60_000_000_000,
+            ..Default::default()
+        });
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        // observed ≈ predicted → slippage error ≈ 0
+        // fill rate close to baseline → fill rate error ≈ 0
+        for i in 0..10u64 {
+            mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000 + i);
+        }
+        for i in 10..15u64 {
+            mgr.record_rejection("LP_BACKUP", 1_000_000_000_000 + i);
+        }
+
+        assert!(
+            mgr.check_completion(2_000_000_000_000),
+            "design.md §9.6: completion when estimation errors are below thresholds"
+        );
+    }
+
+    /// §9.6: 最小観測数未満では校正完了できないことを確認
+    #[test]
+    fn s9_6_min_observations_required_for_completion() {
+        let mut mgr = LpRecalibrationManager::new(default_config());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        for i in 0..9u64 {
+            mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000 + i);
+        }
+
+        assert!(
+            !mgr.check_completion(2_000_000_000_000),
+            "design.md §9.6: cannot complete before minimum observations (N=10)"
+        );
+        assert_eq!(mgr.status(), &RecalibrationStatus::SafeMode);
+    }
+
+    /// §9.6: 校正完了後にロット・σ乗数が通常値に復帰することを確認
+    #[test]
+    fn s9_6_multipliers_restored_after_completion() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig {
+            min_recalibration_observations: 2,
+            max_recalibration_duration_ns: 100_000_000_000,
+            ..Default::default()
+        });
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        // Safe mode中
+        assert_eq!(mgr.lot_multiplier(), 0.25);
+        assert_eq!(mgr.sigma_multiplier(), 2.0);
+
+        // 強制完了（max duration経過）
+        mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000);
+        mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_001);
+        mgr.check_completion(1_000_000_000_000 + 101_000_000_000);
+
+        assert_eq!(mgr.status(), &RecalibrationStatus::Completed);
+        assert_eq!(
+            mgr.lot_multiplier(),
+            1.0,
+            "design.md §9.6: lot multiplier should be restored after completion"
+        );
+        assert_eq!(
+            mgr.sigma_multiplier(),
+            1.0,
+            "design.md §9.6: σ multiplier should be restored after completion"
+        );
+    }
+
+    /// §9.6: 対象LPのみ観測されることを確認（他LPは無視）
+    #[test]
+    fn s9_6_observations_only_for_target_lp() {
+        let mut mgr = LpRecalibrationManager::new(default_config());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000);
+        mgr.record_fill("LP_OTHER", 0.0001, 0.0001, 1_000_000_000_000); // 無視
+        mgr.record_rejection("LP_BACKUP", 1_000_000_000_001);
+        mgr.record_rejection("LP_OTHER", 1_000_000_000_001); // 無視
+
+        assert_eq!(
+            mgr.observations, 2,
+            "only target LP observations should be counted"
+        );
+    }
+
+    /// §9.6: Max durationによる強制完了を確認
+    #[test]
+    fn s9_6_forced_completion_at_max_duration() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig {
+            min_recalibration_observations: 5,
+            max_recalibration_duration_ns: 100_000_000_000,
+            ..Default::default()
+        });
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        for i in 0..5u64 {
+            mgr.record_fill("LP_BACKUP", 0.01, 0.0001, 1_000_000_000_000 + i);
+        }
+
+        // 収束していないが、max duration経過で強制完了
+        assert!(mgr.check_completion(1_000_000_000_000 + 101_000_000_000));
+        assert_eq!(mgr.status(), &RecalibrationStatus::Completed);
+    }
 }
