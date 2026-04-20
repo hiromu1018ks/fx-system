@@ -156,7 +156,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "cargo build でコンパイル確認",
       "ORT_DYLIB_PATH 環境変数の設定方法をREADMEに追記"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

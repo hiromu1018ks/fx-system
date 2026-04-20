@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 7
-**Current Task:** Task 8 — ort crate (ONNX Runtime) 追加
+**Tasks Completed:** 8
+**Current Task:** Task 9 — ONNXモデルローダー実装
 
 ---
 
@@ -179,3 +179,17 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし
+
+### 2026-04-20: Task 8 — ort crate (ONNX Runtime) をRustワークスペースに追加
+
+**What changed:**
+- `Cargo.toml` (workspace): ort 依存のバージョンを `"2"` → `"2.0.0-rc.12"` に修正 (v2はRC版のみ公開)
+- `crates/strategy/Cargo.toml`: `ort = { workspace = true }` を追加
+- `load-dynamic` featureにより実行時にONNX Runtime共有ライブラリを動的ロード
+
+**Commands run:**
+- `cargo build -p fx-strategy` — passed (ort 2.0.0-rc.12 + ort-sys コンパイル成功)
+- `cargo build` — passed (全ワークスペース)
+- `cargo test --workspace --no-fail-fast` — 失敗は事前存在のCSVバリデーション (3件)
+
+**Issues:** ONNX Runtimeのネイティブライブラリ (libonnxruntime) が必要。`load-dynamic` featureによりビルド時には不要だが、実行時に `ORT_DYLIB_PATH` 環境変数でパスを指定する必要あり
