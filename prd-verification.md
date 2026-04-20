@@ -455,7 +455,7 @@ struct DataTick {
       "Hold退化シナリオ: 初期hold支配 → 楽観的初期化 + 分散膨張による探索回復",
       "各シナリオでシステムがdesign.md通りの挙動を示すことを確認"
     ],
-    "passes": false
+    "passes": true
   }
 ]
 ```

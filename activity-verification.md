@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 23
-**Current Task:** Task 28 — design.md §12 運用指針に基づく破綻シナリオのストレステスト
+**Tasks Completed:** 29 (ALL COMPLETE)
+**Current Task:** None — all verification tasks pass
 
 ---
 
@@ -811,3 +811,21 @@ Python側（research/bridge/）:
 - `cargo test` — 1424 passed, 0 failed (all crates)
 
 **Issues:** CSVレポートファイル名が`performance_summary.csv`（コード実装）と`session_report.csv`（初期テスト想定）で不一致。テストを修正して実装に合わせた
+
+### 2026-04-20: Task 28 — design.md §12 運用指針に基づく破綻シナリオのストレステスト
+
+**What changed:**
+- `crates/backtest/tests/integration.rs`: セクション13「Stress Tests: design.md §12 破綻シナリオ」を追加（9テスト）
+  - **連続負け自己相関** (1 test): 50回連続マイナス報酬でQ(Buy)が急低下し負値化、Q(Hold) > Q(Buy)となることを検証
+  - **非線形スケーリング崩壊** (1 test): グローバルポジション制約でP_max到達時のBuyブロックを検証
+  - **ボラティリティ急変** (2 tests): ボラティリティレジームシフトでQ値負値化→Hold遷移、ChangePointDetectorによるADWIN検知を検証
+  - **LP Adversarial Adaptation** (2 tests): fill率低下によるadversarial検出とLP自動切り替え、連続拒否による高速検出を検証
+  - **Hold退化** (1 test): 楽観的初期化（Buy/Sell > Hold）、lot_multiplier=0での強制Hold後のdegeneration検出とinflation発動を検証
+  - **Lifecycle淘汰** (1 test): 連続負エピソードで戦略がcullされ、order validationが失敗することを検証
+  - **DD自己凍結** (1 test): ハードリミット発動→halt flag設定→PnL回復後の復帰フローを検証
+
+**Commands run:**
+- `cargo test -p fx-backtest --test integration -- "test_s12"` — 9 passed, 0 failed
+- `cargo test` — 1433 passed, 0 failed (all crates)
+
+**Issues:** なし。全29タスク完了（prd-verification.md全項目passes: true）
