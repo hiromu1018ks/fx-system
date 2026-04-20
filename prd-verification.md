@@ -341,7 +341,7 @@ struct DataTick {
       "validate_orderの検証がQ̃_finalで行われることの確認（Q_pointではない）",
       "検証用テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",

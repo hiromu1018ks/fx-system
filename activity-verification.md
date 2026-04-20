@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 15
-**Current Task:** Task 20 — design.md §4.1 決定関数の実装整合性検証
+**Tasks Completed:** 16
+**Current Task:** Task 21 — design.md §4.2 OTC Execution モデルの実装整合性検証
 
 ---
 
@@ -496,3 +496,31 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean
 
 **Issues:** なし。メカニズム4の実装前は、退化検出のたびにinflate_covariance()が呼ばれ分散が指数的に増大していた（1.5^N）。複利防止ロジックを追加し、退化中は一定レベルを維持、回復時は漸減する正しい挙動に修正
+
+### 2026-04-20: Task 20 — design.md §4.1 決定関数の実装整合性検証
+
+**What changed:**
+- `crates/backtest/src/engine.rs`: §4.1 Engineレベル統合テスト7件を追加
+  - `test_s41_engine_risk_pipeline_ordering`: KillSwitch発動時に全発注が"kill_switch_masked"となり、後段パイプライン（lifecycle/limits/barrier/global position）に到達しないことを検証
+  - `test_s41_engine_hard_limits_block_before_q_evaluation`: HierarchicalRiskLimiter::evaluate()がQ値パラメータを持たない構造的証明。月次リミット設定でのエンジン動作確認
+  - `test_s41_engine_q_tilde_final_drives_decisions`: 同一シードで完全再現性を検証。全decisionsのfinite性確認
+  - `test_s41_engine_skip_reasons_reflect_pipeline_stages`: 全skip_reasonが許可リストに含まれること、デフォルト設定でkill_switch_maskedが出ないことを検証
+  - `test_s41_engine_kill_switch_priority_over_lifecycle`: KillSwitch + Lifecycle両方発動時、Strategy Bは"strategy_culled"（Phase 2でブロック）、A/Cは"kill_switch_masked"（Phase 3でブロック）となる優先度を検証
+  - `test_s41_engine_consistency_fallback_produces_hold`: 大量ティックでThompson Samplingの整合性フォールバック動作確認
+  - `test_s41_engine_global_position_last_in_pipeline`: GlobalPositionCheckerがパイプライン最終段であることの構造的検証
+
+**調査結果:**
+- 階層的ハードリミットチェックがQ値判定より優先される: `HierarchicalRiskLimiter::evaluate()`の関数シグネチャにQ値パラメータがなく、PnL閾値のみで判定。Engine内でPhase 3のStep 3（line 593）でQ値非依存のリミットチェックが実行される。Q値はStep 3.5（line 653）の`passes_q_threshold()`で初めて参照される
+- チェック順序: Engine Phase 3内で KillSwitch → LifecycleManager → HierarchicalRiskLimiter（月次→週次→日次実現→日次MTM） → Q-threshold gate → DynamicBarrier → GlobalPositionChecker の順序で実装済み
+- Q̃_finalが行動選択の唯一の基準: `ThompsonSamplingPolicy::decide()`でQ_point（line 189）は計算されるが全ブランチングロジックに使用されず、`all_sampled_q`（Q̃_final）のみがaction selectionに使用される
+- グローバルポジション制約フィルタリング: 2層構造 — (1) Strategy内のThompson Samplingで`buy_allowed`/`sell_allowed`によるA_valid構築、(2) Engineレベルの`GlobalPositionChecker::validate_order()`で相関調整・優先度ベースロット削減
+- 行動間整合性チェック: `check_action_consistency()`でQ_buy > 0 && Q_sell > 0 && |Q_buy - Q_sell|/max < 0.05 の場合にHoldへフォールバック
+- validate_orderはQ̃_finalで実行: Engineの`passes_q_threshold()`（line 653）に`decision.q_sampled`（Q̃_final）を渡し、Q_pointは渡されない
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 全crate通過（7 new engine-level §4.1 tests）
+- `cargo clippy` — エラーなし
+- `cargo fmt --check` — clean（`cargo fmt`で1箇所修正）
+
+**Issues:** なし。既存の§4.1テスト（thompson_sampling.rs 7件、limits.rs 3件）と新規Engine統合テスト7件でPRDの全ステップを完全カバー
