@@ -400,6 +400,7 @@ mod tests {
             summary: make_trade_summary(),
             execution_stats: ExecutionStats::empty(),
             execution_events: vec![],
+            observability_ticks: 0,
         }
     }
 
@@ -514,6 +515,7 @@ mod tests {
             summary: make_trade_summary(),
             execution_stats: ExecutionStats::empty(),
             execution_events: vec![],
+            observability_ticks: 0,
         }
     }
 

@@ -145,7 +145,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "フォワードテストランナーにも同様の配線",
       "テスト: バックテスト実行後、ObservabilityManagerのtotal_ticks > 0"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "dependency",

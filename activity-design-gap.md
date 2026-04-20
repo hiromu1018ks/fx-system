@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 6
-**Current Task:** Task 7 — PreFailureMetricsライブ配線
+**Tasks Completed:** 7
+**Current Task:** Task 8 — ort crate (ONNX Runtime) 追加
 
 ---
 
@@ -146,6 +146,34 @@
 - `cargo test -p fx-events --lib -- gap_detector` — 29 passed, 0 failed
 - `cargo build -p fx-backtest` — passed
 - `cargo build -p fx-forward` — passed
+- `cargo test --workspace --no-fail-fast` — 失敗は全て事前存在のCSVバリデーション (3件)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 7 — PreFailureMetrics のライブ配線
+
+**What changed:**
+- `crates/backtest/src/engine.rs`: バックテストエンジンにObservabilityManager配線
+  - `run_inner()` で `ObservabilityManager::new(AnomalyConfig::default())` を作成
+  - 各ティックで `collect_pre_failure_metrics()` からPreFailureMetricsを構築
+  - `observability_manager.tick(metrics, tick_ns)` を各ループで呼び出し
+  - `BacktestResult` に `observability_ticks: u64` フィールドを追加
+  - `collect_pre_failure_metrics()` メソッド追加:
+    - `rolling_variance_latency` → `kill_switch.stats().std_interval_ns`
+    - `regime_posterior_entropy` → `regime_cache.state().entropy()`
+    - `daily/weekly/monthly_pnl_vs_limit` → `limit_state.pnl / config.limit.abs()`
+    - その他フィールドは0.0（将来配線用）
+  - テスト: `test_backtest_from_events` に `observability_ticks > 0` アサーション追加
+- `crates/forward/src/runner.rs`: フォワードテストランナーにObservabilityManager配線
+  - `run()` で `ObservabilityManager` を作成
+  - snapshot取得直後にPreFailureMetricsを構築・tick()呼び出し
+- `crates/cli/src/output.rs`: `BacktestResult` 構築箇所に `observability_ticks: 0` 追加
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --lib -- test_backtest_from_events` — passed
 - `cargo test --workspace --no-fail-fast` — 失敗は全て事前存在のCSVバリデーション (3件)
 - `cargo clippy` — no errors
 - `cargo fmt --check` — clean

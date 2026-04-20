@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use fx_core::observability::{AnomalyConfig, ObservabilityManager, PreFailureMetrics};
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::{Event, GenericEvent};
@@ -214,6 +215,8 @@ pub struct BacktestResult {
     pub execution_stats: ExecutionStats,
     /// Execution events generated during the run, ready for EventBus replay.
     pub execution_events: Vec<GenericEvent>,
+    /// Number of times ObservabilityManager::tick() was called (PreFailureMetrics collected).
+    pub observability_ticks: u64,
 }
 
 /// Collected position data to avoid borrow conflicts.
@@ -369,6 +372,7 @@ impl BacktestEngine {
             summary,
             execution_stats,
             execution_events: all_execution_events,
+            observability_ticks: 0,
         }
     }
 
@@ -405,6 +409,7 @@ impl BacktestEngine {
                     summary: TradeSummary::empty(),
                     execution_stats: ExecutionStats::empty(),
                     execution_events: Vec::new(),
+                    observability_ticks: 0,
                 };
             }
             let mut result = self.run_inner(&market_events, wall_start);
@@ -451,6 +456,7 @@ impl BacktestEngine {
                 summary: TradeSummary::empty(),
                 execution_stats: ExecutionStats::empty(),
                 execution_events: Vec::new(),
+                observability_ticks: 0,
             };
         }
 
@@ -472,6 +478,7 @@ impl BacktestEngine {
                 summary: TradeSummary::empty(),
                 execution_stats: ExecutionStats::empty(),
                 execution_events: Vec::new(),
+                observability_ticks: 0,
             };
         }
 
@@ -480,6 +487,7 @@ impl BacktestEngine {
         let mut feature_extractor =
             FeatureExtractor::new(self.config.feature_extractor_config.clone());
         let mut gap_detector = GapDetector::new(&bus, 1);
+        let mut observability_manager = ObservabilityManager::new(AnomalyConfig::default());
 
         let mut trades: Vec<TradeRecord> = Vec::new();
         let mut decisions: Vec<BacktestDecision> = Vec::new();
@@ -543,6 +551,14 @@ impl BacktestEngine {
             }
 
             let snapshot = projector.snapshot();
+
+            // Collect pre-failure metrics for observability (design.md §8.2)
+            let metrics = self.collect_pre_failure_metrics(
+                &snapshot,
+                &self.config.risk_limits_config,
+                tick_ns,
+            );
+            observability_manager.tick(metrics, tick_ns);
 
             // Extract features per strategy into a map for O(1) lookup
             let tick_contexts: HashMap<StrategyId, TickContext> = StrategyId::all()
@@ -1119,6 +1135,7 @@ impl BacktestEngine {
             summary,
             execution_stats,
             execution_events,
+            observability_ticks: observability_manager.total_ticks(),
         }
     }
 
@@ -1154,6 +1171,54 @@ impl BacktestEngine {
     #[allow(clippy::too_many_arguments)]
     /// Check if there is a weekend gap between two consecutive ticks.
     ///
+    fn collect_pre_failure_metrics(
+        &self,
+        snapshot: &StateSnapshot,
+        risk_config: &fx_risk::limits::RiskLimitsConfig,
+        _tick_ns: u64,
+    ) -> PreFailureMetrics {
+        let ks_stats = self.kill_switch.stats();
+        let regime_entropy = self.regime_cache.state().entropy();
+
+        let daily_pnl_vs_limit = if risk_config.max_daily_loss_mtm.abs() > f64::EPSILON {
+            snapshot.limit_state.daily_pnl_mtm / risk_config.max_daily_loss_mtm.abs()
+        } else {
+            0.0
+        };
+        let weekly_pnl_vs_limit = if risk_config.max_weekly_loss.abs() > f64::EPSILON {
+            snapshot.limit_state.weekly_pnl / risk_config.max_weekly_loss.abs()
+        } else {
+            0.0
+        };
+        let monthly_pnl_vs_limit = if risk_config.max_monthly_loss.abs() > f64::EPSILON {
+            snapshot.limit_state.monthly_pnl / risk_config.max_monthly_loss.abs()
+        } else {
+            0.0
+        };
+
+        PreFailureMetrics {
+            rolling_variance_latency: ks_stats.std_interval_ns,
+            feature_distribution_kl_divergence: 0.0,
+            q_value_adjustment_frequency: 0.0,
+            execution_drift_trend: 0.0,
+            latency_risk_trend: 0.0,
+            self_impact_ratio: 0.0,
+            liquidity_evolvement: 0.0,
+            policy_entropy: 0.0,
+            regime_posterior_entropy: regime_entropy,
+            hidden_liquidity_sigma: 0.0,
+            position_constraint_saturation_rate: 0.0,
+            last_look_rejection_rate: 0.0,
+            dynamic_cost_estimate_error: 0.0,
+            lp_adversarial_score: 0.0,
+            daily_pnl_vs_limit,
+            weekly_pnl_vs_limit,
+            monthly_pnl_vs_limit,
+            lp_recalibration_progress: 0.0,
+            bayesian_posterior_drift: 0.0,
+        }
+    }
+
     /// A weekend gap is detected when the previous tick was on or before Friday
     /// EET 23:59:59 and the current tick is on or after Monday EET 00:00:00.
     /// Uses Europe/Helsinki timezone for DST-aware EET conversion.
@@ -1822,6 +1887,10 @@ mod tests {
         let result = engine.run_from_events(&events);
 
         assert_eq!(result.total_ticks, 200);
+        assert!(
+            result.observability_ticks > 0,
+            "ObservabilityManager should have ticked"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use anyhow::Result;
+use fx_core::observability::{AnomalyConfig, ObservabilityManager, PreFailureMetrics};
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::GenericEvent;
@@ -71,6 +72,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             1,
         );
         let mut gap_detector = GapDetector::new(&bus, 1);
+        let mut observability_manager = ObservabilityManager::new(AnomalyConfig::default());
 
         let exec_config = ExecutionGatewayConfig::default();
         let mut paper_engine = PaperExecutionEngine::new(exec_config, seed);
@@ -138,6 +140,29 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
             let snapshot = projector.snapshot().clone();
             let staleness_ms = snapshot.staleness_ms;
+
+            // Collect pre-failure metrics for observability (design.md §8.2)
+            let metrics = PreFailureMetrics {
+                rolling_variance_latency: kill_switch.stats().std_interval_ns,
+                regime_posterior_entropy: 0.0,
+                daily_pnl_vs_limit: if limits_config.max_daily_loss_mtm.abs() > f64::EPSILON {
+                    snapshot.limit_state.daily_pnl_mtm / limits_config.max_daily_loss_mtm.abs()
+                } else {
+                    0.0
+                },
+                weekly_pnl_vs_limit: if limits_config.max_weekly_loss.abs() > f64::EPSILON {
+                    snapshot.limit_state.weekly_pnl / limits_config.max_weekly_loss.abs()
+                } else {
+                    0.0
+                },
+                monthly_pnl_vs_limit: if limits_config.max_monthly_loss.abs() > f64::EPSILON {
+                    snapshot.limit_state.monthly_pnl / limits_config.max_monthly_loss.abs()
+                } else {
+                    0.0
+                },
+                ..PreFailureMetrics::default()
+            };
+            observability_manager.tick(metrics, tick_ns);
 
             // Check kill switch
             if kill_switch.validate_order().is_err() {
