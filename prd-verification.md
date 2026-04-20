@@ -230,7 +230,7 @@ struct DataTick {
       "エラーハンドリング: ファイル不在、不正フォーマット、設定エラー",
       "統合テスト: 実際の合成CSVでCLI経由でバックテストを実行"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

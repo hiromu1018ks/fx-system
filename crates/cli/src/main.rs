@@ -43,17 +43,41 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
     let ticks = fx_backtest::data::load_csv(&cmd.data)
         .with_context(|| format!("Failed to load CSV data from: {}", cmd.data.display()))?;
 
-    info!(tick_count = ticks.len(), "Loaded tick data");
+    let total_ticks = ticks.len();
+    info!(tick_count = total_ticks, "Loaded tick data");
+    println!("Loaded {total_ticks} ticks from {}", cmd.data.display());
 
     let events = fx_backtest::data::ticks_to_events(&ticks);
+    println!("Running backtest on {total_ticks} events...");
+
+    let start = std::time::Instant::now();
     let mut engine = fx_backtest::engine::BacktestEngine::new(config);
     let result = engine.run_from_events(&events);
+    let elapsed = start.elapsed();
 
+    let total_trades = result.trades.len();
+    let total_decisions = result.decisions.len();
     info!(
         total_ticks = result.total_ticks,
-        total_trades = result.trades.len(),
+        total_trades,
+        total_decisions,
         wall_time_ms = result.wall_time_ms,
         "Backtest completed"
+    );
+
+    println!(
+        "Backtest completed in {:.1}s: {} ticks processed, {} trades, {} decisions",
+        elapsed.as_secs_f64(),
+        result.total_ticks,
+        total_trades,
+        total_decisions,
+    );
+    println!(
+        "  PnL: {:.2} | Win rate: {:.1}% | Max DD: {:.2} | Sharpe: {:.3}",
+        result.summary.total_pnl,
+        result.summary.win_rate * 100.0,
+        result.summary.max_drawdown,
+        result.summary.sharpe_ratio,
     );
 
     let output_dir = cmd.output.unwrap_or_else(|| PathBuf::from("."));
@@ -67,6 +91,7 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
     output::write_backtest_result(&result, &output_dir)?;
 
     info!(dir = %output_dir.display(), "Results written");
+    println!("Results written to {}", output_dir.display());
     Ok(())
 }
 

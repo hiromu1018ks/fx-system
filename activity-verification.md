@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 10
-**Current Task:** Task 12 — CLI backtest サブコマンドの統合
+**Tasks Completed:** 11
+**Current Task:** Task 13 — CLI forward-test サブコマンドの統合
 
 ---
 
@@ -226,3 +226,42 @@
 - `cargo run --bin fx-cli -- forward-test --help` —動作確認OK
 
 **Issues:** なし
+
+### 2026-04-20: Task 12 — CLI backtest サブコマンドの統合
+
+**What changed:**
+- `crates/cli/src/config.rs`: TOML設定ローダーを大幅拡張。6フィールドから全BacktestConfigフィールドに対応:
+  - トップレベル: rng_seed (u64から[0u8;32]に変換)
+  - `[strategy_a/b/c]`: 各戦略の全19フィールド（トリガー閾値、BLRパラメータ、ロット制限等）
+  - `[mc_eval.reward]`: lambda_risk, lambda_dd, dd_cap, gamma
+  - `[risk_limits]`: 日次/週次/月次損失リミット、MTM閾値
+  - `[barrier]`: staleness閾値、lot_multiplier系パラメータ
+  - `[kill_switch]`: enabled, z_score_threshold等
+  - `[lifecycle]`: rolling_window, death_sharpe_threshold等
+  - `[regime]`: n_regimes, entropy_threshold等
+  - `[feature_extractor]`: spread/vol/OBI window等
+  - `[global_position]`: correlation_factor, strategy_max_positions
+  - ヘルパー関数: f64_field, u64_field, u32_field, usize_field, bool_field
+  - apply_strategy_a/b/c: 各戦略設定の手動TOML抽出（Deserialize derive不要、既存クレート変更なし）
+- `crates/cli/src/main.rs`: run_backtest()にプログレス表示を追加:
+  - CSV読み込み後のティック数表示
+  - バックテスト実行中の進捗メッセージ
+  - 完了時の統計サマリー（所要時間、ティック数、トレード数、PnL、勝率、DD、Sharpe）
+  - 出力先ディレクトリの表示
+- `crates/cli/tests/integration.rs` 新規作成（7件の統合テスト）:
+  - `test_cli_backtest_pipeline_with_synthetic_csv`: 合成CSV500ティックでのフルパイプライン実行
+  - `test_cli_backtest_writes_output_files`: JSON/CSV出力ファイルの生成と内容検証
+  - `test_cli_backtest_with_toml_config`: TOML設定ファイルからの設定読み込み→バックテスト実行
+  - `test_cli_backtest_csv_validation_errors`: bid>=askの不正CSVでのエラー検出
+  - `test_cli_backtest_nonexistent_csv_error`: 存在しないファイルのエラー処理
+  - `test_cli_backtest_reproducibility`: 同一シードでの完全再現性検証
+  - `test_cli_backtest_strategy_selection`: Strategy Bのみ有効時の決定フィルタリング確認
+- テスト追加（config.rs内）: `test_load_backtest_config_full_nested` — 全セクション対応のTOML読み込み検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1131 passed (28 new in fx-cli: 21 unit + 7 integration), 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+
+**Issues:** なし。バイナリクレートの制限によりintegration testからprivate config moduleにアクセスできないため、TOML読み込みのテストは最小限のヘルパー関数をintegration test内に定義して対応
