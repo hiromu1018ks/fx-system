@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 12
-**Current Task:** Task 13 — 統計的検証パイプラインE2E確認
+**Tasks Completed:** 13
+**Current Task:** Task 14 — フルパイプライン統合テスト
 
 ---
 
@@ -297,5 +297,16 @@
 - `cargo test --workspace --no-fail-fast` — 新規テスト全通過、失敗は事前存在CSVバリデーション (3件)
 - `cargo clippy` — no errors
 - `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 13 — design.md §5 統計的検証パイプラインのE2E実行確認
+
+**What changed:**
+コード変更なし。既存の検証パイプラインが完全に実装済みであることを確認。
+
+**検証結果:**
+- `pytest research/tests/test_e2e_validation.py -v` — 22 passed, 0 failed
+- `pytest research/tests/test_validation_pipeline.py -v` — 68 passed, 2 warnings
 
 **Issues:** なし

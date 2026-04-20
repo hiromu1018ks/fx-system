@@ -218,7 +218,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "CLI: cargo run --bin fx-cli -- validate --backtest-result <JSON> で実行確認",
       "テスト結果のpass/failは戦略品質に依存するが、パイプライン自体がエラーなく完走することを確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",
