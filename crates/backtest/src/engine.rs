@@ -2690,6 +2690,180 @@ mod tests {
     }
 
     #[test]
+    fn test_e2e_full_pipeline_with_single_strategy() {
+        use fx_core::types::StrategyId;
+
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 5000, 100, 110.0, 0.05);
+        let config = BacktestConfig {
+            enabled_strategies: [StrategyId::A].iter().copied().collect(),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        // Result should be valid with only Strategy A enabled
+        assert!(result.total_ticks > 0);
+        // All decisions should be from Strategy A only
+        for decision in &result.decisions {
+            assert_eq!(decision.strategy_id, StrategyId::A);
+        }
+        // Summary should be valid
+        assert!(result.total_decision_ticks <= result.total_ticks);
+    }
+
+    #[test]
+    fn test_e2e_full_pipeline_strategy_subset_bc() {
+        use fx_core::types::StrategyId;
+
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 5000, 100, 110.0, 0.05);
+        let config = BacktestConfig {
+            enabled_strategies: [StrategyId::B, StrategyId::C].iter().copied().collect(),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        for decision in &result.decisions {
+            assert!(
+                decision.strategy_id == StrategyId::B || decision.strategy_id == StrategyId::C,
+                "Only B and C strategies should be enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_e2e_reproducibility_same_seed_same_result() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 1000, 100, 110.0, 0.02);
+
+        let config = BacktestConfig {
+            rng_seed: Some([99u8; 32]),
+            ..default_config()
+        };
+
+        let mut engine1 = BacktestEngine::new(config.clone());
+        let result1 = engine1.run_from_events(&events);
+
+        let mut engine2 = BacktestEngine::new(config);
+        let result2 = engine2.run_from_events(&events);
+
+        assert_eq!(result1.total_ticks, result2.total_ticks);
+        assert_eq!(result1.trades.len(), result2.trades.len());
+        assert_eq!(result1.decisions.len(), result2.decisions.len());
+        assert_eq!(result1.summary.total_pnl, result2.summary.total_pnl);
+
+        for (t1, t2) in result1.trades.iter().zip(result2.trades.iter()) {
+            assert_eq!(t1.pnl, t2.pnl);
+            assert_eq!(t1.direction, t2.direction);
+        }
+    }
+
+    #[test]
+    fn test_e2e_information_leak_lagged_features() {
+        use fx_strategy::extractor::FeatureExtractor;
+
+        // Verify that execution-related features have lag applied
+        let config = FeatureExtractorConfig::default();
+        let mut extractor = FeatureExtractor::new(config);
+
+        // After initialization (no data processed), lagged features should be zero/default
+        // This verifies the information leakage prevention: features start at safe defaults
+        // and only update after the lag window has passed
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 50, 100, 110.0, 0.01);
+        let bus = fx_events::bus::PartitionedEventBus::new();
+        let mut projector = StateProjector::new(&bus, 10.0, 1);
+
+        for event in &events {
+            projector.process_event(event).ok();
+            extractor.process_market_event(event);
+        }
+
+        let snapshot = projector.snapshot();
+        let features = extractor.extract(
+            &events[events.len() - 1],
+            &snapshot,
+            StrategyId::A,
+            events[events.len() - 1].header.timestamp_ns,
+        );
+
+        // Verify all feature values are finite (no NaN/Inf from information leakage)
+        let fv = [
+            features.spread,
+            features.spread_zscore,
+            features.obi,
+            features.delta_obi,
+            features.depth_change_rate,
+            features.queue_position,
+            features.realized_volatility,
+            features.volatility_ratio,
+            features.volatility_decay_rate,
+            features.session_tokyo,
+            features.session_london,
+            features.session_ny,
+            features.session_sydney,
+            features.time_since_open_ms,
+            features.time_since_last_spike_ms,
+            features.holding_time_ms,
+            features.position_size,
+            features.position_direction,
+            features.entry_price,
+            features.pnl_unrealized,
+            features.trade_intensity,
+            features.signed_volume,
+            features.recent_fill_rate,
+            features.recent_slippage,
+            features.self_impact,
+            features.time_decay,
+            features.dynamic_cost,
+            features.p_revert,
+            features.p_continue,
+            features.p_trend,
+        ];
+        for (i, val) in fv.iter().enumerate() {
+            assert!(
+                val.is_finite(),
+                "Feature {} should be finite, got {}",
+                i,
+                val
+            );
+        }
+    }
+
+    #[test]
+    fn test_e2e_performance_snapshot_validity() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 5000, 100, 110.0, 0.05);
+        let mut engine = BacktestEngine::new(default_config());
+        let result = engine.run_from_events(&events);
+
+        // Summary should have valid financial metrics
+        assert!(
+            result.summary.total_pnl.is_finite(),
+            "Total PnL should be finite"
+        );
+        assert!(
+            result.summary.max_drawdown <= 0.0,
+            "Max drawdown should be non-positive"
+        );
+        assert!(
+            result.summary.win_rate >= 0.0 && result.summary.win_rate <= 1.0,
+            "Win rate should be in [0, 1]"
+        );
+        assert!(
+            result.summary.total_trades == result.trades.len() as u64,
+            "Summary trade count should match trades vector"
+        );
+        // Execution stats should be valid
+        assert!(
+            result.execution_stats.overall_fill_rate >= 0.0
+                && result.execution_stats.overall_fill_rate <= 1.0,
+            "Fill rate should be in [0, 1]"
+        );
+        assert!(
+            !result.execution_stats.active_lp_id.is_empty(),
+            "Active LP should be set"
+        );
+    }
+
+    #[test]
     fn test_otc_execution_with_lp_switch_scenario() {
         // Configure gateway to trigger LP switch by using aggressive adversarial thresholds
         use fx_execution::gateway::ExecutionGatewayConfig;

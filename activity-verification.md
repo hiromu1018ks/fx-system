@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 8
-**Current Task:** Task 9 — Regime管理の統合
+**Tasks Completed:** 9
+**Current Task:** Task 10 — フルパイプラインバックテストのエンドツーエンドテスト
 
 ---
 
@@ -180,3 +180,21 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし。HDP-HMM推論エンジンは未実装のため、軽量ヒューリスティック（特徴量ベースのsoftmax regime scoring）で代替。将来のONNXモデル統合時に `update_from_weights()` に切り替え可能
+
+### 2026-04-20: Task 10 — フルパイプラインバックテストのエンドツーエンドテスト
+
+**What changed:**
+- `crates/backtest/src/engine.rs` にE2Eテストを5件追加:
+  - `test_e2e_full_pipeline_with_single_strategy`: Strategy Aのみ有効時の全パイプラインテスト
+  - `test_e2e_full_pipeline_strategy_subset_bc`: Strategy B+C有効時のテスト
+  - `test_e2e_reproducibility_same_seed_same_result`: 同一シードで完全再現性を検証（PnL/トレード数/決定数/各トレードPnL）
+  - `test_e2e_information_leak_lagged_features`: 全特徴量の有限性検証（NaN/Infがないことで情報リークの副次効果を検出）
+  - `test_e2e_performance_snapshot_validity`: TradeSummary/ExecutionStatsの妥当性検証（PnL finite, DD≤0, win_rate∈[0,1], fill_rate∈[0,1]）
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1098 passed, 0 failed (89 in backtest lib, 5 new)
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+
+**Issues:** なし

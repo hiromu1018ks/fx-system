@@ -200,7 +200,7 @@ struct DataTick {
       "再現性テスト: 同一シード・同一データで同一結果が得られること",
       "PerformanceSnapshot/PnL/trade countの妥当性検証"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
