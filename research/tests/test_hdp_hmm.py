@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from research.models.hdp_hmm import (
     HdpHmmParams,
+    aggregate_drift,
     compute_drift,
     compute_regime_entropy,
     compute_regime_kl_divergence,
@@ -130,34 +131,69 @@ class TestComputeRegimeKlDivergence:
 
 
 class TestComputeDrift:
-    def test_zero_prev_drift(self):
+    def test_zero_prev_drift_with_features(self):
         posterior = np.array([0.5, 0.5])
-        prev_drift = np.zeros(4)
+        prev_drift = np.zeros((2, 4))
         features = np.ones(4)
         drift = compute_drift(posterior, prev_drift, features)
-        np.testing.assert_allclose(drift, np.zeros(4))
+        # drift_k = 0.9 * 0 + 0.1 * ones = 0.1 * ones
+        np.testing.assert_allclose(drift, np.full((2, 4), 0.1))
 
     def test_decay(self):
         posterior = np.array([1.0, 0.0])
-        prev_drift = np.ones(4)
+        prev_drift = np.ones((2, 4))
         features = np.zeros(4)
         drift = compute_drift(posterior, prev_drift, features, regime_ar_coeff=0.9)
-        np.testing.assert_allclose(drift, 0.9 * np.ones(4))
+        # drift_k = 0.9 * ones + 0.1 * zeros = 0.9 * ones
+        np.testing.assert_allclose(drift, np.full((2, 4), 0.9))
 
-    def test_weighted_drift(self):
+    def test_per_regime_independence(self):
         posterior = np.array([0.3, 0.7])
-        prev_drift = np.array([1.0, 0.0])
+        prev_drift = np.array([[1.0, 0.0], [0.0, 1.0]])
         features = np.zeros(2)
         drift = compute_drift(posterior, prev_drift, features, regime_ar_coeff=1.0)
-        expected = 0.3 * 1.0 + 0.7 * 0.0
-        np.testing.assert_allclose(drift, np.array([expected, 0.0]))
+        # Each regime retains its own drift when ar_coeff=1.0 and features=0
+        np.testing.assert_allclose(drift[0], np.array([1.0, 0.0]))
+        np.testing.assert_allclose(drift[1], np.array([0.0, 1.0]))
+
+    def test_aggregate_drift(self):
+        posterior = np.array([0.3, 0.7])
+        per_regime_drift = np.array([[1.0, 2.0], [3.0, 4.0]])
+        aggregated = aggregate_drift(posterior, per_regime_drift)
+        expected = 0.3 * np.array([1.0, 2.0]) + 0.7 * np.array([3.0, 4.0])
+        np.testing.assert_allclose(aggregated, expected)
+
+    def test_weighted_aggregation(self):
+        posterior = np.array([0.3, 0.7])
+        prev_drift = np.array([[1.0, 0.0], [0.0, 0.0]])
+        features = np.zeros(2)
+        drift = compute_drift(posterior, prev_drift, features, regime_ar_coeff=1.0)
+        aggregated = aggregate_drift(posterior, drift)
+        expected = 0.3 * np.array([1.0, 0.0]) + 0.7 * np.array([0.0, 0.0])
+        np.testing.assert_allclose(aggregated, expected)
 
     def test_shape(self):
         posterior = np.array([0.5, 0.5])
-        prev_drift = np.ones(10)
+        prev_drift = np.ones((2, 10))
         features = np.ones(10)
         drift = compute_drift(posterior, prev_drift, features)
-        assert drift.shape == (10,)
+        assert drift.shape == (2, 10)
+
+    def test_features_integration(self):
+        posterior = np.array([0.5, 0.5])
+        prev_drift = np.zeros((2, 3))
+        features = np.array([1.0, 2.0, 3.0])
+        drift = compute_drift(posterior, prev_drift, features, regime_ar_coeff=0.5)
+        # drift_k = 0.5 * 0 + 0.5 * features
+        np.testing.assert_allclose(drift, np.full((2, 3), 0.5) * features[np.newaxis, :])
+
+    def test_ar_coeff_one_ignores_features(self):
+        posterior = np.array([0.5, 0.5])
+        prev_drift = np.array([[1.0, 0.0], [0.0, 1.0]])
+        features = np.array([100.0, 100.0])
+        drift = compute_drift(posterior, prev_drift, features, regime_ar_coeff=1.0)
+        # ar=1.0: features have zero weight
+        np.testing.assert_allclose(drift, prev_drift)
 
 
 class TestInitializeHdpHmmParams:

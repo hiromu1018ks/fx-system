@@ -67,7 +67,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "features引数が未使用 (line 258のcompute_driftも) → design.md §3.0.1のdrift_t = sum_k(pi_k * f_k(drift_{t-1}, X_t)) に従いfeaturesを組み込む",
       "pytest research/tests/test_hdp_hmm.py で全テスト通過確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "bugfix",

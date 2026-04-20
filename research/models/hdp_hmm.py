@@ -107,27 +107,47 @@ def compute_drift(
     features: NDArray[np.float64],
     regime_ar_coeff: float = 0.9,
 ) -> NDArray[np.float64]:
-    """Compute regime-weighted drift: drift_t = sum_k(pi_k * f_k(drift_{t-1}, X_t)).
+    """Compute per-regime drift: drift_t = sum_k(pi_k * f_k(drift_{t-1}, X_t)).
 
-    Simplified model: each regime's drift component decays toward zero with
-    AR(1) dynamics, weighted by the posterior probability.
+    Each regime's drift evolves with AR(1) dynamics toward current features:
+        drift_k = ar * prev_drift_k + (1 - ar) * X_t
 
-    drift_k = regime_ar_coeff * prev_drift_k + (1 - regime_ar_coeff) * 0
+    Returns per-regime drift vectors for state tracking. Aggregate with:
+        drift_aggregated = posterior @ result
+
+    Args:
+        posterior: Shape (n_regimes,) regime posterior probabilities.
+        prev_drift: Shape (n_regimes, feature_dim) per-regime drift vectors.
+        features: Shape (feature_dim,) current feature vector.
+        regime_ar_coeff: AR(1) autoregressive coefficient per regime.
+
+    Returns:
+        Shape (n_regimes, feature_dim) updated per-regime drift vectors.
+    """
+    p = np.asarray(posterior, dtype=np.float64).ravel()
+    d = np.asarray(prev_drift, dtype=np.float64)
+    x = np.asarray(features, dtype=np.float64).ravel()
+
+    return regime_ar_coeff * d + (1.0 - regime_ar_coeff) * x[np.newaxis, :]
+
+
+def aggregate_drift(
+    posterior: NDArray[np.float64],
+    per_regime_drift: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Aggregate per-regime drifts into a single drift vector.
+
     drift = sum_k(posterior_k * drift_k)
 
     Args:
         posterior: Shape (n_regimes,) regime posterior probabilities.
-        prev_drift: Shape (feature_dim,) previous drift vector.
-        features: Shape (feature_dim,) current feature vector (unused in AR-only).
-        regime_ar_coeff: AR(1) autoregressive coefficient per regime.
+        per_regime_drift: Shape (n_regimes, feature_dim) per-regime drift vectors.
 
     Returns:
-        Shape (feature_dim,) updated drift vector.
+        Shape (feature_dim,) aggregated drift vector.
     """
     p = np.asarray(posterior, dtype=np.float64).ravel()
-    d = np.asarray(prev_drift, dtype=np.float64).ravel()
-    decayed = regime_ar_coeff * d
-    return np.sum(p[:, np.newaxis] * decayed[np.newaxis, :], axis=0) * np.ones_like(d)
+    return p @ per_regime_drift
 
 
 def initialize_hdp_hmm_params(
