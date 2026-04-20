@@ -110,6 +110,26 @@ pub struct ThompsonDecision {
     pub consistency_fallback: bool,
 }
 
+/// Compute dynamic k coefficient based on volatility and regime stability.
+///
+/// k = base_k * (1.0 + volatility_scale * volatility) * regime_multiplier(regime_stability)
+///
+/// High volatility or low regime stability → higher k → more conservative (larger uncertainty penalty).
+/// regime_stability: 0.0 = completely unknown, 1.0 = fully stable/certain.
+pub fn compute_dynamic_k(base_k: f64, volatility: f64, regime_stability: f64) -> f64 {
+    let volatility_scale = 10.0;
+    let volatility_factor = 1.0 + volatility_scale * volatility;
+
+    // Low stability → high multiplier (conservative), high stability → near 1.0
+    let regime_multiplier = if regime_stability < 0.5 {
+        1.0 + 2.0 * (1.0 - regime_stability)
+    } else {
+        1.0
+    };
+
+    base_k * volatility_factor * regime_multiplier
+}
+
 /// Thompson Sampling policy: samples from posterior to select actions.
 ///
 /// Pipeline per decision:
@@ -169,7 +189,12 @@ impl ThompsonSamplingPolicy {
 
         // Non-model uncertainty: residual std from adaptive noise estimate
         let sigma_noise = self.q_function.model(QAction::Buy).noise_variance().sqrt();
-        let non_model_penalty = self.config.non_model_uncertainty_k * sigma_noise;
+
+        // Dynamic k: volatility and regime-dependent uncertainty penalty
+        let regime_stability = (1.0 - features.volatility_ratio.min(1.0)).max(0.0);
+        let dynamic_k =
+            compute_dynamic_k(self.config.non_model_uncertainty_k, features.realized_volatility, regime_stability);
+        let non_model_penalty = dynamic_k * sigma_noise;
 
         let latency_penalty = self.config.latency_penalty_k * latency_ms;
 
@@ -1971,6 +1996,45 @@ mod tests {
             crate::policy::Action::Buy(lot) => assert!(lot > 0),
             crate::policy::Action::Sell(lot) => assert!(lot > 0),
             crate::policy::Action::Hold => {}
+        }
+    }
+
+    #[test]
+    fn test_dynamic_k_low_volatility_low_k() {
+        let k = compute_dynamic_k(0.1, 0.001, 0.9);
+        // Low vol + high stability → k ≈ base_k * 1.01 * 1.0 ≈ 0.101
+        assert!(k < 0.15, "Low vol should give low k: got {}", k);
+        assert!(k >= 0.1, "k should be at least base_k: got {}", k);
+    }
+
+    #[test]
+    fn test_dynamic_k_high_volatility_high_k() {
+        let k = compute_dynamic_k(0.1, 0.05, 0.9);
+        // High vol: 1 + 10*0.05 = 1.5, *1.0 regime = 1.5 → k = 0.1 * 1.5 = 0.15
+        assert!(k > 0.14, "High vol should increase k: got {}", k);
+    }
+
+    #[test]
+    fn test_dynamic_k_low_stability_high_k() {
+        let k = compute_dynamic_k(0.1, 0.01, 0.0);
+        // Low stability: regime_multiplier = 1 + 2*(1-0) = 3.0 → k = 0.1 * 1.1 * 3.0 = 0.33
+        assert!(k > 0.3, "Low stability should significantly increase k: got {}", k);
+    }
+
+    #[test]
+    fn test_dynamic_k_zero_volatility_equals_base() {
+        let k = compute_dynamic_k(0.1, 0.0, 1.0);
+        // Zero vol, full stability: 1+0 * 1.0 = 1.0 → k = 0.1
+        assert!((k - 0.1).abs() < 1e-15, "Zero vol + full stability should give base_k");
+    }
+
+    #[test]
+    fn test_dynamic_k_always_positive() {
+        for vol in [0.0, 0.001, 0.01, 0.1, 1.0] {
+            for stab in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let k = compute_dynamic_k(0.1, vol, stab);
+                assert!(k > 0.0, "k must be positive for vol={}, stab={}", vol, stab);
+            }
         }
     }
 }

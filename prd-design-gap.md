@@ -115,7 +115,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "ThompsonSamplingConfig の non_model_uncertainty_k を base_k に変更し、decide()内で動的計算",
       "テスト: 低vol → 低k、高vol → 高k、低安定性 → 高k"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

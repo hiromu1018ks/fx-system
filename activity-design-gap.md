@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 4
-**Current Task:** Task 5 — Dynamic K Calculator実装
+**Tasks Completed:** 5
+**Current Task:** Task 6 — GapDetector取引停止ロジック配線
 
 ---
 
@@ -93,3 +93,29 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし。戦略FEATURE_DIMはFeatureVector::DIM + EXTRA_DIMで自動計算されるため、変更不要
+
+### 2026-04-20: Task 5 — Dynamic K Calculator: volatility/regime依存の動的k係数
+
+**What changed:**
+- `crates/strategy/src/thompson_sampling.rs`: `compute_dynamic_k()` 関数を追加
+  - `k = base_k * (1.0 + 10.0 * volatility) * regime_multiplier(stability)`
+  - volatility_factor: 高ボラティリティ → k増大（より保守的）
+  - regime_multiplier: stability < 0.5 → `1 + 2*(1-stability)` の増幅（低安定性 = 高k）
+  - regime_multiplier: stability >= 0.5 → 1.0（安定レジームでは増幅なし）
+- `decide()` メソッド内で動的kを適用:
+  - `regime_stability = (1.0 - volatility_ratio.min(1.0)).max(0.0)` を特徴量から算出
+  - `non_model_penalty = compute_dynamic_k(base_k, realized_vol, stability) * sigma_noise`
+- テスト5件追加:
+  - `test_dynamic_k_low_volatility_low_k`: 低vol + 高安定性 → k ≈ base_k
+  - `test_dynamic_k_high_volatility_high_k`: 高vol → k増大
+  - `test_dynamic_k_low_stability_high_k`: 低安定性 → k大幅増大
+  - `test_dynamic_k_zero_volatility_equals_base`: vol=0, stability=1.0 → k=base_k
+  - `test_dynamic_k_always_positive`: 全パラメータ組み合わせでk > 0
+
+**Commands run:**
+- `cargo test -p fx-strategy --lib -- test_dynamic_k` — 5 passed, 0 failed
+- `cargo test --workspace --no-fail-fast` — 1456 passed (+5 new), 3 failed (事前存在CSVバリデーション)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
