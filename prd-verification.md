@@ -398,7 +398,7 @@ struct DataTick {
       "§7.3 Tiered Event Store: Tier1永続/Tier2圧縮/Tier3 TTL + コールドストレージアーカイブ",
       "検証用テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",

@@ -314,4 +314,155 @@ mod tests {
             .unwrap();
         assert_eq!(result, b"unchanged");
     }
+
+    // =========================================================================
+    // §6.3 Schema Registry & Upcaster verification tests (design.md §6.3)
+    // =========================================================================
+
+    #[test]
+    fn s6_3_immutable_schema_prevents_overwrite() {
+        // design.md §6.3: Immutable Schema Registry — 後方互換性のない変更は禁止
+        let registry = SchemaRegistry::new();
+        registry
+            .register(SchemaDescriptor {
+                event_type: "OrderEvent".to_string(),
+                version: 1,
+                protobuf_descriptor: vec![1, 2, 3],
+            })
+            .unwrap();
+
+        // Attempting to register the same (type, version) must fail
+        let result = registry.register(SchemaDescriptor {
+            event_type: "OrderEvent".to_string(),
+            version: 1,
+            protobuf_descriptor: vec![9, 9, 9],
+        });
+        assert!(result.is_err());
+
+        // Original descriptor must be unchanged
+        let original = registry.get("OrderEvent", 1).unwrap();
+        assert_eq!(original.protobuf_descriptor, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn s6_3_latest_version_tracks_highest() {
+        let registry = SchemaRegistry::new();
+        for v in [1u32, 3, 2, 5, 4] {
+            registry
+                .register(SchemaDescriptor {
+                    event_type: "TradeEvent".to_string(),
+                    version: v,
+                    protobuf_descriptor: vec![v as u8],
+                })
+                .unwrap();
+        }
+        assert_eq!(registry.latest_version("TradeEvent"), Some(5));
+    }
+
+    #[test]
+    fn s6_3_multiple_event_types_independent() {
+        let registry = SchemaRegistry::new();
+        registry
+            .register(SchemaDescriptor {
+                event_type: "OrderEvent".to_string(),
+                version: 1,
+                protobuf_descriptor: vec![],
+            })
+            .unwrap();
+        registry
+            .register(SchemaDescriptor {
+                event_type: "FillEvent".to_string(),
+                version: 3,
+                protobuf_descriptor: vec![],
+            })
+            .unwrap();
+
+        assert_eq!(registry.latest_version("OrderEvent"), Some(1));
+        assert_eq!(registry.latest_version("FillEvent"), Some(3));
+        assert_eq!(registry.versions("OrderEvent"), vec![1]);
+        assert_eq!(registry.versions("FillEvent"), vec![3]);
+    }
+
+    #[test]
+    fn s6_3_upcaster_chain_v1_to_v4() {
+        // design.md §6.3: 過去イベントを最新スキーマに自動変換
+        let registry = SchemaRegistry::new();
+        for v in 1..=4u32 {
+            registry
+                .register(SchemaDescriptor {
+                    event_type: "DecisionEvent".to_string(),
+                    version: v,
+                    protobuf_descriptor: vec![],
+                })
+                .unwrap();
+        }
+
+        let upcaster = Upcaster::new();
+        for v in 1..4u32 {
+            let next = v + 1;
+            upcaster.register(
+                "DecisionEvent",
+                v,
+                next,
+                Box::new(move |data: &[u8], _from: u32| {
+                    let mut r = data.to_vec();
+                    r.push(next as u8);
+                    Ok(r)
+                }),
+            );
+        }
+
+        let result = upcaster
+            .upcast_to_latest("DecisionEvent", 1, b"base", &registry)
+            .unwrap();
+        assert_eq!(result, b"base\x02\x03\x04");
+    }
+
+    #[test]
+    fn s6_3_upcaster_missing_step_returns_error() {
+        let registry = SchemaRegistry::new();
+        registry
+            .register(SchemaDescriptor {
+                event_type: "Gap".to_string(),
+                version: 1,
+                protobuf_descriptor: vec![],
+            })
+            .unwrap();
+        registry
+            .register(SchemaDescriptor {
+                event_type: "Gap".to_string(),
+                version: 3,
+                protobuf_descriptor: vec![],
+            })
+            .unwrap();
+
+        let upcaster = Upcaster::new();
+        // Only register v1→v2, but v2→v3 is missing
+        upcaster.register("Gap", 1, 2, Box::new(|data: &[u8], _| Ok(data.to_vec())));
+
+        let result = upcaster.upcast_to_latest("Gap", 1, b"data", &registry);
+        assert!(
+            result.is_err(),
+            "should fail when upcaster step v2→v3 is missing"
+        );
+    }
+
+    #[test]
+    fn s6_3_upcast_to_latest_noop_when_at_latest() {
+        let registry = SchemaRegistry::new();
+        registry
+            .register(SchemaDescriptor {
+                event_type: "Snapshot".to_string(),
+                version: 2,
+                protobuf_descriptor: vec![],
+            })
+            .unwrap();
+
+        let upcaster = Upcaster::new();
+        let data = b"current_schema_data";
+        let result = upcaster
+            .upcast_to_latest("Snapshot", 2, data, &registry)
+            .unwrap();
+        assert_eq!(result, data);
+    }
 }

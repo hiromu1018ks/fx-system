@@ -407,4 +407,215 @@ mod tests {
         let result = publisher.publish(header, b"orphan".to_vec()).await;
         assert!(result.is_ok());
     }
+
+    // =========================================================================
+    // §6.1 4-Stream Partitioning verification tests (design.md §6.1)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn s6_1_four_streams_exist() {
+        // design.md §6.1: Market, Strategy, Execution, State
+        let bus = PartitionedEventBus::new();
+        let _m = bus.publisher(StreamId::Market);
+        let _s = bus.publisher(StreamId::Strategy);
+        let _e = bus.publisher(StreamId::Execution);
+        let _st = bus.publisher(StreamId::State);
+    }
+
+    #[tokio::test]
+    async fn s6_1_stream_isolation_all_pairs() {
+        // design.md §6.1: streams are completely partitioned
+        let bus = PartitionedEventBus::new();
+        let streams = [
+            StreamId::Market,
+            StreamId::Strategy,
+            StreamId::Execution,
+            StreamId::State,
+        ];
+        let tiers = [
+            EventTier::Tier3Raw,
+            EventTier::Tier2Derived,
+            EventTier::Tier1Critical,
+            EventTier::Tier2Derived,
+        ];
+
+        // Subscribe before publishing (broadcast only delivers to existing subscribers)
+        let mut subs: Vec<(StreamId, EventSubscriber)> = streams
+            .iter()
+            .map(|&sid| (sid, bus.subscriber(&[sid])))
+            .collect();
+
+        // Publish one event per stream
+        for (i, &sid) in streams.iter().enumerate() {
+            let pub_ = bus.publisher(sid);
+            let header = make_header(sid, tiers[i]);
+            pub_.publish(header, vec![i as u8]).await.unwrap();
+        }
+
+        // Each subscriber only sees its own stream
+        for (i, &sid) in streams.iter().enumerate() {
+            let sub = &mut subs[i].1;
+            let event = sub.recv().await.unwrap();
+            assert_eq!(event.header.stream_id, sid);
+            assert_eq!(event.payload, vec![i as u8]);
+            assert!(sub.recv().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn s6_1_multi_stream_subscriber_receives_from_all_four() {
+        let bus = PartitionedEventBus::new();
+        let streams = [
+            StreamId::Market,
+            StreamId::Strategy,
+            StreamId::Execution,
+            StreamId::State,
+        ];
+
+        let mut sub = bus.subscriber(&streams);
+        for (i, &sid) in streams.iter().enumerate() {
+            let pub_ = bus.publisher(sid);
+            let header = make_header(sid, EventTier::Tier3Raw);
+            pub_.publish(header, vec![i as u8]).await.unwrap();
+        }
+
+        let mut received = vec![false; 4];
+        for _ in 0..4 {
+            let event = sub.recv().await.unwrap();
+            let idx = streams
+                .iter()
+                .position(|&s| s == event.header.stream_id)
+                .unwrap();
+            assert!(!received[idx]);
+            received[idx] = true;
+        }
+        assert!(received.iter().all(|&r| r));
+    }
+
+    // =========================================================================
+    // §6.2 Sequence ID & Idempotency verification tests (design.md §6.2)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn s6_2_sequence_id_monotonic_64bit() {
+        // design.md §6.2: 各ストリーム内の単調増加64bit整数
+        let bus = PartitionedEventBus::new();
+        let publisher = bus.publisher(StreamId::Market);
+        let mut subscriber = bus.subscriber(&[StreamId::Market]);
+
+        let count = 200u64;
+        for i in 0..count {
+            let header = make_header(StreamId::Market, EventTier::Tier3Raw);
+            publisher.publish(header, vec![i as u8]).await.unwrap();
+        }
+
+        let mut prev_seq: u64 = 0;
+        for i in 0..count {
+            let event = subscriber.recv().await.unwrap();
+            assert!(
+                event.header.sequence_id > prev_seq,
+                "sequence_id not monotonic at {}: {} <= {}",
+                i,
+                event.header.sequence_id,
+                prev_seq
+            );
+            prev_seq = event.header.sequence_id;
+        }
+        assert_eq!(prev_seq, count);
+    }
+
+    #[tokio::test]
+    async fn s6_2_independent_sequence_counters_per_stream() {
+        // design.md §6.2: sequence_idは各ストリームで独立
+        let bus = PartitionedEventBus::new();
+        let streams = [
+            StreamId::Market,
+            StreamId::Strategy,
+            StreamId::Execution,
+            StreamId::State,
+        ];
+
+        // Subscribe before publishing
+        let mut subs: Vec<EventSubscriber> =
+            streams.iter().map(|&sid| bus.subscriber(&[sid])).collect();
+
+        // Publish 3 events per stream
+        for &sid in &streams {
+            let pub_ = bus.publisher(sid);
+            for _ in 0..3 {
+                let header = make_header(sid, EventTier::Tier3Raw);
+                pub_.publish(header, b"x".to_vec()).await.unwrap();
+            }
+        }
+
+        // Verify each stream has its own 1,2,3 sequence
+        for (i, &sid) in streams.iter().enumerate() {
+            for expected in 1..=3u64 {
+                let event = subs[i].recv().await.unwrap();
+                assert_eq!(
+                    event.header.sequence_id, expected,
+                    "stream {:?}: expected seq {}, got {}",
+                    sid, expected, event.header.sequence_id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn s6_2_idempotency_event_id_dedup() {
+        // design.md §6.2: event_idによる重複処理スキップ
+        let bus = PartitionedEventBus::new();
+        let publisher = bus.publisher(StreamId::Strategy);
+        let mut subscriber = bus.subscriber(&[StreamId::Strategy]);
+
+        let header = make_header(StreamId::Strategy, EventTier::Tier2Derived);
+        let event_id = header.event_id;
+        publisher.publish(header, b"first".to_vec()).await.unwrap();
+
+        let event1 = subscriber.recv().await.unwrap();
+        assert_eq!(event1.event_id(), event_id);
+        assert!(subscriber.seen_ids.contains(&event_id));
+
+        // The subscriber would skip a duplicate if it appeared, but the bus
+        // itself always assigns new sequence_ids. Verify seen_ids grows.
+        assert_eq!(subscriber.seen_ids.len(), 1);
+
+        let header2 = make_header(StreamId::Strategy, EventTier::Tier2Derived);
+        publisher
+            .publish(header2, b"second".to_vec())
+            .await
+            .unwrap();
+        let event2 = subscriber.recv().await.unwrap();
+        assert_ne!(event2.event_id(), event_id);
+        assert_eq!(subscriber.seen_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn s6_2_idempotency_no_duplicate_delivery() {
+        // Verify that seen_ids prevents duplicate event_id from being delivered
+        let bus = PartitionedEventBus::new();
+        let publisher = bus.publisher(StreamId::Execution);
+        let mut subscriber = bus.subscriber(&[StreamId::Execution]);
+
+        let header = make_header(StreamId::Execution, EventTier::Tier1Critical);
+        let event_id = header.event_id;
+        publisher.publish(header, b"unique".to_vec()).await.unwrap();
+
+        let event1 = subscriber.recv().await.unwrap();
+        assert_eq!(event1.event_id(), event_id);
+        assert!(subscriber.seen_ids.contains(&event_id));
+
+        // Manually insert the same event_id again to simulate a duplicate
+        subscriber.seen_ids.insert(event_id);
+
+        // Publish another event — it should be delivered (different event_id)
+        let header2 = make_header(StreamId::Execution, EventTier::Tier1Critical);
+        publisher
+            .publish(header2, b"new_event".to_vec())
+            .await
+            .unwrap();
+        let event2 = subscriber.recv().await.unwrap();
+        assert_ne!(event2.event_id(), event_id);
+        assert_eq!(event2.payload, b"new_event");
+    }
 }

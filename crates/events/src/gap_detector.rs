@@ -781,4 +781,162 @@ mod tests {
             "std should be small for regular ticks, got {std}"
         );
     }
+
+    // =========================================================================
+    // §7.1 Gap Detection verification tests (design.md §7.1)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn s7_1_minor_gap_1_2_ticks_warning_not_halt() {
+        // design.md §7.1: 軽微なギャップ = 連続する1-2ティックの欠損
+        // Warningログのみ出力し取引継続。is_trading_halted()はfalse
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+        // After 10 ticks: last_seq=11, last_ts=NS_BASE+9*TICK_INTERVAL_NS
+
+        // 1 tick missing: skip seq 12, send seq 13
+        let ts = NS_BASE + 11 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 13);
+        let result = detector.process_market_event(&event).await.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().level, GapLevel::Minor);
+        assert!(!detector.is_trading_halted());
+
+        // 2 ticks missing: skip seqs 14,15, send seq 16
+        let ts2 = NS_BASE + 14 * TICK_INTERVAL_NS;
+        let event2 = make_market_event(ts2, 16);
+        let r2 = detector.process_market_event(&event2).await.unwrap();
+        assert!(r2.is_some());
+        assert_eq!(r2.unwrap().level, GapLevel::Minor);
+        assert!(!detector.is_trading_halted());
+    }
+
+    #[tokio::test]
+    async fn s7_1_severe_gap_3_plus_ticks_trading_halt() {
+        // design.md §7.1: 深刻なギャップ = 連続3ティック以上の欠損 → 取引停止
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+
+        // 3 ticks missing → Severe
+        let ts = NS_BASE + 13 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 14);
+        let result = detector.process_market_event(&event).await.unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().level, GapLevel::Severe);
+    }
+
+    #[tokio::test]
+    async fn s7_1_gap_event_published_to_strategy_stream_with_severity() {
+        // design.md §7.1: GapEvent is published to Strategy stream
+        let bus = PartitionedEventBus::new();
+        let mut subscriber = bus.subscriber(&[StreamId::Strategy]);
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+        // After 10 ticks: last_seq=11, last_ts=NS_BASE+9*TICK_INTERVAL_NS
+
+        // Minor gap: skip seq 12, send seq 13
+        let ts = NS_BASE + 11 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 13);
+        detector.process_market_event(&event).await.unwrap();
+
+        let received = subscriber.recv().await;
+        assert!(received.is_some());
+        let gap_event = proto::GapEventPayload::decode(received.unwrap().payload_bytes()).unwrap();
+        assert_eq!(gap_event.missed_ticks, 2); // skipped seq 11,12
+        assert_eq!(gap_event.severity, proto::GapSeverity::Minor as i32);
+        assert!(gap_event.description.contains("Minor gap"));
+
+        // Severe gap: skip seqs 14,15,16, send seq 17 (3 missed ticks → Severe)
+        let ts2 = NS_BASE + 15 * TICK_INTERVAL_NS;
+        let event2 = make_market_event(ts2, 17);
+        detector.process_market_event(&event2).await.unwrap();
+
+        let received2 = subscriber.recv().await;
+        assert!(received2.is_some());
+        let gap_event2 =
+            proto::GapEventPayload::decode(received2.unwrap().payload_bytes()).unwrap();
+        assert_eq!(gap_event2.missed_ticks, 3);
+        assert_eq!(gap_event2.severity, proto::GapSeverity::Severe as i32);
+        assert!(gap_event2.description.contains("Severe gap"));
+    }
+
+    #[tokio::test]
+    async fn s7_1_z_score_gap_within_mean_plus_2sigma_no_detection() {
+        // design.md §7.1: 欠損期間が tick_interval_mean + 2σ 以内ならWarningのみ
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        // Feed regular ticks with small jitter
+        for i in 0..30 {
+            let jitter = if i % 3 == 0 { 5_000_000 } else { 0 };
+            make_jittered_tick(&mut detector, i as u64, jitter).await;
+        }
+
+        let mean = detector.mean_interval_ns();
+        let std = detector.std_interval_ns_pub();
+
+        // Create a gap within mean + 2σ
+        let gap_ns = (mean + 1.5 * std) as u64;
+        let last_ts = NS_BASE + 29 * TICK_INTERVAL_NS;
+        let gap_ts = last_ts + gap_ns;
+        let event = make_market_event(gap_ts, 31);
+        let result = detector.process_market_event(&event).await.unwrap();
+
+        // With 0 missed ticks and z < 3.0, should not trigger
+        assert!(
+            result.is_none(),
+            "gap within 2σ should not trigger: z={}",
+            result.as_ref().map(|r| r.z_score).unwrap_or(0.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn s7_1_gap_info_contains_all_diagnostic_fields() {
+        // design.md §7.1: GapInfo should have all diagnostic fields
+        let bus = PartitionedEventBus::new();
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..10 {
+            make_normal_tick(&mut detector, i).await;
+        }
+
+        let ts = NS_BASE + 13 * TICK_INTERVAL_NS;
+        let event = make_market_event(ts, 14);
+        let result = detector.process_market_event(&event).await.unwrap();
+
+        let info = result.unwrap();
+        assert_eq!(info.level, GapLevel::Severe);
+        assert!(info.missed_ticks >= 3);
+        assert!(info.interval_ns > 0);
+        assert!(info.mean_interval_ns > 0.0);
+        assert!(info.std_interval_ns >= 0.0);
+        assert!(info.z_score.is_finite());
+        assert!(info.expected_timestamp_ns > 0);
+        assert!(info.actual_timestamp_ns > 0);
+    }
+
+    #[tokio::test]
+    async fn s7_1_normal_ticks_produce_no_gap_events() {
+        // Verify that continuous normal ticks never produce gap events
+        let bus = PartitionedEventBus::new();
+        let mut subscriber = bus.subscriber(&[StreamId::Strategy]);
+        let mut detector = GapDetector::with_config(&bus, 1, 0.02, 5, 1, 3);
+
+        for i in 0..50 {
+            make_normal_tick(&mut detector, i).await;
+        }
+
+        assert!(subscriber.recv().await.is_none());
+    }
 }

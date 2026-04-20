@@ -246,4 +246,112 @@ mod tests {
         );
         assert!(std::path::Path::new(&file_path).exists());
     }
+
+    // =========================================================================
+    // §7.3 Tier3 (Raw) verification tests (design.md §7.3)
+    // =========================================================================
+
+    #[test]
+    fn s7_3_tier3_ttl_expires_events() {
+        // design.md §7.3: Tier3 (Raw) → メモリ/高速SSDのみ保持し、TTL期限後に削除
+        let store = Tier3Store::new(Duration::from_millis(1));
+
+        let event = make_event(StreamId::Market, 1, b"tick_data");
+        store.store(&event).unwrap();
+
+        // Immediately available
+        assert!(store.load(event.header.event_id).unwrap().is_some());
+
+        // Wait for TTL
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // Expired → returns None
+        assert!(store.load(event.header.event_id).unwrap().is_none());
+
+        // Replay also skips expired
+        let replayed = store.replay(StreamId::Market, 0).unwrap();
+        assert!(replayed.is_empty());
+    }
+
+    #[test]
+    fn s7_3_tier3_cold_storage_archive_before_delete() {
+        // design.md §7.3: TTL期限後にコールドストレージに自動アーカイブしてから削除
+        // §9.2のオフライン再学習に必要な生データを廃棄しない
+        let dir = tempfile::tempdir().unwrap();
+        let store = Tier3Store::new(Duration::from_millis(1))
+            .with_cold_storage(dir.path().to_string_lossy().into_owned());
+
+        let event = make_event(StreamId::Market, 1, b"important_tick_for_retraining");
+        store.store(&event).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let archived = store.archive_expired().unwrap();
+        assert_eq!(archived.len(), 1);
+
+        // Verify cold storage file exists and contains valid JSON (event serialized)
+        let file_path = format!(
+            "{}/{}.json",
+            dir.path().to_string_lossy(),
+            event.header.event_id
+        );
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        // Payload is stored as Vec<u8> in JSON (array of numbers), not as string
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(parsed.is_object(), "archived event should be a JSON object");
+    }
+
+    #[test]
+    fn s7_3_tier3_no_cold_storage_path_no_archive() {
+        // Without cold storage path, archive_expired removes but doesn't write files
+        let store = Tier3Store::new(Duration::from_millis(1));
+
+        let event = make_event(StreamId::Market, 1, b"tick");
+        store.store(&event).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let archived = store.archive_expired().unwrap();
+        assert_eq!(archived.len(), 1);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn s7_3_tier3_replay_skips_expired_returns_valid_only() {
+        let store = Tier3Store::new(Duration::from_millis(10));
+
+        // Store 5 events
+        for i in 1..=5 {
+            let event = make_event(StreamId::Market, i, format!("tick_{}", i).as_bytes());
+            store.store(&event).unwrap();
+        }
+
+        // All available
+        let all = store.replay(StreamId::Market, 0).unwrap();
+        assert_eq!(all.len(), 5);
+
+        // Store another event and wait for first batch to expire
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let new_event = make_event(StreamId::Market, 6, b"new_tick");
+        store.store(&new_event).unwrap();
+
+        // Only new event should be in replay
+        let replayed = store.replay(StreamId::Market, 0).unwrap();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, b"new_tick");
+    }
+
+    #[test]
+    fn s7_3_tier3_raw_market_events() {
+        // design.md §7.3: MarketEvent → Tier3 (Raw)
+        let store = Tier3Store::new(Duration::from_secs(300));
+
+        let event = make_event(StreamId::Market, 1, b"raw_market_tick");
+        store.store(&event).unwrap();
+
+        let loaded = store.load(event.header.event_id).unwrap().unwrap();
+        assert_eq!(loaded.header.stream_id, StreamId::Market);
+        assert_eq!(loaded.header.tier, EventTier::Tier3Raw);
+        assert_eq!(loaded.payload, b"raw_market_tick");
+    }
 }

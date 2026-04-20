@@ -229,4 +229,77 @@ mod tests {
         assert!(!store.remove(event.header.event_id).unwrap());
         assert!(store.load(event.header.event_id).unwrap().is_none());
     }
+
+    // =========================================================================
+    // §7.3 Tiered Event Store verification tests (design.md §7.3)
+    // =========================================================================
+
+    #[test]
+    fn s7_3_tier1_persistent_across_operations() {
+        // design.md §7.3: Tier1 (Critical) → NVMe SSDに永続保存
+        // Verify events survive store→load cycle (persistence via sled)
+        let store = Tier1Store::open_temp().unwrap();
+
+        let events: Vec<GenericEvent> = (1..=5)
+            .map(|i| {
+                make_event(
+                    StreamId::Execution,
+                    i,
+                    format!("fill_payload_{}", i).as_bytes(),
+                )
+            })
+            .collect();
+
+        for e in &events {
+            store.store(e).unwrap();
+        }
+
+        // All events must be loadable
+        for e in &events {
+            let loaded = store.load(e.header.event_id).unwrap();
+            assert!(loaded.is_some());
+            assert_eq!(loaded.unwrap().payload, e.payload);
+        }
+    }
+
+    #[test]
+    fn s7_3_tier1_replay_returns_ordered_events() {
+        // design.md §7.3: Tier1 stores critical events (OrderSent, Fill, StateSnapshot)
+        let store = Tier1Store::open_temp().unwrap();
+
+        for i in 1..=10 {
+            let event = make_event(StreamId::State, i, format!("snapshot_{}", i).as_bytes());
+            store.store(&event).unwrap();
+        }
+
+        let replayed = store.replay(StreamId::State, 1).unwrap();
+        assert_eq!(replayed.len(), 10);
+        for (i, e) in replayed.iter().enumerate() {
+            assert_eq!(e.header.sequence_id, (i + 1) as u64);
+        }
+
+        // Partial replay
+        let partial = store.replay(StreamId::State, 5).unwrap();
+        assert_eq!(partial.len(), 6);
+        assert_eq!(partial[0].header.sequence_id, 5);
+    }
+
+    #[test]
+    fn s7_3_tier1_critical_event_types() {
+        // design.md §7.3: OrderSent, Fill, StateSnapshot → Tier1
+        // Verify Tier1 can store events from all 4 streams (critical ones)
+        let store = Tier1Store::open_temp().unwrap();
+
+        let critical_streams = [
+            (StreamId::Execution, "fill_event"),
+            (StreamId::State, "state_snapshot"),
+        ];
+
+        for (sid, payload) in &critical_streams {
+            let event = make_event(*sid, 1, payload.as_bytes());
+            store.store(&event).unwrap();
+            let loaded = store.load(event.header.event_id).unwrap().unwrap();
+            assert_eq!(loaded.payload, payload.as_bytes());
+        }
+    }
 }

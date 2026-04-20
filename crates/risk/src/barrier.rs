@@ -553,4 +553,151 @@ mod tests {
         let d2 = m1 - m2;
         assert!(d2 > d1, "penalty should accelerate: d1={}, d2={}", d1, d2);
     }
+
+    // =========================================================================
+    // §7.2 Dynamic Risk Barrier verification tests (design.md §7.2)
+    // =========================================================================
+
+    #[test]
+    fn s7_2_lot_multiplier_formula_matches_design_doc() {
+        // design.md §7.2: lot_multiplier = max(0, 1 - (staleness_ms / staleness_threshold_ms)^2)
+        let barrier = default_barrier();
+        let threshold = barrier.config().staleness_threshold_ms as f64;
+
+        for ms in [0u64, 500, 1000, 2000, 3000, 4000, 4999] {
+            let expected = (1.0 - (ms as f64 / threshold).powi(2)).max(0.0);
+            let actual = barrier.compute_lot_multiplier(ms);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "at {}ms: expected {}, got {}",
+                ms,
+                expected,
+                actual
+            );
+        }
+        assert_eq!(barrier.compute_lot_multiplier(5000), 0.0);
+        assert_eq!(barrier.compute_lot_multiplier(10000), 0.0);
+    }
+
+    #[test]
+    fn s7_2_no_synchronous_waiting_always_passes() {
+        // design.md §7.2: 待機による同期は完全に廃止。BarrierはCommandを常に通すがstaleness_msを付与
+        let barrier = default_barrier();
+        // Even at extreme staleness, evaluate() returns a BarrierResult (never blocks)
+        for ms in [0u64, 100, 2500, 4999, 5000, 99999] {
+            let result = barrier.evaluate(ms);
+            // evaluate() returns immediately with staleness_ms and lot_multiplier
+            assert_eq!(result.staleness_ms, ms);
+            assert!(result.lot_multiplier.is_finite());
+        }
+    }
+
+    #[test]
+    fn s7_2_staleness_beyond_threshold_lot_multiplier_zero() {
+        // design.md §7.2: staleness_ms > threshold → lot_multiplier = 0 → 取引停止
+        let barrier = default_barrier();
+        let threshold = barrier.config().staleness_threshold_ms;
+
+        assert_eq!(barrier.compute_lot_multiplier(threshold), 0.0);
+        assert_eq!(barrier.compute_lot_multiplier(threshold + 1), 0.0);
+        assert_eq!(barrier.compute_lot_multiplier(threshold * 10), 0.0);
+
+        let result = barrier.evaluate(threshold);
+        assert!(!result.allowed);
+        assert_eq!(result.status, BarrierStatus::Halted);
+        assert_eq!(result.effective_lot_size, 0);
+    }
+
+    #[test]
+    fn s7_2_quadratic_penalty_shape_minor_delay_small_penalty() {
+        // design.md §7.2: 二次関数 — 軽微な遅延ではペナルティ小
+        let barrier = default_barrier();
+        // 10% staleness: multiplier = 1 - 0.01 = 0.99
+        let m10 = barrier.compute_lot_multiplier(500);
+        assert!(
+            m10 > 0.98,
+            "10% staleness should have tiny penalty: {}",
+            m10
+        );
+
+        // 20% staleness: multiplier = 1 - 0.04 = 0.96
+        let m20 = barrier.compute_lot_multiplier(1000);
+        assert!(
+            m20 > 0.95,
+            "20% staleness should have small penalty: {}",
+            m20
+        );
+    }
+
+    #[test]
+    fn s7_2_quadratic_penalty_shape_severe_delay_rapid_convergence() {
+        // design.md §7.2: 深刻な遅延で急激にゼロに収束
+        let barrier = default_barrier();
+        let m80 = barrier.compute_lot_multiplier(4000); // 80%
+        let m90 = barrier.compute_lot_multiplier(4500); // 90%
+        let m95 = barrier.compute_lot_multiplier(4750); // 95%
+
+        // 80% → 1 - 0.64 = 0.36
+        assert!(m80 < 0.4, "80% staleness penalty too low: {}", m80);
+        // 90% → 1 - 0.81 = 0.19
+        assert!(m90 < 0.2, "90% staleness penalty too low: {}", m90);
+        // 95% → 1 - 0.9025 = 0.0975
+        assert!(m95 < 0.1, "95% staleness penalty too low: {}", m95);
+    }
+
+    #[test]
+    fn s7_2_effective_lot_scaled_by_multiplier() {
+        // design.md §7.2: Risk Managerはstaleness_msに応じて動的に最大許容ロット数を引き下げる
+        let barrier = default_barrier();
+        let default_lot = barrier.config().default_lot_size as f64;
+
+        for ms in [0u64, 1000, 2000, 3000, 4000] {
+            let result = barrier.evaluate(ms);
+            let expected = (default_lot * result.lot_multiplier) as u64;
+            assert_eq!(
+                result.effective_lot_size, expected,
+                "at {}ms: expected {}, got {}",
+                ms, expected, result.effective_lot_size
+            );
+        }
+    }
+
+    #[test]
+    fn s7_2_status_transitions_normal_to_halted() {
+        let barrier = default_barrier();
+        let half_warning = barrier.config().warning_threshold_ms() / 2;
+        let warning = barrier.config().warning_threshold_ms();
+        let threshold = barrier.config().staleness_threshold_ms;
+
+        assert_eq!(barrier.compute_status(0, 1.0), BarrierStatus::Normal);
+        assert_eq!(
+            barrier.compute_status(half_warning + 1, 0.99),
+            BarrierStatus::Warning
+        );
+        assert_eq!(
+            barrier.compute_status(warning, 0.84),
+            BarrierStatus::Degraded
+        );
+        assert_eq!(
+            barrier.compute_status(threshold, 0.0),
+            BarrierStatus::Halted
+        );
+    }
+
+    #[test]
+    fn s7_2_validate_order_returns_risk_error_when_halted() {
+        let barrier = default_barrier();
+        let result = barrier.validate_order(5000);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RiskError::StalenessHalted {
+                staleness_ms,
+                threshold_ms,
+            } => {
+                assert_eq!(staleness_ms, 5000);
+                assert_eq!(threshold_ms, 5000);
+            }
+            e => panic!("unexpected error: {}", e),
+        }
+    }
 }

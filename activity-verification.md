@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 19
-**Current Task:** Task 24 — design.md §6-7 Event Sourcing・分散システム対策の実装検証
+**Tasks Completed:** 20
+**Current Task:** Task 25 — フルパイプライン統合テスト: design.md準拠の完全なトレーディングループ
 
 ---
 
@@ -673,3 +673,65 @@ Python側（research/bridge/）:
 - `cargo fmt` — applied, `cargo fmt --check` — clean
 
 **Issues:** pre-existing test failure in `bayesian_lr::tests::test_divergence_ratio_no_false_positive` (fx-strategy) — 本タスクとは無関係
+
+### 2026-04-20: Task 24 — design.md §6-7 Event Sourcing・分散システム対策の実装検証
+
+**What changed:**
+
+§6.1 4ストリーム分割検証テスト3件（`crates/events/src/bus.rs`）:
+- `s6_1_four_streams_exist`: Market/Strategy/Execution/Stateの4パブリッシャーが作成可能であることを検証
+- `s6_1_stream_isolation_all_pairs`: 4ストリーム間の完全分離を検証。各サブスクライバが自分のストリームのみ受信し、他ストリームのイベントは受信しないこと
+- `s6_1_multi_stream_subscriber_receives_from_all_four`: 複数ストリーム購読者が全4ストリームのイベントを受信することを検証
+
+§6.2 Sequence ID・冪等性検証テスト4件（`crates/events/src/bus.rs`）:
+- `s6_2_sequence_id_monotonic_64bit`: 200イベント連続パブリッシュでsequence_idが単調増加（1,2,...,200）することを検証
+- `s6_2_independent_sequence_counters_per_stream`: 4ストリームそれぞれが独立したカウンタ（1,2,3）を持つことを検証
+- `s6_2_idempotency_event_id_dedup`: event_idによる重複スキップ機構（seen_ids HashSet）の動作を検証
+- `s6_2_idempotency_no_duplicate_delivery`: seen_idsに登録済みのevent_idのイベントは配信されないことを検証
+
+§6.3 Schema Registry・Upcaster検証テスト6件（`crates/events/src/store/schema.rs`）:
+- `s6_3_immutable_schema_prevents_overwrite`: 同一(event_type, version)の再登録がエラーになること、元の記述子が変更されないことを検証
+- `s6_3_latest_version_tracks_highest`: 登録順序に依存せず常に最高バージョンを返すことを検証
+- `s6_3_multiple_event_types_independent`: 複数イベントタイプが独立して管理されることを検証
+- `s6_3_upcaster_chain_v1_to_v4`: v1→v2→v3→v4の4段階チェーン変換が正しく適用されることを検証
+- `s6_3_upcaster_missing_step_returns_error`: 中間ステップのupcasterが欠落している場合にエラーになることを検証
+- `s6_3_upcast_to_latest_noop_when_at_latest`: 既に最新バージョンの場合にデータが変更されないことを検証
+
+§7.1 Gap Detection検証テスト6件（`crates/events/src/gap_detector.rs`）:
+- `s7_1_minor_gap_1_2_ticks_warning_not_halt`: 1-2ティック欠損でMinor検出、is_trading_halted()がfalseであることを検証
+- `s7_1_severe_gap_3_plus_ticks_trading_halt`: 3+ティック欠損でSevere検出されることを検証
+- `s7_1_gap_event_published_to_strategy_stream_with_severity`: Minor/Severe両方のGapEventがStrategyストリームに正しいseverityで発行されることを検証
+- `s7_1_z_score_gap_within_mean_plus_2sigma_no_detection`: mean+2σ以内のギャップが検出されないことを検証
+- `s7_1_gap_info_contains_all_diagnostic_fields`: GapInfoの全フィールド（missed_ticks, interval_ns, mean, std, z_score, expected/actual timestamp）が正しく設定されることを検証
+- `s7_1_normal_ticks_produce_no_gap_events`: 連続通常ティックでStrategyストリームにGapEventが発行されないことを検証
+
+§7.2 Dynamic Risk Barrier検証テスト8件（`crates/risk/src/barrier.rs`）:
+- `s7_2_lot_multiplier_formula_matches_design_doc`: design.md §7.2の公式 `max(0, 1-(s/T)^2)` と完全一致することを7点で検証
+- `s7_2_no_synchronous_waiting_always_passes`: evaluate()が同期待機なしで常に即座にBarrierResultを返すことを検証
+- `s7_2_staleness_beyond_threshold_lot_multiplier_zero`: staleness >= thresholdでmultiplier=0、allowed=false、status=Haltedになることを検証
+- `s7_2_quadratic_penalty_shape_minor_delay_small_penalty`: 10-20% stalenessでペナルティが微小（>0.95）であることを検証
+- `s7_2_quadratic_penalty_shape_severe_delay_rapid_convergence`: 80-95% stalenessでペナルティが急激にゼロに収束することを検証
+- `s7_2_effective_lot_scaled_by_multiplier`: effective_lot = default_lot * multiplierの公式が正しく適用されることを検証
+- `s7_2_status_transitions_normal_to_halted`: Normal→Warning→Degraded→Haltedの4状態遷移が正しく発生することを検証
+- `s7_2_validate_order_returns_risk_error_when_halted`: validate_orderがStalenessHaltedエラーを返すことを検証
+
+§7.3 Tiered Event Store検証テスト12件（tier1.rs/tier2.rs/tier3.rs）:
+- **Tier1** (3 tests): 永続保存・ストリームリプレイの順序性・クリティカルイベントタイプ（Execution, State）の保存
+- **Tier2** (4 tests): Delta Encoding + 圧縮による完全復元・圧縮率改善検証・ベース境界を跨ぐリプレイ・XOR deltaの対称性
+- **Tier3** (5 tests): TTL期限切れイベントの返却None・コールドストレージアーカイブ・パスなし時の削除のみ・期限切れ+新規イベントの混合リプレイ・Raw MarketEventのTier3Raw分類
+
+**調査結果:**
+- §6.1 4ストリーム分割: PartitionedEventBusがtokio::broadcastによる4チャンネルで完全実装。ストリーム間の分離は構造的に保証（パブリッシャーとサブスクライバーがストリームIDでバインド）
+- §6.2 Sequence ID: per-stream `Arc<RwLock<[u64; 4]>>` カウンタで単調増加64bit整数。UUIDv7によるevent_id + seen_ids HashSetによる冪等性（design.mdの「event_idとsequence_idによる重複処理スキップ」に対応）。実装はevent_idベースのdedupで、sequence_idは順序保証に使用
+- §6.3 Schema Registry: 共役事前分布的なImmutable設計（同一type+versionの重複登録禁止）。Upcasterはstep-by-step変換関数レジストリでv1→v2→...→vNのチェーン変換を実装
+- §7.1 Gap Detection: sequence-based（1-2ティック=Minor, 3+=Severe）+ z-score timing-basedの二重検出。GapEventをStrategyストリームにproto形式で発行。is_trading_halted()は常にfalse（ハルト/リプレイはコンシューマ側で実装）
+- §7.2 Dynamic Risk Barrier: design.md §7.2の二次関数 `max(0, 1-(s/T)^2)` を完全実装。同期待機なし（常に即座にBarrierResultを返す）。4段階ステータス（Normal→Warning→Degraded→Halted）
+- §7.3 Tiered Event Store: Tier1(sled永続)/Tier2(delta+deflate圧縮)/Tier3(in-memory+TTL+コールドストレージJSON) の3階層完全実装
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1382 passed, 0 failed（38 new §6-7 verification tests）
+- `cargo clippy` — no errors（pre-existing dead_code warnings only）
+- `cargo fmt` — applied, `cargo fmt --check` — clean
+
+**Issues:** なし

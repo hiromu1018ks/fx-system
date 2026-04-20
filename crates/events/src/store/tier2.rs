@@ -508,4 +508,93 @@ mod tests {
             assert_eq!(e.payload, expected.as_bytes());
         }
     }
+
+    // =========================================================================
+    // §7.3 Tier2 (Derived) verification tests (design.md §7.3)
+    // =========================================================================
+
+    #[test]
+    fn s7_3_tier2_delta_encoding_reconstructs_original() {
+        // design.md §7.3: Tier2 (Derived) → Delta Encoding + 圧縮でアーカイブ
+        let store = Tier2Store::open_temp().unwrap().with_base_interval(3);
+
+        let payloads: Vec<Vec<u8>> = (0..10)
+            .map(|i| format!("decision_event_payload_{}", i).into_bytes())
+            .collect();
+
+        let mut event_ids = Vec::new();
+        for (i, payload) in payloads.iter().enumerate() {
+            let event = make_event(StreamId::Strategy, (i + 1) as u64, payload);
+            event_ids.push(event.header.event_id);
+            store.store(&event).unwrap();
+        }
+
+        // All events must be perfectly reconstructed through delta decoding
+        for (i, payload) in payloads.iter().enumerate() {
+            let loaded = store.load(event_ids[i]).unwrap();
+            assert!(loaded.is_some(), "event {} failed to load", i);
+            assert_eq!(
+                loaded.unwrap().payload,
+                *payload,
+                "payload mismatch at {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn s7_3_tier2_compression_reduces_size() {
+        // design.md §7.3: 圧縮（flate2 Deflate）
+        let data = b"This is a decision event payload that should compress well with repetitive patterns and longer content";
+        let compressed = compress(data).unwrap();
+        // Compressed data should be smaller than original for compressible data
+        assert!(
+            compressed.len() < data.len(),
+            "compressed {} >= original {}",
+            compressed.len(),
+            data.len()
+        );
+
+        let decompressed = decompress(&compressed).unwrap();
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn s7_3_tier2_replay_across_base_boundaries() {
+        // design.md §7.3: DecisionEvent, PolicyCommand → Tier2
+        // Verify replay works correctly across base snapshot boundaries
+        let store = Tier2Store::open_temp().unwrap().with_base_interval(3);
+
+        for i in 0..9 {
+            let payload = format!("policy_cmd_{}", i);
+            let event = make_event(StreamId::Strategy, i + 1, payload.as_bytes());
+            store.store(&event).unwrap();
+        }
+
+        // Replay from seq 2 (crosses base boundary at seq 3 and 6)
+        let events = store.replay(StreamId::Strategy, 2).unwrap();
+        assert_eq!(events.len(), 8); // seq 2-9
+
+        for (i, e) in events.iter().enumerate() {
+            let expected = format!("policy_cmd_{}", i + 1);
+            assert_eq!(e.payload, expected.as_bytes(), "mismatch at index {}", i);
+        }
+    }
+
+    #[test]
+    fn s7_3_tier2_delta_xor_round_trip() {
+        // Verify XOR delta encoding is symmetric
+        let prev = b"previous_event_data_here";
+        let current = b"current_event_data_modified";
+        let delta = compute_delta(prev, current);
+        let reconstructed = apply_delta(prev, &delta);
+        assert_eq!(reconstructed, current);
+
+        // Different lengths
+        let short = b"abc";
+        let long = b"abcdefghij";
+        let delta2 = compute_delta(short, long);
+        let reconstructed2 = apply_delta(short, &delta2);
+        assert_eq!(reconstructed2, long);
+    }
 }
