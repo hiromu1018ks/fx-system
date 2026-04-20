@@ -182,7 +182,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "モデルファイルの配置規約: research/models/onnx/regime_v1.onnx",
       "テスト: pytest + cargo test でパイプライン全体が通ることを確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",

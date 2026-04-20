@@ -20,3 +20,6 @@ thiserror = { workspace = true }
 prost = { workspace = true }
 uuid = { workspace = true }
 ort = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

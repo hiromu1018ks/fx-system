@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 9
-**Current Task:** Task 10 — E2Eパイプライン (Python→ONNX→Rust)
+**Tasks Completed:** 10
+**Current Task:** Task 11 — バックテスト ONNX Regime切替
 
 ---
 
@@ -226,3 +226,36 @@
 - `cargo fmt --check` — clean
 
 **Issues:** ONNX推論テストは `ORT_DYLIB_PATH` 環境変数が設定されている場合のみ実行。実際のダミーモデルでのロード/推論テストはTask 10 (E2Eパイプライン) で対応。
+
+### 2026-04-20: Task 10 — E2Eパイプライン: Python訓練→ONNXエクスポート→Rust推論
+
+**What changed:**
+- `research/models/generate_regime_model.py`: ONNX regime model生成スクリプト
+  - HDP-HMMを合成データ(36次元, 4 regimes, 500 samples)で訓練
+  - ONNXエクスポート → `research/models/onnx/regime_v1.onnx` に保存
+  - テスト用メタデータ(test_features, expected_posterior)を `regime_v1_meta.json` に保存
+  - `--output` オプションで出力パス指定可能
+- `research/models/onnx/regime_v1.onnx`: 生成されたONNXモデル (MatMul→Add→Softmax, 入力[1,36]→出力[1,4])
+- `research/models/onnx/regime_v1_meta.json`: 推論検証用メタデータ
+- `research/tests/test_e2e_pipeline.py`: Python E2Eテスト5件
+  - `test_train_produces_different_weights`: 訓練で重みが変化することを確認
+  - `test_export_matches_python_inference`: ONNX推論結果がPython計算と一致 (atol=1e-5)
+  - `test_export_with_correct_input_output_shapes`: 入力[1,36]→出力[1,4]の形状確認
+  - `test_posterior_sums_to_one_for_multiple_inputs`: 10個のランダム入力で事後確率が和1
+  - `test_generate_model_script_creates_valid_files`: スクリプト出力の完全検証
+- `crates/strategy/tests/test_onnx_regime.rs`: Rust統合テスト2件
+  - `test_onnx_regime_model_load_and_infer`: ONNXモデルロード→推論→Python期待値との照合 (atol=1e-4)
+  - `test_onnx_regime_cache_integration`: RegimeCache経由でのONNX推論
+  - ORTライブラリ自動検出: mise/pyenv/python3経由で`ORT_DYLIB_PATH`を自動設定
+  - モデルファイル/ライブラリ不在時はSKIP
+- `crates/strategy/Cargo.toml`: `serde_json` を dev-dependencies に追加
+
+**Commands run:**
+- `python -m research.models.generate_regime_model` — モデル生成成功
+- `pytest research/tests/test_e2e_pipeline.py -v` — 5 passed, 0 failed
+- `cargo test -p fx-strategy --test test_onnx_regime -- --nocapture` — 2 passed (推論値一致確認済み)
+- `cargo test --workspace --no-fail-fast` — 新規テスト全通過、失敗は事前存在のCSVバリデーション (3件)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし。Python→ONNX→Rustの全パイプラインが完全動作。Rust推論結果がPython期待値とfloat32精度で一致。
