@@ -384,7 +384,7 @@ struct DataTick {
       "AnomalyDetectorの動作確認: 異常パターン検知とアラート",
       "検証用テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",

@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 18
-**Current Task:** Task 23 — design.md §8 Observability・Pre-Failure Signatureの実装検証
+**Tasks Completed:** 19
+**Current Task:** Task 24 — design.md §6-7 Event Sourcing・分散システム対策の実装検証
 
 ---
 
@@ -641,3 +641,35 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean
 
 **Issues:** なし
+
+### 2026-04-20: Task 23 — design.md §8 Observability・Pre-Failure Signatureの実装検証
+
+**What changed:**
+- `crates/events/src/lib.rs`: §8.1イベント構造検証テスト31件を追加
+  - **EventHeader** (2 tests): 全7フィールドの存在確認、encode/decodeラウンドトリップ
+  - **DecisionEventPayload** (9 tests): strategy_id/action/feature_vector/q値/Thompson Sampling統計/ポジション状態/リスクコンテキスト/regime情報/skip_reason、protoラウンドトリップ
+  - **ExecutionEventPayload** (7 tests): 注文情報/fill詳細/fill確率モデル/Last-Lookモデル/LP情報/reject情報、protoラウンドトリップ
+  - **StateSnapshotPayload** (7 tests): positions/global_position/PnL/LimitState/state_integrity/risk_barriers、protoラウンドトリップ
+  - **Enum完全性** (6 tests): StreamId(4ストリーム)/EventTier(3階層)/StrategyId(3戦略)/ActionType(3行動)/FillStatus(3状態)/RejectReason(OTCシナリオ)
+- `crates/core/src/observability.rs`: §8.2-§8.5検証テスト40件を追加
+  - **§8.2 Pre-Failure Signature** (6 tests): 19指標のカウント・命名確認、as_slice順序一致性、全指標の設定/読み取り、デフォルト設定17/19監視、カスタム設定で全19監視可能
+  - **§8.3 ObservabilityManager** (4 tests): 全19指標の追跡、複数ティックでのアラート蓄積、リセット完全性、detector rolling statsアクセス
+  - **§8.4 構造化ログ** (4 tests): 全ティックでlog_metrics呼び出し、全19フィールドのアクセス可能性、アラートの構造化ログフィールド、severityレベル区別
+  - **§8.5 AnomalyDetector** (10 tests): 全設定metricのrolling stats初期化、rolling stats収束、debounceによる偽陽性防止、複数同時異常検出、warning→criticalエスカレーション、負値の絶対値チェック、window trim、全metric閾値同時テスト、タイムスタンプ一致、monitored_metrics完全性
+  - **E2E** (2 tests): 段階的劣化シナリオ検出、full observability pipeline（normal→anomaly→reset）
+
+**調査結果:**
+- §8.1 EventHeader: 全7フィールド（event_id, parent_event_id, stream_id, sequence_id, timestamp_ns, schema_version, tier）完全実装
+- §8.1 DecisionEventPayload/ExecutionEventPayload/StateSnapshotPayload: design.md §8.1のsimplified版。コアフィールドは全て実装済み。design.mdの一部フィールド（q_tilde_final_values, sigma_model, reward_pnl等）はproto未定義（Engine内部計算のため）
+- §8.2 Pre-Failure Signature: 19指標全てPreFailureMetricsに実装。デフォルトAnomalyConfigは17/19を監視
+- §8.3-§8.5: ObservabilityManager/AnomalyDetector/RollingStats完全実装。構造化ログ出力（tracing）確認
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-core --lib` — 70 passed, 0 failed (40 new §8 tests)
+- `cargo test -p fx-events --lib` — 111 passed, 0 failed (31 new §8.1 tests)
+- `cargo test` — 1342 passed, 1 failed (pre-existing in fx-strategy)
+- `cargo clippy -p fx-core -p fx-events` — no errors
+- `cargo fmt` — applied, `cargo fmt --check` — clean
+
+**Issues:** pre-existing test failure in `bayesian_lr::tests::test_divergence_ratio_no_false_positive` (fx-strategy) — 本タスクとは無関係
