@@ -44,7 +44,7 @@ impl Position {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct LimitStateData {
     pub daily_pnl_mtm: f64,
     pub daily_pnl_realized: f64,

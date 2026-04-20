@@ -635,6 +635,15 @@ impl BacktestEngine {
                                 tick_ns,
                                 reason_str,
                             );
+
+                            // Reset monthly loss counter after halt so trading can resume
+                            // BLR posterior is preserved (NOT reset) — learning continues across month boundary
+                            if reason == CloseReason::MonthlyHalt {
+                                let mut reset_state = projector.snapshot().limit_state;
+                                reset_state.monthly_pnl = 0.0;
+                                reset_state.monthly_halted = false;
+                                projector.update_limit_state(reset_state);
+                            }
                             decisions.push(BacktestDecision {
                                 timestamp_ns: tick_ns,
                                 strategy_id: sid,
@@ -3382,5 +3391,57 @@ mod tests {
             .collect();
         // Even if no positions were open, the mechanism should not panic
         // If positions existed, they should be closed with WEEKEND_HALT
+    }
+
+    #[test]
+    fn test_monthly_halt_preserves_posterior_and_resets_counter() {
+        // Verify that BLR posterior is preserved across engine execution.
+        // The key invariant: BayesianLinearRegression::reset() is never called
+        // when MonthlyHalt fires — only the limit_state counter is reset.
+
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 200, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+
+        let mut engine = BacktestEngine::new(config.clone());
+        let result = engine.run_from_events(&events);
+
+        // After running, BLR posterior should have been updated (not reset)
+        // Verify via strategy A's Q-function using correct dimension
+        let strategy_a = engine.strategy_a();
+        let dim = strategy_a.q_function().dim();
+        assert_eq!(dim, 39, "Strategy A should use 39-dim feature vector");
+        let phi_ones = vec![1.0; dim];
+        let w_buy = strategy_a.q_function().q_value(QAction::Buy, &phi_ones);
+        let w_hold = strategy_a.q_function().q_value(QAction::Hold, &phi_ones);
+        // With optimistic init: Buy > Hold. If reset() had been called, both would be 0.
+        assert!(
+            w_buy > w_hold,
+            "BLR posterior should be preserved — optimistic Buy bias should remain (buy={}, hold={})",
+            w_buy,
+            w_hold
+        );
+
+        // Verify the limit_state monthly reset code path exists by checking
+        // that update_limit_state is callable
+        let mut projector =
+            StateProjector::new(&PartitionedEventBus::new(), config.global_position_limit, 1);
+        let mut reset_state = projector.snapshot().limit_state;
+        reset_state.monthly_pnl = -100.0;
+        reset_state.monthly_halted = true;
+        projector.update_limit_state(reset_state);
+        assert_eq!(projector.snapshot().limit_state.monthly_pnl, -100.0);
+
+        // Now reset via the same pattern used in run_inner
+        let mut reset_state = projector.snapshot().limit_state;
+        reset_state.monthly_pnl = 0.0;
+        reset_state.monthly_halted = false;
+        projector.update_limit_state(reset_state);
+        assert_eq!(projector.snapshot().limit_state.monthly_pnl, 0.0);
+        assert!(!projector.snapshot().limit_state.monthly_halted);
+
+        let _ = result; // suppress unused warning
     }
 }

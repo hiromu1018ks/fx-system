@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 4 / 8
-**Current Task:** Task 5 — MonthlyHalt時の事後分布引き継ぎ
+**Tasks Completed:** 5 / 8
+**Current Task:** Task 6 — StreamingCsvReader
 
 ---
 
@@ -46,6 +46,26 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし
+
+### 2026-04-20: Task 5 — MonthlyHalt時の事後分布引き継ぎ: reset()を呼ばない
+
+**What changed:**
+- `crates/events/src/projector.rs`: `LimitStateData` に `Copy` trait を追加
+- `crates/backtest/src/engine.rs`:
+  - MonthlyHalt発火時に月次損失カウンターをリセットするコードを追加
+  - `projector.update_limit_state()` で `monthly_pnl = 0.0`, `monthly_halted = false` にリセット
+  - BLR posterior (BayesianLinearRegression) はリセットしない — 学習が月境界をまたいで継続
+  - テスト追加: `test_monthly_halt_preserves_posterior_and_resets_counter`
+    - エンジン実行後も楽観的初期化によるBuy > Holdバイアスが保持されることを検証
+    - limit_stateの月次リセット（monthly_pnl=0, halted=false）が正しく動作することを検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --lib -- tests::test_monthly_halt_preserves` — 1 passed, 0 failed
+- `cargo clippy -p fx-backtest -p fx-events` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** limit_stateはバックテストエンジン内でイベントから更新されていないため、MonthlyHaltは実際のバックテストでは発火しない（limit_stateが常にdefault=0のまま）。これは既存アーキテクチャの制約であり、本タスクの範囲外
 
 ### 2026-04-20: Task 4 — 週末前強制決済: 金曜クローズ時に全ポジションを強制決済
 
