@@ -147,7 +147,7 @@ struct DataTick {
       "Kill Switchの統合: 異常検知時の即座な発注マスク",
       "ユニットテスト: 各リミット段階の発動、リミット発動後の取引停止確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

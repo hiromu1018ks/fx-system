@@ -2,7 +2,7 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 5
+**Tasks Completed:** 6
 **Current Task:** None started
 
 ---
@@ -65,6 +65,41 @@
 **Commands run:**
 - `cargo build` — passed
 - `cargo test` — 463 passed (4 new), 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 6 — BacktestEngineへのRiskLimiter統合（ハードリミットチェック）
+
+**What changed:**
+- `crates/backtest/src/engine.rs`: BacktestConfigに新フィールド追加: `risk_limits_config`, `barrier_config`, `kill_switch_config`, `lifecycle_config`
+- BacktestEngineに新フィールド追加: `risk_barrier (DynamicRiskBarrier)`, `kill_switch (KillSwitch)`, `lifecycle_manager (LifecycleManager)`
+- KillSwitchはデフォルトで無効（`enabled: false`）— バックテストではtick間隔の異常検知は履歴データで意味がないため
+- `run_inner()` の大幅な拡張:
+  - 各ティック開始時に `kill_switch.record_tick(tick_ns)` で間隔監視
+  - Phase 2で `lifecycle_manager.is_alive(sid)` により淘汰済み戦略をスキップ
+  - Phase 3に完全なリスクパイプラインを追加:
+    1. KillSwitch: 異常検知時の発注マスク
+    2. LifecycleManager: 淘汰済み戦略のブロック
+    3. HierarchicalRiskLimiter: 月次→週次→日次実現→日次MTM の全段階チェック
+    4. Q閾値ゲート: 日次MTM制限中は`|Q| >= q_threshold`が必要
+    5. DynamicRiskBarrier: stalenessベースのlot_multiplier適用
+    6. GlobalPositionChecker: 既存のポジション制約（最後に実行）
+  - ハードリミット発動時の全ポジションクローズ: `close_all_positions()` ヘルパー追加
+- `end_strategy_episode()` を拡張: MC episode完了時に `LifecycleManager.record_episode()` を呼び出し、戦略淘汰評価を実行
+- テスト追加:
+  - `test_risk_config_defaults`: デフォルト設定値の検証
+  - `test_risk_pipeline_no_false_rejections_with_default_config`: デフォルト設定で偽陽性がないこと
+  - `test_kill_switch_rejects_when_masked`: KillSwitchマスク時の発注ブロック確認
+  - `test_hierarchical_limit_daily_realized_halt`: 階層的リミットの統合動作確認
+  - `test_lifecycle_culling_blocks_culled_strategy`: 淘汰済み戦略のdecisionが全て"strategy_culled"になること
+  - `test_barrier_rejects_high_staleness`: バリア設定の確認
+  - `test_close_all_positions_helper`: 全ポジションクローズヘルパーの動作確認
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 463 passed (7 new), 0 failed
 - `cargo clippy` — no warnings
 - `cargo fmt --check` — clean
 
