@@ -843,4 +843,105 @@ mod tests {
         let snap = mgr.snapshot(2_000_000_000_000);
         assert_eq!(snap.slippage_variance, 0.0); // need >= 2 observations
     }
+
+    // ============================================================
+    // §4.2 LP Recalibration Protocol — Conformance Tests
+    // ============================================================
+    // Design §9.6: LP switch → safe mode 25% lot + 2x σ_execution
+    //              → parameter re-estimation (β₁, β₂, slippage dist, fill rate)
+    //              → completion when error < threshold
+    //              → Thompson Sampling coordination (natural conservative behavior)
+
+    #[test]
+    fn s42_recal_safe_mode_lot_25_percent() {
+        let mgr = LpRecalibrationManager::new(RecalibrationConfig::default());
+        assert_eq!(mgr.config().safe_mode_lot_multiplier, 0.25);
+    }
+
+    #[test]
+    fn s42_recal_safe_mode_sigma_doubled() {
+        let mgr = LpRecalibrationManager::new(RecalibrationConfig::default());
+        assert_eq!(mgr.config().safe_mode_sigma_multiplier, 2.0);
+    }
+
+    #[test]
+    fn s42_recal_multipliers_normal_when_idle() {
+        let mgr = LpRecalibrationManager::new(RecalibrationConfig::default());
+        assert_eq!(mgr.lot_multiplier(), 1.0);
+        assert_eq!(mgr.sigma_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn s42_recal_multipliers_reduced_in_safe_mode() {
+        let mut mgr = LpRecalibrationManager::new(default_config());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+        assert_eq!(mgr.lot_multiplier(), 0.25);
+        assert_eq!(mgr.sigma_multiplier(), 2.0);
+    }
+
+    #[test]
+    fn s42_recal_multipliers_restored_after_completion() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig {
+            min_recalibration_observations: 2,
+            max_recalibration_duration_ns: 100_000_000_000,
+            ..Default::default()
+        });
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+        mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000);
+        mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_001);
+        mgr.check_completion(1_000_000_000_000 + 101_000_000_000);
+        assert_eq!(mgr.lot_multiplier(), 1.0);
+        assert_eq!(mgr.sigma_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn s42_recal_observes_only_target_lp() {
+        let mut mgr = LpRecalibrationManager::new(default_config());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw); // target = LP_BACKUP
+
+        mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000);
+        mgr.record_fill("LP_PRIMARY", 0.0001, 0.0001, 1_000_000_000_000); // ignored
+        mgr.record_rejection("LP_BACKUP", 1_000_000_000_001);
+        mgr.record_rejection("LP_PRIMARY", 1_000_000_000_001); // ignored
+
+        assert_eq!(mgr.observations, 2); // only LP_BACKUP observations
+        assert_eq!(mgr.fill_count, 1);
+        assert_eq!(mgr.reject_count, 1);
+    }
+
+    #[test]
+    fn s42_recal_completion_requires_min_observations() {
+        let mut mgr = LpRecalibrationManager::new(default_config());
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        // Only 5 observations (below min=10)
+        for i in 0..5u64 {
+            mgr.record_fill("LP_BACKUP", 0.0001, 0.0001, 1_000_000_000_000 + i);
+        }
+        assert!(!mgr.check_completion(2_000_000_000_000));
+    }
+
+    #[test]
+    fn s42_recal_forced_completion_at_max_duration() {
+        let mut mgr = LpRecalibrationManager::new(RecalibrationConfig {
+            min_recalibration_observations: 5,
+            max_recalibration_duration_ns: 100_000_000_000,
+            ..Default::default()
+        });
+        let gw = make_gateway();
+        enter_safe_mode(&mut mgr, &gw);
+
+        for i in 0..5u64 {
+            // Poor convergence (observed >> predicted)
+            mgr.record_fill("LP_BACKUP", 0.01, 0.0001, 1_000_000_000_000 + i);
+        }
+        // Not completed yet (poor convergence)
+        assert!(!mgr.check_completion(1_000_000_000_100));
+        // Force complete at max duration
+        assert!(mgr.check_completion(1_000_000_000_000 + 101_000_000_000));
+    }
 }

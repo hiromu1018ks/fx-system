@@ -417,4 +417,98 @@ mod tests {
         mon.record_rejection("lp2");
         assert_eq!(mon.all_lp_states().len(), 2);
     }
+
+    // ============================================================
+    // §4.2 LP Behavior Adaptation Risk Monitoring — Conformance Tests
+    // ============================================================
+    // Design: fill_rate statistically significant decline → adversarial signal → automatic LP switch
+
+    #[test]
+    fn s42_lp_fill_rate_decline_triggers_adversarial() {
+        let mut mon = make_monitor(vec!["lp1", "lp2"]);
+        // Drive fill rate down below adversarial threshold (0.5)
+        for _ in 0..50 {
+            mon.record_rejection("lp1");
+        }
+        let state = mon.get_lp_state("lp1").unwrap();
+        assert!(state.fill_rate_ema < 0.5);
+
+        let signal = mon.check_adversarial();
+        assert!(signal.is_some());
+        assert_eq!(signal.unwrap().from_lp_id, "lp1");
+        assert!(mon.get_lp_state("lp1").unwrap().is_adversarial);
+    }
+
+    #[test]
+    fn s42_lp_consecutive_rejections_trigger_adversarial() {
+        let mon = LpRiskMonitor::new(
+            LpMonitorConfig {
+                ema_alpha: 0.2,
+                adversarial_threshold: 0.1, // very low, won't trigger via EMA
+                recovery_threshold: 0.8,
+                min_observations: 10,
+                max_consecutive_rejections: 3,
+            },
+            vec!["lp1".into(), "lp2".into()],
+        );
+        let mut mon = mon;
+        // First get min observations
+        for _ in 0..10 {
+            mon.record_fill("lp1");
+        }
+        // Then consecutive rejections
+        for _ in 0..3 {
+            mon.record_rejection("lp1");
+        }
+        let signal = mon.check_adversarial();
+        assert!(signal.is_some());
+        assert_eq!(signal.unwrap().reason, "consecutive rejections");
+    }
+
+    #[test]
+    fn s42_lp_switch_skips_adversarial_lps() {
+        let mut mon = make_monitor(vec!["lp1", "lp2", "lp3"]);
+        for _ in 0..50 {
+            mon.record_rejection("lp1");
+        }
+        let _ = mon.check_adversarial();
+        assert_eq!(mon.active_lp_id(), "lp2");
+
+        // Also make lp2 adversarial
+        for _ in 0..50 {
+            mon.record_rejection("lp2");
+        }
+        let _ = mon.check_adversarial();
+        // Should skip lp2 (adversarial) and go to lp3
+        assert_eq!(mon.active_lp_id(), "lp3");
+    }
+
+    #[test]
+    fn s42_lp_recovery_detected() {
+        let mut mon = make_monitor(vec!["lp1", "lp2"]);
+        // Make adversarial
+        for _ in 0..50 {
+            mon.record_rejection("lp1");
+        }
+        let _ = mon.check_adversarial();
+        assert!(mon.get_lp_state("lp1").unwrap().is_adversarial);
+
+        // Switch back to lp1 and recover
+        mon.set_active_lp("lp1");
+        for _ in 0..100 {
+            mon.record_fill("lp1");
+        }
+        let _ = mon.check_adversarial();
+        assert!(!mon.get_lp_state("lp1").unwrap().is_adversarial);
+    }
+
+    #[test]
+    fn s42_lp_min_observations_prevents_false_positive() {
+        let mut mon = make_monitor(vec!["lp1", "lp2"]);
+        // Only 5 rejections (below min_observations=10)
+        for _ in 0..5 {
+            mon.record_rejection("lp1");
+        }
+        assert!(mon.check_adversarial().is_none());
+    }
 }

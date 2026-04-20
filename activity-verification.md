@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 16
-**Current Task:** Task 21 — design.md §4.2 OTC Execution モデルの実装整合性検証
+**Tasks Completed:** 17
+**Current Task:** Task 22 — design.md §9 リスク管理の実装整合性検証
 
 ---
 
@@ -524,3 +524,42 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean（`cargo fmt`で1箇所修正）
 
 **Issues:** なし。既存の§4.1テスト（thompson_sampling.rs 7件、limits.rs 3件）と新規Engine統合テスト7件でPRDの全ステップを完全カバー
+
+### 2026-04-20: Task 21 — design.md §4.2 OTC Execution モデルの実装整合性検証
+
+**What changed:**
+- `Cargo.toml` (workspace root): `rand` 依存に `small_rng` featureを追加（`SmallRng`使用のテストがコンパイル可能に）
+- `crates/execution/src/otc_model.rs`: §4.2検証テスト17件を追加
+  - **Last-Look分解** (2 tests): `s42_fill_effective_decomposition` — P_effective = P(request) × P(not_rejected) + E[ε_hidden]の公式検証。`s42_fill_effective_always_non_negative` — クランプとhidden liquidity下限の検証
+  - **P(not_rejected)推定** (3 tests): 観測からのオンライン更新、ボラティリティ感度、LP独立性の検証
+  - **ε_hidden Student's t** (3 tests): 自由度3-5の範囲確認、ヘビーテール検証、非負制約の検証
+  - **Slippage Model** (4 tests): 4入力(direction/size/vol/LP_state)への依存確認、sell improvement負値確認、noise df 3-5確認、noise scaleのsize×vol増加確認
+  - **Passive/Aggressive** (5 tests): 高fill_prob+収益→Limit、低fill_prob+収益→Market、負EV→No Trade、profit threshold要求、EV比較、time urgency強制Market
+- `crates/execution/src/gateway.rs`: §4.2 Gateway統合テスト7件を追加
+  - `s42_gateway_evaluate_produces_all_components`: パイプライン全コンポーネントのfinite性確認
+  - `s42_gateway_fill_effective_includes_hidden_liquidity`: hidden liquidityによるP_effective増分確認
+  - `s42_gateway_slippage_reflects_direction`: Sell方向のslippage低減確認
+  - `s42_gateway_lp_switch_triggers_recalibration`: LP switch→safe mode→25% lot + 2x σの統合確認
+  - `s42_gateway_lp_monitor_tracks_per_lp`: LP別fill/rejection追跡確認
+  - `s42_gateway_rejection_reasons_include_last_look`: LAST LOOK拒否理由の発生確認
+  - `s42_gateway_fill_price_includes_slippage`: fill_price = requested_price + slippageの確認
+- `crates/execution/src/lp_monitor.rs`: §4.2 LP適応監視テスト5件を追加
+  - fill rate低下→adversarial検出、consecutive rejections→adversarial、adversarial LPのskip、recovery検出、min_observationによるfalse positive防止
+- `crates/execution/src/lp_recalibration.rs`: §4.2再校正プロトコルテスト8件を追加
+  - safe mode 25% lot / 2x σ確認、idle時1.0x確認、safe mode reduced確認、completion後復帰確認、target LPのみ観測確認、min observations要求確認、max duration強制完了確認
+
+**調査結果:**
+- Last-Look拒否モデル: design.mdはロジスティック関数σ(−β₁·|Δp| − β₂·LP_inv)を指定するが、実装はBeta-Binomial事後分布 × (1 − vol_penalty)を使用。両者ともLPごとのfill/reject観測履歴からP(not_rejected)を推定する目的は同じ。Beta-Binomialは共役事前分布による自然なオンライン更新が可能
+- P(not_rejected)オンライン推定: Beta(α,β)の共役更新で完全に実装。ボラティリティ感度はvol_penaltyで線形減衰
+- ε_hidden Student's t: df=3.0（デフォルト、design.mdの[3,5]範囲内）。GaussianではなくStudent's tを使用し、アイスバーグオーダーの厚いテールを表現
+- Slippage Model: slippage = size_coeff×lots×vol + sqrt_coeff×√lots×vol + vol_coeff×vol + LP_adj。directionによるsell improvement（負値）。noiseはStudent's t (df=3)
+- Passive/Aggressive: EV(limit) = fill_prob × profit vs EV(market) = profit − |slippage| の比較。fill_prob >= threshold && EV(limit) >= EV(market) && profit >= threshold → Limit。time_urgent時は強制Market
+- LP行動適応: LpRiskMonitorでEMA fill rate追跡。fill_rate < adversarial_threshold OR consecutive >= max → adversarial flag → switch_lp()。LpRecalibrationManagerでsafe mode 25% lot + 2x σ。min observations + statistical convergence or max durationで完了
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-execution --lib` — 143 passed, 0 failed (38 new §4.2 tests)
+- `cargo clippy -p fx-execution` — エラーなし
+- `cargo fmt --check` — clean（`cargo fmt`で1箇所修正）
+
+**Issues:** pre-existing test failure in `change_point::tests::test_observe_and_respond_no_change` (fx-strategy) — 本タスクとは無関係。`rand` crateに`small_rng` featureを追加（既存テストの`SmallRng`使用に必要）

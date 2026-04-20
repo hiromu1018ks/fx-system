@@ -801,4 +801,117 @@ mod tests {
         let r2 = gw.simulate_execution(&req, &mut rng).unwrap();
         assert_ne!(r1.order_id, r2.order_id);
     }
+
+    // ============================================================
+    // §4.2 OTC Execution Model — Gateway Integration Tests
+    // ============================================================
+
+    #[test]
+    fn s42_gateway_evaluate_produces_all_components() {
+        let mut gw = make_gateway();
+        let req = make_request();
+        let eval = gw.evaluate(&req).unwrap();
+        // Verify all components of the OTC pipeline are populated
+        assert!(!eval.lp_id.is_empty());
+        assert!(eval.effective_fill_probability > 0.0);
+        assert!(eval.effective_fill_probability <= 1.0);
+        assert!(eval.expected_slippage.is_finite());
+        assert!(eval.last_look_fill_prob > 0.0);
+        assert!(eval.last_look_fill_prob <= 1.0);
+        assert!(eval.fill_probability > 0.0);
+    }
+
+    #[test]
+    fn s42_gateway_fill_effective_includes_hidden_liquidity() {
+        // P_effective = P(request) × P(not_rejected) + E[ε_hidden]
+        // With default config: hidden_liquidity_loc = 0.02
+        // So even with P(request)=0.98 and P(not_rejected)=0.9: 0.98*0.9 + 0.02 = 0.902
+        // Without hidden liquidity: 0.98*0.9 = 0.882
+        let mut gw = make_gateway();
+        let req = make_request();
+        let eval = gw.evaluate(&req).unwrap();
+        let p_request = gw
+            .fill_prob_model()
+            .request_fill_probability(eval.order_type, eval.limit_price_distance);
+        let p_no_hidden = p_request * eval.last_look_fill_prob;
+        assert!(eval.effective_fill_probability > p_no_hidden);
+    }
+
+    #[test]
+    fn s42_gateway_slippage_reflects_direction() {
+        let mut gw = make_gateway();
+        let buy_req = make_request();
+        let mut sell_req = make_request();
+        sell_req.direction = Direction::Sell;
+
+        let buy_eval = gw.evaluate(&buy_req).unwrap();
+        let sell_eval = gw.evaluate(&sell_req).unwrap();
+        // Sell should have lower slippage (improvement)
+        assert!(sell_eval.expected_slippage < buy_eval.expected_slippage);
+    }
+
+    #[test]
+    fn s42_gateway_lp_switch_triggers_recalibration() {
+        let mut gw = make_gateway();
+        // Drive LP_PRIMARY adversarial
+        for _ in 0..50 {
+            gw.process_rejection("LP_PRIMARY", "LAST_LOOK");
+        }
+        let signal = gw.check_lp_switch();
+        assert!(signal.is_some());
+        // Safe mode should be active
+        assert!(gw.is_recalibrating());
+        assert_eq!(gw.recalibration_lot_multiplier(), 0.25);
+        assert_eq!(gw.recalibration_sigma_multiplier(), 2.0);
+    }
+
+    #[test]
+    fn s42_gateway_lp_monitor_tracks_per_lp() {
+        let mut gw = make_gateway();
+        gw.process_fill("LP_PRIMARY", 0.0001);
+        gw.process_fill("LP_PRIMARY", 0.0002);
+        gw.process_rejection("LP_PRIMARY", "LAST_LOOK");
+
+        let state = gw.lp_monitor().get_lp_state("LP_PRIMARY").unwrap();
+        assert_eq!(state.total_requests, 3);
+        assert_eq!(state.total_fills, 2);
+        assert_eq!(state.total_rejections, 1);
+    }
+
+    #[test]
+    fn s42_gateway_rejection_reasons_include_last_look() {
+        let mut gw = make_gateway();
+        let req = make_request();
+        let mut rng = seeded_rng();
+        let mut has_last_look = false;
+        for _ in 0..200 {
+            let result = gw.simulate_execution(&req, &mut rng).unwrap();
+            if !result.filled {
+                if result.reject_reason.as_deref() == Some("LAST_LOOK") {
+                    has_last_look = true;
+                    break;
+                }
+            }
+        }
+        // With enough simulations, should see at least one LAST_LOOK rejection
+        assert!(
+            has_last_look,
+            "Expected at least one LAST_LOOK rejection in 200 simulations"
+        );
+    }
+
+    #[test]
+    fn s42_gateway_fill_price_includes_slippage() {
+        let mut gw = make_gateway();
+        let req = make_request();
+        let mut rng = seeded_rng();
+        for _ in 0..50 {
+            let result = gw.simulate_execution(&req, &mut rng).unwrap();
+            if result.filled {
+                // Buy: fill_price = requested_price + slippage
+                let expected = result.requested_price + result.slippage;
+                assert!((result.fill_price - expected).abs() < 1e-10);
+            }
+        }
+    }
 }

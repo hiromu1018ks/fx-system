@@ -355,7 +355,7 @@ struct DataTick {
       "LP行動適応リスク監視の確認: fill率低下 → adversarial signal → 自動LP切り替え",
       "検証用テストを追加"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
