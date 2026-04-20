@@ -195,7 +195,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "テスト: ONNXモデルなしで既存テスト全通過 (後方互換)",
       "テスト: ONNXモデルありでregime推論が行われる"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "integration",
@@ -206,7 +206,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "テスト: ONNXモデルなしで既存テスト全通過",
       "テスト: ONNXモデルありでフォワードテストが正常完了"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",

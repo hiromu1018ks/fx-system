@@ -272,6 +272,7 @@ fn make_forward_config(strategies: &[&str], speed: f64) -> fx_forward::config::F
             max_drawdown: 1000.0,
         },
         comparison_config: None,
+        regime_config: fx_strategy::regime::RegimeConfig::default(),
     }
 }
 

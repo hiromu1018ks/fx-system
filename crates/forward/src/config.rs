@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::feed::DataSourceConfig;
+use fx_strategy::regime::RegimeConfig;
 
 /// Forward test configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +19,9 @@ pub struct ForwardTestConfig {
     pub report_config: ReportConfig,
     pub risk_config: ForwardRiskConfig,
     pub comparison_config: Option<ComparisonConfig>,
+    /// Regime detection configuration. If model_path is Some, ONNX inference is used.
+    #[serde(default)]
+    pub regime_config: RegimeConfig,
 }
 
 /// Alert configuration.
@@ -96,6 +100,7 @@ impl Default for ForwardTestConfig {
                 max_drawdown: 1000.0,
             },
             comparison_config: None,
+            regime_config: RegimeConfig::default(),
         }
     }
 }

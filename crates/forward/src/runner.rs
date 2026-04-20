@@ -18,6 +18,7 @@ use fx_risk::limits::HierarchicalRiskLimiter;
 use fx_strategy::change_point::ChangePointDetector;
 use fx_strategy::extractor::FeatureExtractor;
 use fx_strategy::features::FeatureVector;
+use fx_strategy::regime::RegimeCache;
 use fx_strategy::thompson_sampling::ThompsonSamplingPolicy;
 use prost::Message;
 use rand::rngs::SmallRng;
@@ -97,6 +98,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         let limits_config = fx_risk::limits::RiskLimitsConfig::default();
         let position_config = fx_risk::global_position::GlobalPositionConfig::default();
         let kill_switch = KillSwitch::new(fx_risk::kill_switch::KillSwitchConfig::default());
+        let mut regime_cache = RegimeCache::new(self.config.regime_config.clone());
 
         let mut total_ticks: u64 = 0;
         let mut total_decisions: u64 = 0;
@@ -144,7 +146,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             // Collect pre-failure metrics for observability (design.md §8.2)
             let metrics = PreFailureMetrics {
                 rolling_variance_latency: kill_switch.stats().std_interval_ns,
-                regime_posterior_entropy: 0.0,
+                regime_posterior_entropy: regime_cache.state().entropy(),
                 daily_pnl_vs_limit: if limits_config.max_daily_loss_mtm.abs() > f64::EPSILON {
                     snapshot.limit_state.daily_pnl_mtm / limits_config.max_daily_loss_mtm.abs()
                 } else {
@@ -196,6 +198,50 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             }
 
             feature_extractor.process_market_event(&market_event);
+
+            // Update regime detection (ONNX model if available, otherwise heuristic)
+            {
+                let base_features =
+                    feature_extractor.extract(&market_event, &snapshot, StrategyId::A, tick_ns);
+                let n_regimes = regime_cache.config().n_regimes;
+                let feature_dim = regime_cache.config().feature_dim;
+
+                if regime_cache.has_onnx_model() {
+                    let phi = base_features.flattened();
+                    if let Some(posterior) = regime_cache.predict_onnx(&phi) {
+                        regime_cache.update(posterior, tick_ns);
+                        if phi.len() == feature_dim {
+                            regime_cache.update_drift(&phi);
+                        }
+                    }
+                } else {
+                    let spread_z = base_features.spread_zscore.abs();
+                    let rv = base_features.realized_volatility;
+                    let vol_ratio = base_features.volatility_ratio;
+
+                    let calm_score = -(spread_z + rv * 10.0 + vol_ratio * 2.0);
+                    let normal_score = -((spread_z - 1.0).abs()
+                        + (rv - 0.01).abs() * 10.0
+                        + (vol_ratio - 1.0).abs() * 2.0);
+                    let turbulent_score = -((spread_z - 2.0).abs()
+                        + (rv - 0.03).abs() * 10.0
+                        + (vol_ratio - 2.0).abs() * 2.0);
+                    let crisis_score = -(spread_z - 3.0).abs()
+                        - (rv - 0.05).abs() * 10.0
+                        - (vol_ratio - 3.0).abs() * 2.0;
+
+                    let mut scores = vec![calm_score, normal_score, turbulent_score, crisis_score];
+                    scores.resize(n_regimes, 0.0);
+
+                    let max_score = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let exp_scores: Vec<f64> =
+                        scores.iter().map(|s| (s - max_score).exp()).collect();
+                    let sum_exp: f64 = exp_scores.iter().sum();
+                    let posterior: Vec<f64> = exp_scores.iter().map(|e| e / sum_exp).collect();
+
+                    regime_cache.update(posterior, tick_ns);
+                }
+            }
 
             for &strategy_id in &enabled_strategies {
                 let features =
@@ -486,6 +532,7 @@ mod tests {
                 max_drawdown: 1000.0,
             },
             comparison_config: None,
+            regime_config: fx_strategy::regime::RegimeConfig::default(),
         }
     }
 

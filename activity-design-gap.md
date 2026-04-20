@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 10
-**Current Task:** Task 11 — バックテスト ONNX Regime切替
+**Tasks Completed:** 12
+**Current Task:** Task 13 — 統計的検証パイプラインE2E確認
 
 ---
 
@@ -259,3 +259,43 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし。Python→ONNX→Rustの全パイプラインが完全動作。Rust推論結果がPython期待値とfloat32精度で一致。
+
+### 2026-04-20: Task 11 — バックテストエンジンのヒューリスティックRegime → ONNXモデル切替
+
+**What changed:**
+- `crates/backtest/src/engine.rs`: `update_regime()` メソッドの先頭にONNXチェックを追加
+  - `regime_cache.has_onnx_model()` がtrueの場合、`features.flattened()` を `predict_onnx()` に渡して推論
+  - 推論成功時はヒューリスティックをスキップし、ONNX事後確率で `regime_cache.update()` を呼び出し
+  - ONNX不可時または推論失敗時は従来のヒューリスティックにフォールバック
+  - 後方互換: `RegimeConfig::default()` は `model_path: None` なので既存テストは全て通過
+
+**Commands run:**
+- `cargo build -p fx-backtest` — passed
+- `cargo test -p fx-backtest --lib` — 113 passed, 2 failed (事前存在CSVバリデーション)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 12 — フォワードテストのRegime → ONNXモデル切替
+
+**What changed:**
+- `crates/strategy/src/regime.rs`: `RegimeConfig` に `serde::Serialize, serde::Deserialize` を追加、`model_path` に `#[serde(default)]` を追加
+- `crates/forward/src/config.rs`: `ForwardTestConfig` に `regime_config: RegimeConfig` フィールド追加 (defaultでヒューリスティック)
+- `crates/forward/src/runner.rs`: フォワードテストランナーにRegimeCacheを統合
+  - `run()` で `RegimeCache::new(self.config.regime_config.clone())` を初期化
+  - 各ティックで `feature_extractor.extract()` したベース特徴量でregime更新
+  - ONNXモデル利用可能時: `predict_onnx()` で推論、ヒューリスティックをスキップ
+  - ONNXモデル不可時: バックテストエンジンと同じヒューリスティック (calm/normal/turbulent/crisis scoring)
+  - `PreFailureMetrics.regime_posterior_entropy` を `regime_cache.state().entropy()` に接続 (旧: ハードコード0.0)
+- `crates/forward/tests/integration.rs`: `make_forward_config()` に `regime_config` 追加
+- `crates/cli/tests/integration.rs`: `make_forward_config()` に `regime_config` 追加
+
+**Commands run:**
+- `cargo build -p fx-forward` — passed
+- `cargo test -p fx-forward` — 19 passed, 0 failed
+- `cargo test --workspace --no-fail-fast` — 新規テスト全通過、失敗は事前存在CSVバリデーション (3件)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし

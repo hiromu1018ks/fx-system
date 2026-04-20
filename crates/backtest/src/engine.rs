@@ -1436,6 +1436,18 @@ impl BacktestEngine {
         let n_regimes = self.regime_cache.config().n_regimes;
         let feature_dim = self.regime_cache.config().feature_dim;
 
+        // Use ONNX model if available, otherwise fall back to heuristic
+        if self.regime_cache.has_onnx_model() {
+            let phi = features.flattened();
+            if let Some(posterior) = self.regime_cache.predict_onnx(&phi) {
+                self.regime_cache.update(posterior, tick_ns);
+                if phi.len() == feature_dim {
+                    self.regime_cache.update_drift(&phi);
+                }
+                return;
+            }
+        }
+
         // Build lightweight regime scores from key features.
         // Without a trained HDP-HMM model, we use feature-derived heuristics:
         // - Regime 0: Low vol, tight spread (calm)

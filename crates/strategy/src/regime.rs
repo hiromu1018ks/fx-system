@@ -102,13 +102,14 @@ impl OnnxRegimeModel {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RegimeConfig {
     pub n_regimes: usize,
     pub unknown_regime_entropy_threshold: f64,
     pub regime_ar_coeff: f64,
     pub feature_dim: usize,
     /// Path to ONNX regime model file. If Some, ONNX inference is used instead of heuristic.
+    #[serde(default)]
     pub model_path: Option<String>,
 }
 
