@@ -215,7 +215,7 @@ struct DataTick {
       "cargo buildでコンパイル確認、cargo run --bin fx-cli -- --helpで動作確認",
       "ユニットテスト: CLI引数パース、設定ファイル読み込み"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

@@ -1,0 +1,44 @@
+[package]
+name = "fx-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fx-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+fx-backtest = { path = "../backtest" }
+fx-forward = { path = "../forward" }
+fx-core = { path = "../core" }
+fx-events = { path = "../events" }
+fx-strategy = { path = "../strategy" }
+fx-execution = { path = "../execution" }
+fx-risk = { path = "../risk" }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+toml = "0.8"
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

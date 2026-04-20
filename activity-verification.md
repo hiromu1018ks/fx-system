@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 9
-**Current Task:** Task 10 — フルパイプラインバックテストのエンドツーエンドテスト
+**Tasks Completed:** 10
+**Current Task:** Task 12 — CLI backtest サブコマンドの統合
 
 ---
 
@@ -196,5 +196,33 @@
 - `cargo test` — 1098 passed, 0 failed (89 in backtest lib, 5 new)
 - `cargo clippy` — no warnings
 - `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 11 — CLIエントリポイント（crates/cli/）の実装
+
+**What changed:**
+- `crates/cli/` 新規binary crate（fx-cli）を作成
+  - `Cargo.toml`: clap（derive feature）、csv、toml、内部依存（fx-backtest, fx-forward, fx-core, fx-events, fx-strategy, fx-execution, fx-risk）を追加
+  - `src/main.rs`: CLIエントリポイント。backtest/forward-testサブコマンドのルーティング、戦略パース（parse_strategies）、BacktestConfig構築
+  - `src/args.rs`: clap deriveベースの引数定義。BacktestCmd（--data, --config, --output, --strategies）、ForwardTestCmd（--config, --duration, --strategies, --output）
+  - `src/output.rs`: BacktestResult/ForwardTestResultのJSON・CSV出力。BacktestResultJson（シリアライズ用構造体）、TradeCsvRow（トレードCSV用）、write_backtest_result/write_forward_result
+  - `src/config.rs`: TOML設定ファイルからBacktestConfigへの変換（load_backtest_config）
+- `Cargo.toml`（workspace root）: membersに`crates/cli`を追加
+- テスト追加（20件）:
+  - args tests (7): CLI引数パース（backtest minimal/full, forward-test minimal/full, no subcommand fails, missing data fails, version）
+  - config tests (4): TOML読み込み（full, empty defaults, file not found, invalid TOML）
+  - output tests (4): JSON/CSV出力（backtest serializes, write to dir, forward serializes, write to dir）
+  - main tests (5): parse_strategies（single, multiple, case insensitive, unknown fails, empty fails）
+- forward-testサブコマンドは引数パース・設定読み込みまで実装（実行統合はTask 13で対応）
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1123 passed, 0 failed (20 new in fx-cli)
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+- `cargo run --bin fx-cli -- --help` —動作確認OK
+- `cargo run --bin fx-cli -- backtest --help` —動作確認OK
+- `cargo run --bin fx-cli -- forward-test --help` —動作確認OK
 
 **Issues:** なし
