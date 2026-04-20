@@ -41,10 +41,12 @@ pub struct FeatureVector {
     pub obi_x_session: f64,
     pub depth_drop_x_vol_spike: f64,
     pub position_size_x_vol: f64,
+    pub obi_x_vol: f64,
+    pub spread_z_x_self_impact: f64,
 }
 
 impl FeatureVector {
-    pub const DIM: usize = 34;
+    pub const DIM: usize = 36;
 
     pub fn flattened(&self) -> Vec<f64> {
         vec![
@@ -82,6 +84,8 @@ impl FeatureVector {
             self.obi_x_session,
             self.depth_drop_x_vol_spike,
             self.position_size_x_vol,
+            self.obi_x_vol,
+            self.spread_z_x_self_impact,
         ]
     }
 
@@ -124,6 +128,8 @@ impl FeatureVector {
             obi_x_session: values[31],
             depth_drop_x_vol_spike: values[32],
             position_size_x_vol: values[33],
+            obi_x_vol: values[34],
+            spread_z_x_self_impact: values[35],
         })
     }
 
@@ -164,6 +170,8 @@ impl FeatureVector {
             obi_x_session: 0.0,
             depth_drop_x_vol_spike: 0.0,
             position_size_x_vol: 0.0,
+            obi_x_vol: 0.0,
+            spread_z_x_self_impact: 0.0,
         }
     }
 }

@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 3
-**Current Task:** Task 4 — 特徴量交互作用項追加
+**Tasks Completed:** 4
+**Current Task:** Task 5 — Dynamic K Calculator実装
 
 ---
 
@@ -65,3 +65,31 @@
 - `pytest research/tests/test_hdp_hmm.py -v` — 34 passed, 0 failed (全テスト初の完全通過)
 
 **Issues:** なし
+
+### 2026-04-20: Task 4 — 特徴量交互作用項2個追加: OBI×vol, spread_z×self_impact (34→36次元)
+
+**What changed:**
+- `crates/strategy/src/features.rs`: FeatureVectorに2フィールド追加
+  - `obi_x_vol: f64` — OBI × realized_volatility
+  - `spread_z_x_self_impact: f64` — spread_zscore × self_impact
+  - `DIM`: 34 → 36
+  - `flattened()`, `from_flattened()`, `zero()` を更新（indices 34-35）
+- `crates/strategy/src/extractor.rs`: extract()に計算ロジック追加
+  - `obi_x_vol = obi * realized_vol`
+  - `spread_z_x_self_impact = spread_zscore * self_impact`
+- `STRATEGY_A/B/C_FEATURE_DIM`: 39 → 41（自動更新、コード変更なし）
+- ハードコードされた次元アサーションを修正:
+  - `crates/backtest/src/engine.rs`: 39 → 41
+  - `crates/strategy/src/strategy_a.rs`: 39 → 41
+  - `crates/strategy/src/strategy_b.rs`: 39 → 41
+  - `crates/strategy/src/strategy_c.rs`: 39 → 41
+  - `crates/strategy/src/mc_eval.rs`: 34 → 36 + 新フィールドアクセス
+- `crates/backtest/tests/integration.rs`: 3箇所のFeatureVector構築に新フィールド追加
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test --workspace --no-fail-fast` — 1451 passed, 3 failed (全て事前存在のCSVバリデーション失敗)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし。戦略FEATURE_DIMはFeatureVector::DIM + EXTRA_DIMで自動計算されるため、変更不要

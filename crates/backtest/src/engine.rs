@@ -373,11 +373,7 @@ impl BacktestEngine {
 
     /// Process a batch of events, returning partial results.
     /// Engine state (BLR posteriors, positions, regime) is preserved across batches.
-    fn process_batch(
-        &mut self,
-        events: &[GenericEvent],
-        is_first: bool,
-    ) -> BacktestResult {
+    fn process_batch(&mut self, events: &[GenericEvent], is_first: bool) -> BacktestResult {
         if is_first {
             // First batch: use full run_inner for initialization
             let wall_start = Instant::now();
@@ -1273,7 +1269,7 @@ impl BacktestEngine {
         }
     }
 
-    /// Extract strategy-specific feature vector (39-dim including strategy extras).
+    /// Extract strategy-specific feature vector (41-dim including strategy extras).
     fn extract_strategy_features(&self, sid: StrategyId, base: &FeatureVector) -> Vec<f64> {
         match sid {
             StrategyId::A => self.strategy_a.extract_features(base),
@@ -3543,7 +3539,7 @@ mod tests {
         // Verify via strategy A's Q-function using correct dimension
         let strategy_a = engine.strategy_a();
         let dim = strategy_a.q_function().dim();
-        assert_eq!(dim, 39, "Strategy A should use 39-dim feature vector");
+        assert_eq!(dim, 41, "Strategy A should use 41-dim feature vector");
         let phi_ones = vec![1.0; dim];
         let w_buy = strategy_a.q_function().q_value(QAction::Buy, &phi_ones);
         let w_hold = strategy_a.q_function().q_value(QAction::Hold, &phi_ones);

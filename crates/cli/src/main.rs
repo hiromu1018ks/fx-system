@@ -45,8 +45,12 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
 
     let start = std::time::Instant::now();
     let mut engine = fx_backtest::engine::BacktestEngine::new(config);
-    let result = engine.run_from_stream_file(&cmd.data)
-        .with_context(|| format!("Failed to run streaming backtest from: {}", cmd.data.display()))?;
+    let result = engine.run_from_stream_file(&cmd.data).with_context(|| {
+        format!(
+            "Failed to run streaming backtest from: {}",
+            cmd.data.display()
+        )
+    })?;
     let elapsed = start.elapsed();
 
     let total_trades = result.trades.len();

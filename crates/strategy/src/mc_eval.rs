@@ -1523,8 +1523,12 @@ mod tests {
         let _ = fv.spread_z_x_vol;
         let _ = fv.position_size_x_vol;
 
+        // Additional interaction terms: indices 34-35
+        let _ = fv.obi_x_vol;
+        let _ = fv.spread_z_x_self_impact;
+
         // Verify flattened length is exactly DIM
-        assert_eq!(flat.len(), 34);
+        assert_eq!(flat.len(), 36);
     }
 
     /// Verify FeatureVector roundtrip preserves all fields,

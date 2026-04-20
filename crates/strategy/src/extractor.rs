@@ -544,6 +544,8 @@ impl FeatureExtractor {
                 0.0
             };
         let position_size_x_vol = position_size.abs() * realized_vol;
+        let obi_x_vol = obi * realized_vol;
+        let spread_z_x_self_impact = spread_zscore * self_impact;
 
         FeatureVector {
             spread,
@@ -580,6 +582,8 @@ impl FeatureExtractor {
             obi_x_session,
             depth_drop_x_vol_spike,
             position_size_x_vol,
+            obi_x_vol,
+            spread_z_x_self_impact,
         }
     }
 

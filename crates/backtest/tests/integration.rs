@@ -214,6 +214,8 @@ fn make_liquididity_shock_features() -> FeatureVector {
         obi_x_session: 0.8,
         depth_drop_x_vol_spike: -0.5 * 5.0,
         position_size_x_vol: 0.0,
+        obi_x_vol: 0.8 * 0.15,
+        spread_z_x_self_impact: 5.0 * 0.00001,
     }
 }
 
@@ -254,6 +256,8 @@ fn make_volatility_decay_features() -> FeatureVector {
         obi_x_session: 0.3,
         depth_drop_x_vol_spike: -0.1 * 3.5,
         position_size_x_vol: 0.0,
+        obi_x_vol: 0.3 * 0.08,
+        spread_z_x_self_impact: 1.5 * 0.00001,
     }
 }
 
@@ -294,6 +298,8 @@ fn make_session_bias_features() -> FeatureVector {
         obi_x_session: 0.4,
         depth_drop_x_vol_spike: -0.05 * 1.5,
         position_size_x_vol: 0.0,
+        obi_x_vol: 0.4 * 0.05,
+        spread_z_x_self_impact: 1.0 * 0.00001,
     }
 }
 

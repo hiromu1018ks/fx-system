@@ -102,7 +102,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "戦略A/B/Cの FEATURE_DIM と EXTRA_DIM 定数を更新 (+2)",
       "既存テストが通ることを確認 (cargo test -p fx-strategy)"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

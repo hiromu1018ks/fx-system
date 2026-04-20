@@ -696,7 +696,7 @@ mod tests {
         let strategy = StrategyB::new(make_config());
         let phi = strategy.extract_features(&make_zero_features());
         assert_eq!(phi.len(), STRATEGY_B_FEATURE_DIM);
-        assert_eq!(phi.len(), 39);
+        assert_eq!(phi.len(), 41);
     }
 
     #[test]
