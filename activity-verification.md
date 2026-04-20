@@ -393,3 +393,31 @@ Python側（research/bridge/）:
 - `cargo fmt --check` — clean
 
 **Issues:** V_max (velocity制約、design.md §3.0/§9)が実装されていない。design.mdに3箇所で参照されるが、コードベース全体に実装なし。これは本検証タスクの範囲外（新規機能実装が必要）のため、別タスクとして記録
+
+### 2026-04-20: Task 17 — design.md §3.0.1 Q関数アーキテクチャの実装整合性検証
+
+**What changed:**
+- `crates/strategy/src/thompson_sampling.rs`: §3.0.1 Q関数アーキテクチャ検証テスト6件を追加:
+  - `test_q_arch_feature_pipeline_all_categories`: FeatureVector 34次元の全カテゴリ（一次項16、ポジション状態4、非線形項6、交互作用項4）の構成検証
+  - `test_q_arch_adaptive_noise_ema_convergence`: 適応ノイズ分散のEMA収束検証。500ステップ後、sigma2_noiseが真のノイズ分散に向けて収束することを確認
+  - `test_q_arch_bayesian_regularization_prior`: λ_reg事前分布による重み制約の検証。初期予測はゼロ（事前分布中心）、更新後も正則化により重みが過大にならないことを確認
+  - `test_q_arch_divergence_detection_works`: 発散監視の正常動作検証。閾値2.0で正常更新が発散と判定されないことを確認
+  - `test_q_arch_posterior_penalty_components`: Q_tilde_finalのペナルティ成分検証。self_impact、dynamic_cost、k*sigma_non_model、latency_penaltyが正しく計算されること、Holdにペナルティが適用されないことを確認
+  - `test_q_arch_sigma_model_excluded_from_point_estimates`: σ_modelが点推定に含まれないことの検証。q_point()が決定的であること、ThompsonDecision.q_pointがQFunction.q_pointと一致することを確認
+
+**調査結果:**
+- 統一特徴量パイプライン: FeatureVector 34次元に一次項・ポジション状態・非線形変換項・交互作用項の全カテゴリを実装。各戦略は+5次元拡張
+- 適応ノイズ分散: EMA(halflife=500)で二乗残差を平滑化。alpha = 1 - exp(-ln2/halflife)。sigma2_noise = max(residual_var_ema, 1e-10)
+- On-policy + MC: Task 16で検証済み。実行行動のみ記録、完全エピソード返却（非ブートストラップ）
+- Deadly Triad回避: On-policy + MC + λ_reg事前分布の3本柱で構造的に回避
+- Thompson Sampling唯一のσ_model反映経路: predict()=ŵ·φ（σ_modelなし）、sample_predict()=w̃·φ（σ_model経由事後サンプリング）
+- 発散監視: ||w_t||/||w_{t-1}|| > 2.0（デフォルト）。最初の5観測はスキップ
+- 事後ペナルティ: Q̃_final = Q̃_raw - self_impact - dynamic_cost - k·σ_noise - latency_penalty。σ_modelは含まれない。σ_non_modelの実装はdesign.mdの`sqrt(σ_exec² + σ_latency²)`の代わりにBLRの適応ノイズ分散`sqrt(sigma2_noise)`を使用（意図的な簡略化）
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 全crate通過（fx-strategy: 484 passed, 6 new Q-arch tests）
+- `cargo clippy` — dead_code warnings only（既存）
+- `cargo fmt --check` — clean
+
+**Issues:** なし。σ_non_modelの実装がdesign.mdと異なる（BLR residual noise vs execution+latency分解）が、コードコメントで意図的であることが明記されている

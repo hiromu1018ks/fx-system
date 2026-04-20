@@ -301,7 +301,7 @@ struct DataTick {
       "発散監視 ||w_t||/||w_{t-1}|| > 2.0 の実装確認",
       "事後ペナルティ Q_adjusted(s,a) = w_a^T·φ(s) - self_impact - dynamic_cost - k·σ_non_model の実装確認（σ_modelを含まない）"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "validation",
