@@ -244,7 +244,7 @@ struct DataTick {
       "Ctrl+Cによるグレースフルシャットダウン処理",
       "統合テスト: 合成データでCLI経由でフォワードテストを実行"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

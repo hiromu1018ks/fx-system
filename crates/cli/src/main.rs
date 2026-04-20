@@ -7,7 +7,7 @@ use args::{Cli, Commands};
 use clap::Parser;
 use fx_core::types::StrategyId;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 fn main() -> Result<()> {
@@ -98,29 +98,257 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
 fn run_forward_test(cmd: args::ForwardTestCmd) -> Result<()> {
     info!(config = ?cmd.config, "Starting forward test");
 
-    // Forward-test integration is wired up in Task 13 (CLI forward-test subcommand integration).
-    // This placeholder validates config loading and argument parsing.
-    let _config = if let Some(config_path) = &cmd.config {
-        Some(fx_forward::config::ForwardTestConfig::load_from_file(
-            config_path,
-        )?)
+    let mut config = if let Some(config_path) = &cmd.config {
+        fx_forward::config::ForwardTestConfig::load_from_file(config_path)?
     } else {
-        None
+        fx_forward::config::ForwardTestConfig::default()
     };
 
+    // Apply CLI arg overrides
     if let Some(duration_secs) = cmd.duration {
-        info!(duration_secs, "Forward test duration configured");
+        config.duration = Some(std::time::Duration::from_secs(duration_secs));
     }
-
     if let Some(strategies) = &cmd.strategies {
-        info!(strategies, "Strategies configured");
+        config.enabled_strategies = parse_forward_strategies(strategies)?;
+    }
+    if let Some(output) = &cmd.output {
+        config.report_config.output_dir = output.to_string_lossy().to_string();
     }
 
-    let output_dir = cmd.output.unwrap_or_else(|| PathBuf::from("./reports"));
-    info!(dir = %output_dir.display(), "Forward test output directory configured");
+    // Override data source from CLI args
+    if let Some(source) = &cmd.source {
+        match source.as_str() {
+            "recorded" => {
+                let path = cmd
+                    .data_path
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--data-path required for recorded source"))?;
+                config.data_source = fx_forward::feed::DataSourceConfig::Recorded {
+                    event_store_path: path.to_string_lossy().to_string(),
+                    speed: cmd.speed,
+                    start_time: None,
+                    end_time: None,
+                };
+            }
+            "external" => {
+                let provider = cmd
+                    .provider
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--provider required for external source"))?;
+                let credentials = cmd
+                    .credentials
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--credentials required for external source"))?;
+                config.data_source = fx_forward::feed::DataSourceConfig::ExternalApi {
+                    provider: provider.clone(),
+                    credentials_path: credentials.to_string_lossy().to_string(),
+                    symbols: vec!["USD/JPY".to_string()],
+                };
+            }
+            _ => {
+                anyhow::bail!(
+                    "Unknown source: '{}'. Must be 'recorded' or 'external'.",
+                    source
+                )
+            }
+        }
+    }
 
-    println!("Forward test: config validated. Full integration pending (Task 13).");
+    let output_dir = cmd
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("./reports"));
+    let seed = cmd.seed;
+
+    // Clone data_source to avoid borrow conflict when moving config
+    let data_source = config.data_source.clone();
+    match &data_source {
+        fx_forward::feed::DataSourceConfig::Recorded {
+            event_store_path,
+            speed,
+            ..
+        } => run_recorded_forward(config, event_store_path, *speed, seed, &output_dir),
+        fx_forward::feed::DataSourceConfig::ExternalApi {
+            provider,
+            credentials_path,
+            symbols,
+        } => run_external_forward(
+            config,
+            provider,
+            credentials_path,
+            symbols,
+            seed,
+            &output_dir,
+        ),
+    }
+}
+
+fn run_recorded_forward(
+    config: fx_forward::config::ForwardTestConfig,
+    data_path: &str,
+    speed: f64,
+    seed: u64,
+    output_dir: &Path,
+) -> Result<()> {
+    let path = PathBuf::from(data_path);
+    let ticks = fx_backtest::data::load_csv(&path)
+        .with_context(|| format!("Failed to load data from: {}", path.display()))?;
+    let total_ticks = ticks.len();
+    info!(tick_count = total_ticks, "Loaded tick data");
+    println!("Loaded {total_ticks} ticks from {}", path.display());
+
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+    let store = fx_forward::feed::VecEventStore::new(events);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, speed, None, None);
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+
+    println!("Running forward test on {total_ticks} events...");
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let start = std::time::Instant::now();
+
+    let result = rt.block_on(async {
+        tokio::select! {
+            result = runner.run(seed) => Some(result),
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nCtrl+C received, shutting down gracefully...");
+                None
+            }
+        }
+    });
+
+    let elapsed = start.elapsed();
+
+    if result.is_none() {
+        // Ctrl+C — capture partial results from tracker
+        let snapshot = runner.tracker().snapshot();
+        let partial = fx_forward::runner::ForwardTestResult {
+            total_ticks: 0,
+            total_decisions: 0,
+            total_trades: snapshot.total_trades,
+            duration_secs: elapsed.as_secs_f64(),
+            final_pnl: snapshot.cumulative_pnl,
+            strategies_used: vec![],
+        };
+        println!(
+            "Forward test interrupted after {:.1}s: {} trades, PnL: {:.2}",
+            elapsed.as_secs_f64(),
+            partial.total_trades,
+            partial.final_pnl,
+        );
+        std::fs::create_dir_all(output_dir)?;
+        output::write_forward_result(&partial, output_dir)?;
+        println!("Partial results written to {}", output_dir.display());
+        return Ok(());
+    }
+
+    let fw_result = result.unwrap()?;
+
+    print_forward_summary(&fw_result, elapsed.as_secs_f64());
+
+    std::fs::create_dir_all(output_dir)?;
+    output::write_forward_result(&fw_result, output_dir)?;
+
+    info!(dir = %output_dir.display(), "Forward test results written");
+    println!("Results written to {}", output_dir.display());
     Ok(())
+}
+
+fn run_external_forward(
+    config: fx_forward::config::ForwardTestConfig,
+    provider: &str,
+    credentials_path: &str,
+    symbols: &[String],
+    seed: u64,
+    output_dir: &Path,
+) -> Result<()> {
+    info!(provider, "Starting forward test with external API");
+
+    let api_config = fx_forward::feed::ApiFeedConfig {
+        provider: provider.to_string(),
+        credentials_path: credentials_path.to_string(),
+        symbols: symbols.to_vec(),
+        ..Default::default()
+    };
+    let feed = fx_forward::feed::ExternalApiFeed::new(api_config);
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+
+    println!("Running forward test with external API ({provider})...");
+
+    let rt = tokio::runtime::Runtime::new()?;
+    let start = std::time::Instant::now();
+
+    let result = rt.block_on(async {
+        tokio::select! {
+            result = runner.run(seed) => Some(result),
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\nCtrl+C received, shutting down gracefully...");
+                None
+            }
+        }
+    });
+
+    let elapsed = start.elapsed();
+
+    if result.is_none() {
+        let snapshot = runner.tracker().snapshot();
+        let partial = fx_forward::runner::ForwardTestResult {
+            total_ticks: 0,
+            total_decisions: 0,
+            total_trades: snapshot.total_trades,
+            duration_secs: elapsed.as_secs_f64(),
+            final_pnl: snapshot.cumulative_pnl,
+            strategies_used: vec![],
+        };
+        println!(
+            "Forward test interrupted after {:.1}s: {} trades, PnL: {:.2}",
+            elapsed.as_secs_f64(),
+            partial.total_trades,
+            partial.final_pnl,
+        );
+        std::fs::create_dir_all(output_dir)?;
+        output::write_forward_result(&partial, output_dir)?;
+        return Ok(());
+    }
+
+    let fw_result = result.unwrap()?;
+
+    print_forward_summary(&fw_result, elapsed.as_secs_f64());
+
+    std::fs::create_dir_all(output_dir)?;
+    output::write_forward_result(&fw_result, output_dir)?;
+
+    println!("Results written to {}", output_dir.display());
+    Ok(())
+}
+
+fn print_forward_summary(result: &fx_forward::runner::ForwardTestResult, elapsed_secs: f64) {
+    println!(
+        "Forward test completed in {:.1}s: {} ticks, {} trades, {} decisions",
+        elapsed_secs, result.total_ticks, result.total_trades, result.total_decisions,
+    );
+    println!(
+        "  PnL: {:.2} | Strategies: {}",
+        result.final_pnl,
+        result.strategies_used.join(", "),
+    );
+}
+
+fn parse_forward_strategies(s: &str) -> Result<HashSet<String>> {
+    let mut set = HashSet::new();
+    for part in s.split(',') {
+        let name = part.trim().to_uppercase();
+        match name.as_str() {
+            "A" | "B" | "C" => {
+                set.insert(name);
+            }
+            _ => anyhow::bail!("Unknown strategy: '{}'. Must be A, B, or C.", name),
+        }
+    }
+    if set.is_empty() {
+        anyhow::bail!("At least one strategy must be specified");
+    }
+    Ok(set)
 }
 
 fn parse_strategies(s: &str) -> Result<HashSet<StrategyId>> {

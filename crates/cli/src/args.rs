@@ -56,6 +56,30 @@ pub struct ForwardTestCmd {
     /// Output directory for results.
     #[arg(short, long, default_value = "./reports")]
     pub output: Option<PathBuf>,
+
+    /// Data source type: "recorded" (CSV file) or "external" (live API).
+    #[arg(long)]
+    pub source: Option<String>,
+
+    /// Path to CSV data file for recorded source.
+    #[arg(long)]
+    pub data_path: Option<PathBuf>,
+
+    /// Playback speed for recorded data (0 = max speed, 1.0 = realtime).
+    #[arg(long, default_value_t = 0.0)]
+    pub speed: f64,
+
+    /// Provider name for external API source (e.g., "OANDA").
+    #[arg(long)]
+    pub provider: Option<String>,
+
+    /// Path to credentials file for external API source.
+    #[arg(long)]
+    pub credentials: Option<PathBuf>,
+
+    /// RNG seed for reproducibility.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
 }
 
 #[cfg(test)]
@@ -115,6 +139,10 @@ mod tests {
                 assert!(cmd.config.is_none());
                 assert!(cmd.duration.is_none());
                 assert!(cmd.strategies.is_none());
+                assert!(cmd.source.is_none());
+                assert!(cmd.data_path.is_none());
+                assert_eq!(cmd.speed, 0.0);
+                assert_eq!(cmd.seed, 42);
             }
             _ => panic!("expected ForwardTest command"),
         }
@@ -133,6 +161,14 @@ mod tests {
             "C",
             "--output",
             "/tmp/fw-results",
+            "--source",
+            "recorded",
+            "--data-path",
+            "ticks.csv",
+            "--speed",
+            "2.0",
+            "--seed",
+            "99",
         ]);
         assert!(cli.is_ok());
         let cli = cli.unwrap();
@@ -142,6 +178,10 @@ mod tests {
                 assert_eq!(cmd.duration, Some(3600));
                 assert_eq!(cmd.strategies.as_deref(), Some("C"));
                 assert_eq!(cmd.output, Some(PathBuf::from("/tmp/fw-results")));
+                assert_eq!(cmd.source.as_deref(), Some("recorded"));
+                assert_eq!(cmd.data_path, Some(PathBuf::from("ticks.csv")));
+                assert_eq!(cmd.speed, 2.0);
+                assert_eq!(cmd.seed, 99);
             }
             _ => panic!("expected ForwardTest command"),
         }

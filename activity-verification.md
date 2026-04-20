@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 11
-**Current Task:** Task 13 — CLI forward-test サブコマンドの統合
+**Tasks Completed:** 12
+**Current Task:** Task 14 — Rust ↔ Python連携ブリッジ（JSON I/O）の実装
 
 ---
 
@@ -265,3 +265,34 @@
 - `cargo fmt --check` — clean
 
 **Issues:** なし。バイナリクレートの制限によりintegration testからprivate config moduleにアクセスできないため、TOML読み込みのテストは最小限のヘルパー関数をintegration test内に定義して対応
+
+### 2026-04-20: Task 13 — CLI forward-test サブコマンドの統合
+
+**What changed:**
+- `crates/forward/src/feed.rs`: `VecEventStore`構造体を追加。`Mutex<Vec<GenericEvent>>`でバックされた`EventStore`実装。CLIからCSVを読み込み、イベントに変換して`RecordedDataFeed`で再生するために使用
+- `crates/cli/src/args.rs`: `ForwardTestCmd`に新フィールド追加: `--source` (recorded/external), `--data-path` (CSVファイルパス), `--speed` (再生速度), `--provider` (外部APIプロバイダー), `--credentials` (認証情報パス), `--seed` (RNGシード、デフォルト42)
+- `crates/cli/src/main.rs`: `run_forward_test()`をプレースホルダから完全実装に書き換え:
+  - `ForwardTestConfig::load_from_file()`またはデフォルト設定で初期化
+  - CLI引数によるオーバーライド: `--duration`, `--strategies`, `--output`, `--source`
+  - `--source recorded`: CSV → `ticks_to_events` → `VecEventStore` → `RecordedDataFeed` → `ForwardTestRunner` のパイプライン
+  - `--source external`: `ApiFeedConfig` → `ExternalApiFeed` → `ForwardTestRunner`
+  - `tokio::select!`による`Ctrl+C`ハンドリング: 中断時は`runner.tracker()`から部分結果を取得して出力
+  - `run_recorded_forward()` / `run_external_forward()` ヘルパー関数
+  - `print_forward_summary()` / `parse_forward_strategies()` ヘルパー関数
+- `crates/cli/src/output.rs`: `write_forward_result()`の`#[allow(dead_code)]`を削除
+- `crates/cli/tests/integration.rs`: フォワードテスト統合テストを6件追加:
+  - `test_cli_forward_pipeline_with_synthetic_csv`: 200ティックでのフルパイプライン実行
+  - `test_cli_forward_writes_output_files`: JSON出力ファイルの生成と内容検証
+  - `test_cli_forward_with_toml_config`: TOML設定ファイルからの設定読み込み→実行
+  - `test_cli_forward_strategy_selection`: B+C有効時の戦略フィルタリング確認
+  - `test_cli_forward_reproducibility`: 同一シードでの完全再現性検証
+  - `test_cli_forward_with_data_source_override`: `--source recorded --data-path --speed`によるオーバーライド確認
+- `args.rs`テスト更新: `test_parse_forward_test_minimal`/`test_parse_forward_test_full`で新フィールドを検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test` — 1177 passed (34 in fx-cli: 21 unit + 13 integration, 6 new forward-test integration tests), 0 failed
+- `cargo clippy` — no warnings
+- `cargo fmt --check` — clean
+
+**Issues:** なし。`VecEventStore`は`RecordedDataFeed`のジェネリクス`<S: EventStore>`に適合するよう`Mutex<Vec<GenericEvent>>`で実装。`ForwardTestRunner`のasync `run()`は`tokio::runtime::Runtime::block_on()`で同期的に実行

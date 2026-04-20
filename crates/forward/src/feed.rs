@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
 use fx_core::types::StreamId;
-use fx_events::event::Event;
+use fx_events::event::{Event, GenericEvent};
 use fx_events::proto::MarketEventPayload;
 use fx_events::store::EventStore;
 use fx_gateway::market::TickData;
@@ -11,6 +12,46 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+/// In-memory EventStore backed by a Vec. Suitable for CLI use
+/// where events are loaded from CSV and replayed through RecordedDataFeed.
+pub struct VecEventStore {
+    events: Mutex<Vec<GenericEvent>>,
+}
+
+impl VecEventStore {
+    pub fn new(events: Vec<GenericEvent>) -> Self {
+        Self {
+            events: Mutex::new(events),
+        }
+    }
+}
+
+impl EventStore for VecEventStore {
+    fn store(&self, event: &GenericEvent) -> Result<()> {
+        self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+
+    fn load(&self, _event_id: Uuid) -> Result<Option<GenericEvent>> {
+        Ok(None)
+    }
+
+    fn replay(&self, stream_id: StreamId, from_seq: u64) -> Result<Vec<GenericEvent>> {
+        let events = self.events.lock().unwrap();
+        let filtered: Vec<GenericEvent> = events
+            .iter()
+            .filter(|e| e.header().stream_id == stream_id && e.header().sequence_id >= from_seq)
+            .cloned()
+            .collect();
+        Ok(filtered)
+    }
+
+    fn remove(&self, _event_id: Uuid) -> Result<bool> {
+        Ok(false)
+    }
+}
 
 /// Market data feed trait for abstracting data sources.
 #[allow(async_fn_in_trait)]

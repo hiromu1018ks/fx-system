@@ -19,7 +19,6 @@ pub fn write_backtest_result(result: &BacktestResult, dir: &Path) -> Result<()> 
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn write_forward_result(result: &ForwardTestResult, dir: &Path) -> Result<()> {
     let json_path = dir.join("forward_result.json");
     let output = ForwardResultJson::from_result(result);
@@ -87,7 +86,6 @@ struct ForwardResultJson {
     strategies_used: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl ForwardResultJson {
     fn from_result(r: &ForwardTestResult) -> Self {
         Self {

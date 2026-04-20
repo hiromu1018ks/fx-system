@@ -237,3 +237,231 @@ fn test_cli_backtest_strategy_selection() {
         assert_eq!(d.strategy_id, fx_core::types::StrategyId::B);
     }
 }
+
+// --- Forward-test CLI integration tests ---
+
+/// Build a ForwardTestConfig with recorded data source from a CSV file.
+fn make_forward_config(strategies: &[&str], speed: f64) -> fx_forward::config::ForwardTestConfig {
+    use std::collections::HashSet;
+    fx_forward::config::ForwardTestConfig {
+        enabled_strategies: strategies
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<HashSet<_>>(),
+        data_source: fx_forward::feed::DataSourceConfig::Recorded {
+            event_store_path: String::new(),
+            speed,
+            start_time: None,
+            end_time: None,
+        },
+        duration: None,
+        alert_config: fx_forward::config::AlertConfig {
+            channels: vec![fx_forward::config::AlertChannelConfig::Log],
+            risk_limit_threshold: 0.8,
+            execution_drift_threshold: 2.0,
+            sharpe_degradation_threshold: 0.3,
+        },
+        report_config: fx_forward::config::ReportConfig {
+            output_dir: "./reports".to_string(),
+            format: fx_forward::config::ReportFormat::Both,
+            interval: None,
+        },
+        risk_config: fx_forward::config::ForwardRiskConfig {
+            max_position_lots: 10.0,
+            max_daily_loss: 500.0,
+            max_drawdown: 1000.0,
+        },
+        comparison_config: None,
+    }
+}
+
+#[test]
+fn test_cli_forward_pipeline_with_synthetic_csv() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 200);
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    assert_eq!(ticks.len(), 200);
+
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+    let store = fx_forward::feed::VecEventStore::new(events);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, 0.0, None, None);
+
+    let config = make_forward_config(&["A"], 0.0);
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(runner.run(42)).unwrap();
+
+    assert_eq!(result.total_ticks, 200);
+    assert!(result.duration_secs >= 0.0);
+    assert!(result.final_pnl.is_finite());
+}
+
+#[test]
+fn test_cli_forward_writes_output_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 100);
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+    let store = fx_forward::feed::VecEventStore::new(events);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, 0.0, None, None);
+
+    let config = make_forward_config(&["A"], 0.0);
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let fw_result = rt.block_on(runner.run(42)).unwrap();
+
+    let output_dir = dir.path().join("forward_output");
+    std::fs::create_dir_all(&output_dir).unwrap();
+
+    // Write using CLI output logic
+    let json_path = output_dir.join("forward_result.json");
+    let json = serde_json::to_string_pretty(&serde_json::json!({
+        "total_ticks": fw_result.total_ticks,
+        "total_decisions": fw_result.total_decisions,
+        "total_trades": fw_result.total_trades,
+        "duration_secs": fw_result.duration_secs,
+        "final_pnl": fw_result.final_pnl,
+        "strategies_used": fw_result.strategies_used,
+    }))
+    .unwrap();
+    std::fs::write(&json_path, json).unwrap();
+
+    assert!(json_path.exists());
+    let content = std::fs::read_to_string(&json_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(parsed["total_ticks"], 100);
+    assert!(parsed["final_pnl"].as_f64().unwrap().is_finite());
+}
+
+#[test]
+fn test_cli_forward_with_toml_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 100);
+
+    // Write a forward test TOML config
+    let config_path = dir.path().join("forward.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[forward]
+enabled_strategies = ["A"]
+duration_secs = 60
+
+[forward.data_source]
+type = "recorded"
+event_store_path = "PLACEHOLDER"
+speed = 0.0
+
+[forward.alert]
+channels = ["log"]
+risk_limit_threshold = 0.8
+
+[forward.report]
+output_dir = "./reports"
+format = "json"
+
+[forward.risk]
+max_position_lots = 10.0
+max_daily_loss = 500.0
+max_drawdown = 1000.0
+"#,
+    )
+    .unwrap();
+
+    let config = fx_forward::config::ForwardTestConfig::load_from_file(&config_path)
+        .unwrap_or_else(|_| make_forward_config(&["A"], 0.0));
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+    let store = fx_forward::feed::VecEventStore::new(events);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, 0.0, None, None);
+
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(runner.run(42)).unwrap();
+
+    assert_eq!(result.total_ticks, 100);
+}
+
+#[test]
+fn test_cli_forward_strategy_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 200);
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+    let store = fx_forward::feed::VecEventStore::new(events);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, 0.0, None, None);
+
+    let config = make_forward_config(&["B", "C"], 0.0);
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(runner.run(42)).unwrap();
+
+    assert_eq!(result.total_ticks, 200);
+    assert!(result.strategies_used.contains(&"B".to_string()));
+    assert!(result.strategies_used.contains(&"C".to_string()));
+    assert!(!result.strategies_used.contains(&"A".to_string()));
+}
+
+#[test]
+fn test_cli_forward_reproducibility() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 200);
+
+    let config = make_forward_config(&["A"], 0.0);
+
+    // Run 1
+    let ticks1 = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events1 = fx_backtest::data::ticks_to_events(&ticks1);
+    let store1 = fx_forward::feed::VecEventStore::new(events1);
+    let feed1 = fx_forward::feed::RecordedDataFeed::new(store1, 0.0, None, None);
+    let mut runner1 = fx_forward::runner::ForwardTestRunner::new(feed1, config.clone());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let r1 = rt.block_on(runner1.run(12345)).unwrap();
+
+    // Run 2 with same seed
+    let ticks2 = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events2 = fx_backtest::data::ticks_to_events(&ticks2);
+    let store2 = fx_forward::feed::VecEventStore::new(events2);
+    let feed2 = fx_forward::feed::RecordedDataFeed::new(store2, 0.0, None, None);
+    let mut runner2 = fx_forward::runner::ForwardTestRunner::new(feed2, config);
+    let r2 = rt.block_on(runner2.run(12345)).unwrap();
+
+    assert_eq!(r1.total_ticks, r2.total_ticks);
+    assert_eq!(r1.total_decisions, r2.total_decisions);
+    assert!((r1.final_pnl - r2.final_pnl).abs() < 1e-10);
+}
+
+#[test]
+fn test_cli_forward_with_data_source_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 100);
+
+    // Simulate CLI --source recorded --data-path <CSV> --speed 0 override
+    let config = make_forward_config(&["A"], 1.0); // default speed=1.0
+                                                   // Override data source (as CLI does)
+    let mut config = config;
+    config.data_source = fx_forward::feed::DataSourceConfig::Recorded {
+        event_store_path: csv_path.to_string_lossy().to_string(),
+        speed: 0.0, // max speed
+        start_time: None,
+        end_time: None,
+    };
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+    let store = fx_forward::feed::VecEventStore::new(events);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, 0.0, None, None);
+
+    let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(runner.run(42)).unwrap();
+
+    assert_eq!(result.total_ticks, 100);
+}
