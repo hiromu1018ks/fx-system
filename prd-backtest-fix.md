@@ -138,7 +138,7 @@
       "テスト: 小さいCSVでStreamingCsvReaderが正しく動作",
       "テスト: ウィンドウサイズを超えると古いtickが破棄される"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

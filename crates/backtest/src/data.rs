@@ -176,6 +176,105 @@ pub fn tick_to_event(tick: &ValidatedTick) -> GenericEvent {
     GenericEvent::new(header, payload)
 }
 
+/// Streaming CSV reader that maintains a sliding window of recent ticks.
+///
+/// Instead of loading the entire CSV into memory, reads one row at a time
+/// and keeps only the most recent `window_size` validated ticks.
+pub struct StreamingCsvReader {
+    reader: csv::Reader<std::io::BufReader<std::fs::File>>,
+    window: VecDeque<ValidatedTick>,
+    window_size: usize,
+    prev_ts: Option<u64>,
+    done: bool,
+}
+
+use std::collections::VecDeque;
+
+impl StreamingCsvReader {
+    /// Open a CSV file for streaming reads.
+    ///
+    /// `window_size` is the number of recent ticks to keep in memory.
+    pub fn new<P: AsRef<Path>>(path: P, window_size: usize) -> Result<Self> {
+        assert!(window_size > 0, "window_size must be positive");
+        let file = std::fs::File::open(path.as_ref()).map_err(DataLoadError::Io)?;
+        let buf_reader = std::io::BufReader::new(file);
+        let reader = csv::ReaderBuilder::new()
+            .flexible(true)
+            .from_reader(buf_reader);
+
+        Ok(Self {
+            reader,
+            window: VecDeque::with_capacity(window_size),
+            window_size,
+            prev_ts: None,
+            done: false,
+        })
+    }
+
+    /// Read the next tick from the CSV.
+    ///
+    /// Returns `None` when the file is exhausted or the row is invalid.
+    pub fn next_tick(&mut self) -> Option<ValidatedTick> {
+        if self.done {
+            return None;
+        }
+
+        loop {
+            let result = self.reader.records().next()?;
+            let record = match result {
+                Ok(r) => r,
+                Err(_) => continue, // skip malformed rows
+            };
+
+            let tick: DataTick = match record.deserialize(None) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let ts_ns = match parse_timestamp(&tick.timestamp) {
+                Ok(ns) => ns,
+                Err(_) => continue,
+            };
+
+            // Skip crossed market
+            if tick.bid >= tick.ask {
+                continue;
+            }
+
+            // Skip non-monotonic timestamps
+            if let Some(prev) = self.prev_ts {
+                if ts_ns <= prev {
+                    continue;
+                }
+            }
+
+            let validated = ValidatedTick {
+                timestamp_ns: ts_ns,
+                bid: tick.bid,
+                ask: tick.ask,
+                bid_volume: tick.bid_volume.unwrap_or(0.0),
+                ask_volume: tick.ask_volume.unwrap_or(0.0),
+                symbol: tick.symbol,
+            };
+
+            self.prev_ts = Some(ts_ns);
+
+            // Update sliding window
+            if self.window.len() >= self.window_size {
+                self.window.pop_front();
+            }
+            self.window.push_back(validated.clone());
+
+            return Some(validated);
+        }
+    }
+
+    /// Access the current window of recent ticks.
+    pub fn window_ticks(&self) -> Vec<&ValidatedTick> {
+        self.window.iter().collect()
+    }
+}
+
 /// Parse a timestamp string into nanoseconds.
 ///
 /// Supported formats:
@@ -463,5 +562,50 @@ mod tests {
     #[test]
     fn test_parse_timestamp_eet_header_normalization() {
         assert_eq!(normalize_header("Time (EET)"), "timestamp");
+    }
+
+    #[test]
+    fn test_streaming_csv_reader_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("test_stream.csv");
+        let csv_data = "timestamp,bid,ask,bid_volume,ask_volume,symbol
+1700000000000000000,110.001,110.003,1000000,1000000,USD/JPY
+1700000001000000000,110.005,110.007,1000000,1000000,USD/JPY
+1700000002000000000,110.010,110.012,1000000,1000000,USD/JPY";
+        std::fs::write(&csv_path, csv_data).unwrap();
+
+        let mut reader = StreamingCsvReader::new(&csv_path, 100).unwrap();
+        let mut count = 0;
+        while reader.next_tick().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 3);
+        assert_eq!(reader.window_ticks().len(), 3);
+    }
+
+    #[test]
+    fn test_streaming_csv_reader_window_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("test_window.csv");
+        let mut csv_data = String::from("timestamp,bid,ask\n");
+        for i in 0..10u64 {
+            let ts = 1700000000000000000 + i * 1000000000;
+            csv_data.push_str(&format!(
+                "{},{:.3},{:.3}\n",
+                ts,
+                110.0 + i as f64,
+                110.002 + i as f64
+            ));
+        }
+        std::fs::write(&csv_path, csv_data).unwrap();
+
+        let mut reader = StreamingCsvReader::new(&csv_path, 5).unwrap();
+        let mut count = 0;
+        while reader.next_tick().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 10);
+        // Window should contain only the last 5 ticks
+        assert_eq!(reader.window_ticks().len(), 5);
     }
 }

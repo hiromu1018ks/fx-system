@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 5 / 8
-**Current Task:** Task 6 — StreamingCsvReader
+**Tasks Completed:** 6 / 8
+**Current Task:** Task 7 — BacktestEngine ストリーミング対応
 
 ---
 
@@ -66,6 +66,26 @@
 - `cargo fmt --check` — clean
 
 **Issues:** limit_stateはバックテストエンジン内でイベントから更新されていないため、MonthlyHaltは実際のバックテストでは発火しない（limit_stateが常にdefault=0のまま）。これは既存アーキテクチャの制約であり、本タスクの範囲外
+
+### 2026-04-20: Task 6 — StreamingCsvReader: 行単位CSV読み込み + スライディングウィンドウ
+
+**What changed:**
+- `crates/backtest/src/data.rs`: `StreamingCsvReader` 構造体を追加
+  - `new(path, window_size)`: BufReader + csv::Reader でCSVファイルを開く
+  - `next_tick() -> Option<ValidatedTick>`: 1行ずつ読み込み、バリデーション（crossed market, non-monotonic timestamp skip）、スライディングウィンドウ更新
+  - `window_ticks() -> Vec<&ValidatedTick>`: 現在のウィンドウ内tick参照
+  - 内部で `VecDeque<ValidatedTick>` を使用、window_sizeを超えると古いtickをFIFO破棄
+- テスト追加（2件）:
+  - `test_streaming_csv_reader_basic`: 3行CSVで正しく3tick読み込まれることを検証
+  - `test_streaming_csv_reader_window_eviction`: 10行CSV + window_size=5 で最後5tickのみ保持されることを検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --lib -- data::tests::test_streaming` — 2 passed, 0 failed
+- `cargo clippy -p fx-backtest` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
 
 ### 2026-04-20: Task 4 — 週末前強制決済: 金曜クローズ時に全ポジションを強制決済
 
