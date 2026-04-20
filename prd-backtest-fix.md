@@ -76,7 +76,7 @@
       "crates/backtest/Cargo.toml に chrono-tz = { workspace = true } を追加",
       "cargo build でコンパイル確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "fix",
