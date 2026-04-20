@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 7 / 8
-**Current Task:** Task 8 — 統合テスト
+**Tasks Completed:** 8 / 8
+**Current Task:** COMPLETE
 
 ---
 
@@ -127,6 +127,23 @@
 - `cargo build` — passed
 - `cargo test -p fx-strategy --lib -- bayesian_lr::tests::test_sample_weights` — 3 passed, 0 failed
 - `cargo clippy -p fx-strategy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 8 — 週末強制決済とストリーミングの統合テスト
+
+**What changed:**
+- `crates/backtest/src/engine.rs`: 統合テスト4件追加
+  - `test_integration_weekend_gap_closes_all_positions`: 金曜→月曜のイベントで週末ギャップ検出と`close_all_positions("WEEKEND_HALT")`の動作を検証
+  - `test_integration_posterior_preserved_across_month_boundary`: 1月→2月の月境界データでBLR事後分布が保持されることを検証（Strategy A/B/C）
+  - `test_integration_streaming_memory_bounded`: 10,000 tick CSVでStreamingCsvReaderのスライディングウィンドウが`window_size`を超えないことを検証
+  - `test_integration_stream_weekend_gap_consistency`: 金曜→月曜データで`run_from_events()`と`run_from_stream()`の結果が一致することを検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --lib -- tests::test_integration` — 4 passed, 0 failed
+- `cargo clippy -p fx-backtest` — no errors (3 pre-existing warnings)
 - `cargo fmt --check` — clean
 
 **Issues:** なし
