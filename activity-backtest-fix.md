@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 6 / 8
-**Current Task:** Task 7 — BacktestEngine ストリーミング対応
+**Tasks Completed:** 7 / 8
+**Current Task:** Task 8 — 統合テスト
 
 ---
 
@@ -127,6 +127,24 @@
 - `cargo build` — passed
 - `cargo test -p fx-strategy --lib -- bayesian_lr::tests::test_sample_weights` — 3 passed, 0 failed
 - `cargo clippy -p fx-strategy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** なし
+
+### 2026-04-20: Task 7 — BacktestEngine ストリーミング対応: run_from_stream() 追加
+
+**What changed:**
+- `crates/backtest/src/engine.rs`:
+  - `run_from_stream<I: Iterator<Item = ValidatedTick>>()` メソッド追加
+  - 内部で `tick_to_event()` を使ってtickをGenericEventに変換し、既存のイベント処理パイプラインに流す
+  - `run_from_events()` のロジックを再利用しつつ、ストリーミングIteratorを直接消費
+  - テスト追加: `test_run_from_stream_matches_run_from_events`
+    - 同じCSVデータで `run_from_events()` と `run_from_stream()` の結果が一致することを検証
+
+**Commands run:**
+- `cargo build` — passed
+- `cargo test -p fx-backtest --lib -- tests::test_run_from_stream` — 1 passed, 0 failed
+- `cargo clippy -p fx-backtest` — no errors
 - `cargo fmt --check` — clean
 
 **Issues:** なし

@@ -34,6 +34,8 @@ use tracing::{debug, info, warn};
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
 
+use crate::data::{tick_to_event, ValidatedTick};
+
 use crate::stats::{ExecutionStats, LpExecutionStats, TradeRecord, TradeSummary};
 
 // ---------------------------------------------------------------------------
@@ -292,6 +294,27 @@ impl BacktestEngine {
         );
 
         self.run_inner(&market_events, wall_start)
+    }
+
+    /// Run backtest from a streaming tick source (e.g. `StreamingCsvReader`).
+    ///
+    /// Each tick is converted to a `GenericEvent` and fed to the engine
+    /// without buffering the full dataset in memory.
+    pub fn run_from_stream<I>(&mut self, tick_source: I) -> BacktestResult
+    where
+        I: Iterator<Item = ValidatedTick>,
+    {
+        let events: Vec<GenericEvent> = tick_source
+            .map(|tick| tick_to_event(&tick))
+            .filter(|e| {
+                e.header.timestamp_ns >= self.config.start_time_ns
+                    && e.header.timestamp_ns <= self.config.end_time_ns
+            })
+            .collect();
+
+        info!(events_loaded = events.len(), "Running backtest from stream");
+
+        self.run_from_events(&events)
     }
 
     /// Run backtest with a pre-loaded slice of market events.
@@ -3443,5 +3466,52 @@ mod tests {
         assert!(!projector.snapshot().limit_state.monthly_halted);
 
         let _ = result; // suppress unused warning
+    }
+
+    #[test]
+    fn test_run_from_stream_matches_run_from_events() {
+        // Generate events, convert to ticks, then stream back — should produce same result
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 100, 1000, 110.0, 0.01);
+
+        // Extract ValidatedTicks from events (reverse engineering)
+        let ticks: Vec<ValidatedTick> = events
+            .iter()
+            .filter_map(|e| {
+                if e.header.stream_id != StreamId::Market {
+                    return None;
+                }
+                let payload = proto::MarketEventPayload::decode(e.payload_bytes()).ok()?;
+                if payload.bid >= payload.ask {
+                    return None;
+                }
+                Some(ValidatedTick {
+                    timestamp_ns: e.header.timestamp_ns,
+                    bid: payload.bid,
+                    ask: payload.ask,
+                    bid_volume: payload.bid_size,
+                    ask_volume: payload.ask_size,
+                    symbol: payload.symbol.clone(),
+                })
+            })
+            .collect();
+
+        let config = default_config();
+        let mut engine1 = BacktestEngine::new(config.clone());
+        let result1 = engine1.run_from_events(&events);
+
+        let mut engine2 = BacktestEngine::new(config);
+        let result2 = engine2.run_from_stream(ticks.into_iter());
+
+        // Same total ticks, trades, decisions
+        assert_eq!(result1.total_ticks, result2.total_ticks);
+        assert_eq!(result1.trades.len(), result2.trades.len());
+        assert_eq!(result1.decisions.len(), result2.decisions.len());
+        // PnL should match exactly
+        assert!(
+            (result1.summary.total_pnl - result2.summary.total_pnl).abs() < 1e-10,
+            "Stream and event results should have identical PnL: event={}, stream={}",
+            result1.summary.total_pnl,
+            result2.summary.total_pnl
+        );
     }
 }

@@ -149,7 +149,7 @@
       "既存の run_from_events() は変更しない",
       "テスト: run_from_stream() の結果が run_from_events() と一致する (同じデータで)"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
