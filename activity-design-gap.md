@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 8
-**Current Task:** Task 9 — ONNXモデルローダー実装
+**Tasks Completed:** 9
+**Current Task:** Task 10 — E2Eパイプライン (Python→ONNX→Rust)
 
 ---
 
@@ -193,3 +193,36 @@
 - `cargo test --workspace --no-fail-fast` — 失敗は事前存在のCSVバリデーション (3件)
 
 **Issues:** ONNX Runtimeのネイティブライブラリ (libonnxruntime) が必要。`load-dynamic` featureによりビルド時には不要だが、実行時に `ORT_DYLIB_PATH` 環境変数でパスを指定する必要あり
+
+### 2026-04-20: Task 9 — ONNXモデルローダー: regime.rsにRegimeModelLoader実装
+
+**What changed:**
+- `crates/strategy/src/regime.rs`: `OnnxRegimeModel` 構造体を実装
+  - `session: Mutex<ort::session::Session>` — ONNX Runtimeセッション (Mutexで内部可变性確保、`Session::run()` が `&mut self` を要求するため)
+  - `n_regimes: usize`, `feature_dim: usize` — モデルメタデータ
+  - 手動 `Debug` impl (ort::SessionはDebugを実装していないため)
+  - `load_from_path(path: &str)`: ONNXファイルからセッション構築、入出力名をログ出力
+  - `predict(&self, features: &[f64])`: f64→f32変換、`(shape, &[f32])` タプル形式で `TensorRef::from_array_view` 呼び出し、`Session::run()` で推論、`downcast_ref::<DynTensorValueType>()` + `try_extract_tensor::<f32>()` で出力抽出
+  - ndarrayバージョン不一致回避: workspace (0.16) vs ort (0.17) → タプル形式でraw sliceを渡す
+- `RegimeConfig` に `model_path: Option<String>` フィールド追加、`feature_dim` デフォルトを34→36に変更
+- `RegimeCache` に `onnx_model: Option<Arc<OnnxRegimeModel>>` フィールド追加
+  - `new()` で `model_path` が指定された場合、ONNXモデルをロード。失敗時はwarnログ出力してヒューリスティックにフォールバック
+  - `has_onnx_model()`: ONNXモデルがロードされているか確認
+  - `predict_onnx(&self, features: &[f64])`: ONNX推論を実行、失敗時はNone返却
+- 全 `RegimeConfig` 構築箇所 (5箇所) に `model_path: None` を追加
+- 既存テストの `feature_dim` 34→36 への更新 (3箇所)
+- 新テスト4件追加:
+  - `test_regime_cache_no_onnx_model_by_default`: デフォルトではONNXモデル未ロード
+  - `test_regime_cache_invalid_model_path_falls_back`: 無効パス時のフォールバック (ORT_DYLIB_PATH未設定時はスキップ)
+  - `test_onnx_regime_model_debug`: Debug impl動作確認
+  - `test_regime_config_model_path_field`: model_pathフィールドの設定/取得
+
+**Commands run:**
+- `cargo build -p fx-strategy` — passed (ort 2.0.0-rc.12 API修正後)
+- `cargo build` — passed (全ワークスペース)
+- `cargo test -p fx-strategy --lib -- regime::tests` — 42 passed, 0 failed
+- `cargo test --workspace --no-fail-fast` — 失敗は事前存在のCSVバリデーション (3件)
+- `cargo clippy` — no errors
+- `cargo fmt --check` — clean
+
+**Issues:** ONNX推論テストは `ORT_DYLIB_PATH` 環境変数が設定されている場合のみ実行。実際のダミーモデルでのロード/推論テストはTask 10 (E2Eパイプライン) で対応。

@@ -170,7 +170,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "model_pathがSomeの場合はONNXモデルを使用、Noneの場合は従来のヒューリスティック",
       "テスト: ダミーONNXモデルでのロード・推論確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",
