@@ -254,6 +254,7 @@ class TestExportHdpHmmToOnnx:
         assert "regime_posterior" in output_names
 
     def test_export_consistent_with_python(self, simple_params, features):
+        import onnx
         import onnxruntime as ort
 
         model = export_hdp_hmm_to_onnx(simple_params)

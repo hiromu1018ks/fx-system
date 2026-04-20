@@ -2,8 +2,8 @@
 
 ## Current Status
 **Last Updated:** 2026-04-20
-**Tasks Completed:** 2
-**Current Task:** Task 3 — Python依存パッケージ追加
+**Tasks Completed:** 3
+**Current Task:** Task 4 — 特徴量交互作用項追加
 
 ---
 
@@ -49,3 +49,19 @@
 - `pytest research/tests/test_hdp_hmm.py -v -k 'not Export'` — 31 passed, 3 deselected (ONNX依存未インストール)
 
 **Issues:** なし。ONNX export テスト3件は onnx/onnxruntime 未インストールのため失敗（Task 3で対応）
+
+### 2026-04-20: Task 3 — Python依存パッケージ追加 (onnx, onnxruntime, scikit-learn)
+
+**What changed:**
+- `pip install onnx onnxruntime scikit-learn` で依存パッケージをインストール
+  - onnx 1.21.0, onnxruntime 1.24.4, scikit-learn 1.8.0
+- `research/tests/test_hdp_hmm.py`: テスト内に不足していた `import onnx` を追加
+- `research/models/hdp_hmm.py`: ONNX exportのMatMul次元バグを修正
+  - 旧: weights `[n_regimes, feature_dim]` をMatMulに直接使用 → 形状不一致
+  - 新: weightsを転置 `[feature_dim, n_regimes]` にして `features [1, F] @ W^T [F, K] = [1, K]` に修正
+
+**Commands run:**
+- `pip install onnx onnxruntime scikit-learn` — インストール成功
+- `pytest research/tests/test_hdp_hmm.py -v` — 34 passed, 0 failed (全テスト初の完全通過)
+
+**Issues:** なし

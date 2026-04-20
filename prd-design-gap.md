@@ -88,7 +88,7 @@ crates/forward/src/runner.rs        → ONNX Regime切替 + PreFailure配線
       "pytest research/tests/test_environment.py で依存チェック通過確認",
       "onnxエクスポートテストが通ることを確認"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "feature",

@@ -257,8 +257,8 @@ def export_hdp_hmm_to_onnx(
     w_init = helper.make_tensor(
         "regime_weights",
         TensorProto.FLOAT,
-        [params.n_regimes, params.feature_dim],
-        params.weights.astype(np.float32).flatten().tolist(),
+        [params.feature_dim, params.n_regimes],
+        params.weights.T.astype(np.float32).flatten().tolist(),
     )
     initializers.append(w_init)
 
