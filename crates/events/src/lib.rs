@@ -3,6 +3,7 @@ pub mod event;
 pub mod gap_detector;
 pub mod header;
 pub mod projector;
+pub mod runtime;
 pub mod store;
 pub mod stream;
 
@@ -166,6 +167,7 @@ mod tests {
             regime_posterior: vec![0.7, 0.2, 0.1],
             regime_entropy: 0.8,
             skip_reason: String::new(),
+            ..Default::default()
         };
         let bytes = p.encode_to_vec();
         let p2 = DecisionEventPayload::decode(bytes.as_slice()).unwrap();
@@ -259,6 +261,7 @@ mod tests {
             latency_ms: 5.0,
             reject_reason: RejectReason::Unspecified as i32,
             reject_message: String::new(),
+            ..Default::default()
         };
         let bytes = p.encode_to_vec();
         let p2 = ExecutionEventPayload::decode(bytes.as_slice()).unwrap();

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use fx_backtest::engine::BacktestResult;
 use fx_forward::runner::ForwardTestResult;
+use fx_strategy::features::FeatureVector;
 
 pub fn write_backtest_result(result: &BacktestResult, dir: &Path) -> Result<()> {
     let json_path = dir.join("backtest_result.json");
@@ -20,6 +21,7 @@ pub fn write_backtest_result(result: &BacktestResult, dir: &Path) -> Result<()> 
 }
 
 /// Write a bridge-ready JSON with full trade-level data for Python validation pipeline.
+#[allow(dead_code)]
 pub fn write_backtest_result_for_bridge(result: &BacktestResult, dir: &Path) -> Result<()> {
     let json_path = dir.join("backtest_result.json");
     let output = BacktestBridgeJson::from_result(result);
@@ -156,7 +158,7 @@ impl BacktestBridgeJson {
             trades,
             returns,
             strategy_breakdown,
-            num_features: 45,
+            num_features: FeatureVector::DIM,
             execution_stats: BridgeExecutionStats {
                 overall_fill_rate: r.execution_stats.overall_fill_rate,
                 avg_slippage: r.execution_stats.avg_slippage,
@@ -255,10 +257,17 @@ struct BacktestResultJson {
     execution_fill_rate: f64,
     execution_avg_slippage: f64,
     strategies: Vec<String>,
+    summary: BridgeSummary,
+    trades: Vec<BridgeTrade>,
+    returns: Vec<f64>,
+    strategy_breakdown: Vec<BridgeStrategyBreakdown>,
+    num_features: usize,
+    execution_stats: BridgeExecutionStats,
 }
 
 impl BacktestResultJson {
     fn from_result(r: &BacktestResult) -> Self {
+        let bridge = BacktestBridgeJson::from_result(r);
         Self {
             total_ticks: r.total_ticks,
             total_decision_ticks: r.total_decision_ticks,
@@ -280,6 +289,12 @@ impl BacktestResultJson {
                 .iter()
                 .map(|s| format!("{:?}", s))
                 .collect(),
+            summary: bridge.summary,
+            trades: bridge.trades,
+            returns: bridge.returns,
+            strategy_breakdown: bridge.strategy_breakdown,
+            num_features: bridge.num_features,
+            execution_stats: bridge.execution_stats,
         }
     }
 }
@@ -400,6 +415,8 @@ mod tests {
             summary: make_trade_summary(),
             execution_stats: ExecutionStats::empty(),
             execution_events: vec![],
+            strategy_events_published: 0,
+            state_snapshots_published: 0,
             observability_ticks: 0,
         }
     }
@@ -434,6 +451,8 @@ mod tests {
             total_ticks: 200,
             total_decisions: 80,
             total_trades: 15,
+            strategy_events_published: 0,
+            state_snapshots_published: 0,
             duration_secs: 60.0,
             final_pnl: 250.0,
             strategies_used: vec!["A".to_string(), "C".to_string()],
@@ -451,6 +470,8 @@ mod tests {
             total_ticks: 200,
             total_decisions: 80,
             total_trades: 15,
+            strategy_events_published: 0,
+            state_snapshots_published: 0,
             duration_secs: 60.0,
             final_pnl: 250.0,
             strategies_used: vec!["A".to_string()],
@@ -515,6 +536,8 @@ mod tests {
             summary: make_trade_summary(),
             execution_stats: ExecutionStats::empty(),
             execution_events: vec![],
+            strategy_events_published: 0,
+            state_snapshots_published: 0,
             observability_ticks: 0,
         }
     }
@@ -554,7 +577,7 @@ mod tests {
         assert!(!breakdown.is_empty());
 
         // Verify num_features
-        assert_eq!(parsed["num_features"], 45);
+        assert_eq!(parsed["num_features"], FeatureVector::DIM as u64);
 
         // Verify trades.csv also written
         assert!(dir.path().join("trades.csv").exists());

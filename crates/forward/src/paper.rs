@@ -47,40 +47,22 @@ impl PaperExecutionEngine {
 
     /// Execute a paper order — simulates OTC execution without real order submission.
     pub fn execute(&mut self, request: &ExecutionRequest) -> Result<PaperOrderResult> {
+        let (paper_result, _) = self.simulate(request)?;
+        Ok(paper_result)
+    }
+
+    /// Execute a paper order and also return the underlying execution model result.
+    pub fn simulate(
+        &mut self,
+        request: &ExecutionRequest,
+    ) -> Result<(PaperOrderResult, ExecutionResult)> {
         let result = self
             .gateway
             .simulate_execution(request, &mut self.rng)
             .map_err(|e| anyhow::anyhow!("Execution simulation failed: {:?}", e))?;
 
-        let paper_result = PaperOrderResult {
-            order_id: result.order_id.clone(),
-            symbol: request.symbol.clone(),
-            side: match request.direction {
-                Direction::Buy => "buy".to_string(),
-                Direction::Sell => "sell".to_string(),
-            },
-            requested_lots: request.lots as f64,
-            filled_lots: if result.filled { result.fill_size } else { 0.0 },
-            fill_price: if result.filled {
-                Some(result.fill_price)
-            } else {
-                None
-            },
-            slippage: result.slippage,
-            fill_probability: result.effective_fill_probability,
-            rejected: !result.filled,
-            rejection_reason: result.reject_reason.clone(),
-            timestamp_ns: request.timestamp_ns,
-        };
-
-        info!(
-            order_id = %paper_result.order_id,
-            filled = paper_result.fill_price.is_some(),
-            slippage = paper_result.slippage,
-            "Paper execution completed"
-        );
-
-        Ok(paper_result)
+        let paper_result = Self::to_paper_result(request, &result);
+        Ok((paper_result, result))
     }
 
     /// Build an ExecutionEvent proto from a request/result pair and publish as GenericEvent.
@@ -120,6 +102,42 @@ impl PaperExecutionEngine {
     /// Get mutable reference to the underlying gateway for advanced operations.
     pub fn gateway_mut(&mut self) -> &mut ExecutionGateway {
         &mut self.gateway
+    }
+
+    pub fn gateway(&self) -> &ExecutionGateway {
+        &self.gateway
+    }
+
+    fn to_paper_result(request: &ExecutionRequest, result: &ExecutionResult) -> PaperOrderResult {
+        let paper_result = PaperOrderResult {
+            order_id: result.order_id.clone(),
+            symbol: request.symbol.clone(),
+            side: match request.direction {
+                Direction::Buy => "buy".to_string(),
+                Direction::Sell => "sell".to_string(),
+            },
+            requested_lots: request.lots as f64,
+            filled_lots: if result.filled { result.fill_size } else { 0.0 },
+            fill_price: if result.filled {
+                Some(result.fill_price)
+            } else {
+                None
+            },
+            slippage: result.slippage,
+            fill_probability: result.effective_fill_probability,
+            rejected: !result.filled,
+            rejection_reason: result.reject_reason.clone(),
+            timestamp_ns: request.timestamp_ns,
+        };
+
+        info!(
+            order_id = %paper_result.order_id,
+            filled = paper_result.fill_price.is_some(),
+            slippage = paper_result.slippage,
+            "Paper execution completed"
+        );
+
+        paper_result
     }
 }
 

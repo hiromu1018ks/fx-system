@@ -1115,20 +1115,20 @@ mod tests {
         assert_eq!(flat[18], 0.0); // entry_price
         assert_eq!(flat[19], 0.0); // pnl_unrealized
 
-        // Non-linear transforms (indices 24-29)
-        assert_eq!(flat[24], 0.0); // self_impact
-        assert_eq!(flat[25], 0.0); // time_decay
-        assert_eq!(flat[26], 0.0); // dynamic_cost
+        // Non-linear transforms (indices 26-31)
+        assert_eq!(flat[26], 0.0); // self_impact
+        assert_eq!(flat[27], 0.0); // time_decay
+        assert_eq!(flat[28], 0.0); // dynamic_cost
                                    // Probability fields default to 0.5
-        assert!((flat[27] - 0.5).abs() < 1e-10); // p_revert
-        assert!((flat[28] - 0.5).abs() < 1e-10); // p_continue
-        assert!((flat[29] - 0.5).abs() < 1e-10); // p_trend
+        assert!((flat[29] - 0.5).abs() < 1e-10); // p_revert
+        assert!((flat[30] - 0.5).abs() < 1e-10); // p_continue
+        assert!((flat[31] - 0.5).abs() < 1e-10); // p_trend
 
-        // Interaction terms (indices 30-33)
-        assert_eq!(flat[30], 0.0); // spread_z_x_vol
-        assert_eq!(flat[31], 0.0); // obi_x_session
-        assert_eq!(flat[32], 0.0); // depth_drop_x_vol_spike
-        assert_eq!(flat[33], 0.0); // position_size_x_vol
+        // Interaction terms (indices 32-35)
+        assert_eq!(flat[32], 0.0); // spread_z_x_vol
+        assert_eq!(flat[33], 0.0); // obi_x_session
+        assert_eq!(flat[34], 0.0); // depth_drop_x_vol_spike
+        assert_eq!(flat[35], 0.0); // position_size_x_vol
     }
 
     /// Verify adaptive noise variance uses EMA with halflife parameter.

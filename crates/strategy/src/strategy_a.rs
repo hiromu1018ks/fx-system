@@ -5,7 +5,7 @@
 //! (seconds scale) suitable for capturing reversion within seconds to tens of seconds.
 //!
 //! Trigger: spread_z > 3 ∧ depth_drop < θ₁ ∧ vol_spike > θ₂ ∧ regime_kl < threshold
-//! Feature vector: base 34-dim + 5 strategy-specific = 39 dimensions.
+//! Feature vector: base 38-dim + 5 strategy-specific = 43 dimensions.
 //! MAX_HOLD_TIME: seconds to tens of seconds (default 30s).
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use crate::policy::Action;
 /// Number of extra features Strategy A appends to the base FeatureVector.
 pub const STRATEGY_A_EXTRA_DIM: usize = 5;
 
-/// Total feature dimension for Strategy A's Q-function (34 + 5 = 39).
+/// Total feature dimension for Strategy A's Q-function (38 + 5 = 43).
 pub const STRATEGY_A_FEATURE_DIM: usize = FeatureVector::DIM + STRATEGY_A_EXTRA_DIM;
 
 /// Strategy A configuration.
@@ -122,7 +122,7 @@ pub struct StrategyADecision {
 /// Strategy A: Liquidity Shock Reversion.
 ///
 /// Detects liquidity shocks via spread widening, depth drops, and volatility spikes,
-/// then enters mean-reversion positions. Uses extended feature vector (39-dim) with
+/// then enters mean-reversion positions. Uses extended feature vector (43-dim) with
 /// strategy-specific nonlinear and interaction terms. Episodes are bounded by MAX_HOLD_TIME.
 pub struct StrategyA {
     config: StrategyAConfig,
@@ -163,9 +163,9 @@ impl StrategyA {
             && regime_kl < self.config.regime_kl_threshold
     }
 
-    /// Extract Strategy A's extended feature vector (39-dim).
+    /// Extract Strategy A's extended feature vector (43-dim).
     ///
-    /// Appends 5 strategy-specific features to base 34-dim:
+    /// Appends 5 strategy-specific features to base 38-dim:
     /// 1. spread_z × OBI
     /// 2. self_impact_A (amplified by depth change magnitude)
     /// 3. p_revert_A (emphasizing liquidity shock signals)
@@ -680,7 +680,7 @@ mod tests {
         let strategy = StrategyA::new(make_config());
         let phi = strategy.extract_features(&make_zero_features());
         assert_eq!(phi.len(), STRATEGY_A_FEATURE_DIM);
-        assert_eq!(phi.len(), 41);
+        assert_eq!(phi.len(), 43);
     }
 
     #[test]

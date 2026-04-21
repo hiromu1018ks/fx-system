@@ -88,6 +88,8 @@ impl RollingWindow {
 struct LaggedExecutionStats {
     fill_rate_ema: f64,
     slippage_ema: f64,
+    reject_rate_ema: f64,
+    drift_ema: f64,
     trade_count_window: VecDeque<(u64, i32)>,
     volume_sum_window: VecDeque<(u64, f64)>,
     first_execution_ns: Option<u64>,
@@ -98,24 +100,36 @@ impl LaggedExecutionStats {
         Self {
             fill_rate_ema: 0.0,
             slippage_ema: 0.0,
+            reject_rate_ema: 0.0,
+            drift_ema: 0.0,
             trade_count_window: VecDeque::with_capacity(1000),
             volume_sum_window: VecDeque::with_capacity(1000),
             first_execution_ns: None,
         }
     }
 
-    fn update(&mut self, fill_status: i32, slippage: f64, size: f64, timestamp_ns: u64) {
+    fn update(
+        &mut self,
+        fill_status: i32,
+        slippage: f64,
+        size: f64,
+        execution_drift: f64,
+        timestamp_ns: u64,
+    ) {
         let alpha = 0.05;
         let is_fill = fill_status == proto::FillStatus::Filled as i32
             || fill_status == proto::FillStatus::PartialFill as i32;
 
-        if self.first_execution_ns.is_none() && is_fill {
+        if self.first_execution_ns.is_none() {
             self.first_execution_ns = Some(timestamp_ns);
         }
 
         let instant_fill_rate = if is_fill { 1.0 } else { 0.0 };
+        let instant_reject_rate = if is_fill { 0.0 } else { 1.0 };
         self.fill_rate_ema += alpha * (instant_fill_rate - self.fill_rate_ema);
         self.slippage_ema += alpha * (slippage.abs() - self.slippage_ema);
+        self.reject_rate_ema += alpha * (instant_reject_rate - self.reject_rate_ema);
+        self.drift_ema += alpha * (execution_drift - self.drift_ema);
 
         let count_delta: i32 = if is_fill { 1 } else { 0 };
         self.trade_count_window
@@ -395,6 +409,7 @@ impl FeatureExtractor {
             execution.fill_status,
             execution.slippage,
             execution.fill_size,
+            execution.execution_drift_trend,
             timestamp_ns,
         );
     }
@@ -523,6 +538,16 @@ impl FeatureExtractor {
         } else {
             0.0
         };
+        let recent_reject_rate = if lag_expired {
+            self.lagged_exec.reject_rate_ema
+        } else {
+            0.0
+        };
+        let execution_drift_trend = if lag_expired {
+            self.lagged_exec.drift_ema
+        } else {
+            0.0
+        };
         let trade_intensity = self.lagged_exec.trade_intensity();
         let signed_volume = self.lagged_exec.signed_volume();
 
@@ -572,6 +597,8 @@ impl FeatureExtractor {
             signed_volume,
             recent_fill_rate,
             recent_slippage,
+            recent_reject_rate,
+            execution_drift_trend,
             self_impact,
             time_decay,
             dynamic_cost,
@@ -761,6 +788,8 @@ mod tests {
             latency_ms: 1.0,
             reject_reason: proto::RejectReason::Unspecified as i32,
             reject_message: String::new(),
+            execution_drift_trend: slippage,
+            ..Default::default()
         }
         .encode_to_vec();
         GenericEvent::new(make_header(StreamId::Execution, ts, seq), payload)
@@ -1579,6 +1608,16 @@ mod tests {
             "slippage must be 0 within lag window (leakage prevention), got {}",
             fv.recent_slippage
         );
+        assert!(
+            (fv.recent_reject_rate - 0.0).abs() < 1e-10,
+            "reject rate must be 0 within lag window (leakage prevention), got {}",
+            fv.recent_reject_rate
+        );
+        assert!(
+            (fv.execution_drift_trend - 0.0).abs() < 1e-10,
+            "execution drift must be 0 within lag window (leakage prevention), got {}",
+            fv.execution_drift_trend
+        );
     }
 
     #[test]
@@ -1602,6 +1641,29 @@ mod tests {
             fv.recent_slippage > 0.0,
             "slippage should be visible after lag window, got {}",
             fv.recent_slippage
+        );
+        assert!(
+            fv.execution_drift_trend > 0.0,
+            "execution drift should be visible after lag window, got {}",
+            fv.execution_drift_trend
+        );
+    }
+
+    #[test]
+    fn test_information_leakage_reject_rate_visible_after_lag() {
+        let mut ext = default_extractor();
+        let exec = make_execution_event(0, proto::FillStatus::Rejected as i32, 0.0, 1000.0, 1);
+        ext.process_execution_event(&exec);
+
+        let market_event = make_market_event(500, 110.0, 110.005, 1e6, 1e6, 1);
+        ext.process_market_event(&market_event);
+
+        let now_ns = NS_BASE + 500 * 1_000_000;
+        let fv = ext.extract(&market_event, &make_state_snapshot(), StrategyId::A, now_ns);
+        assert!(
+            fv.recent_reject_rate > 0.0,
+            "reject rate should be visible after lag window, got {}",
+            fv.recent_reject_rate
         );
     }
 
@@ -1745,9 +1807,9 @@ mod tests {
     #[test]
     fn test_lagged_exec_pruning() {
         let mut stats = LaggedExecutionStats::new();
-        stats.update(proto::FillStatus::Filled as i32, 0.001, 100.0, 1000);
-        stats.update(proto::FillStatus::Filled as i32, 0.002, 200.0, 2000);
-        stats.update(proto::FillStatus::Filled as i32, 0.003, 300.0, 3000);
+        stats.update(proto::FillStatus::Filled as i32, 0.001, 100.0, 0.001, 1000);
+        stats.update(proto::FillStatus::Filled as i32, 0.002, 200.0, 0.002, 2000);
+        stats.update(proto::FillStatus::Filled as i32, 0.003, 300.0, 0.003, 3000);
         assert_eq!(stats.trade_count_window.len(), 3);
         stats.prune_before(2500);
         // Events at 1000 and 2000 are pruned (ts < 2500), only 3000 remains
@@ -1757,8 +1819,8 @@ mod tests {
     #[test]
     fn test_lagged_exec_reject_not_counted() {
         let mut stats = LaggedExecutionStats::new();
-        stats.update(proto::FillStatus::Rejected as i32, 0.0, 1000.0, 1000);
-        stats.update(proto::FillStatus::Filled as i32, 0.001, 500.0, 2000);
+        stats.update(proto::FillStatus::Rejected as i32, 0.0, 1000.0, 0.0, 1000);
+        stats.update(proto::FillStatus::Filled as i32, 0.001, 500.0, 0.001, 2000);
         assert!((stats.trade_intensity() - 1.0).abs() < 1e-10);
         assert!((stats.signed_volume() - 500.0).abs() < 1e-10);
     }

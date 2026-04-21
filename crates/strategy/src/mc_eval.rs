@@ -37,6 +37,12 @@ pub enum TerminalReason {
     MaxHoldTimeExceeded,
     /// Daily hard limit triggered (§9.4).
     DailyHardLimit,
+    /// Weekly hard limit triggered (§9.4.1).
+    WeeklyHardLimit,
+    /// Monthly hard limit triggered (§9.4.2).
+    MonthlyHardLimit,
+    /// Weekend gap halt / forced close.
+    WeekendHalt,
     /// Unknown regime detected.
     UnknownRegime,
 }
@@ -47,6 +53,9 @@ impl std::fmt::Display for TerminalReason {
             Self::PositionClosed => write!(f, "PositionClosed"),
             Self::MaxHoldTimeExceeded => write!(f, "MaxHoldTimeExceeded"),
             Self::DailyHardLimit => write!(f, "DailyHardLimit"),
+            Self::WeeklyHardLimit => write!(f, "WeeklyHardLimit"),
+            Self::MonthlyHardLimit => write!(f, "MonthlyHardLimit"),
+            Self::WeekendHalt => write!(f, "WeekendHalt"),
             Self::UnknownRegime => write!(f, "UnknownRegime"),
         }
     }
@@ -1528,7 +1537,7 @@ mod tests {
         let _ = fv.spread_z_x_self_impact;
 
         // Verify flattened length is exactly DIM
-        assert_eq!(flat.len(), 36);
+        assert_eq!(flat.len(), FeatureVector::DIM);
     }
 
     /// Verify FeatureVector roundtrip preserves all fields,

@@ -5,7 +5,7 @@
 //! horizon with much slower decay (λ_B << λ_A).
 //!
 //! Trigger: vol_spike_recent ∧ vol_decaying ∧ OBI_aligned ∧ regime_kl < threshold
-//! Feature vector: base 34-dim + 5 strategy-specific = 39 dimensions.
+//! Feature vector: base 38-dim + 5 strategy-specific = 43 dimensions.
 //! MAX_HOLD_TIME: minutes to tens of minutes (default 300s = 5 min).
 
 use std::collections::HashMap;
@@ -21,7 +21,7 @@ use crate::policy::Action;
 /// Number of extra features Strategy B appends to the base FeatureVector.
 pub const STRATEGY_B_EXTRA_DIM: usize = 5;
 
-/// Total feature dimension for Strategy B's Q-function (34 + 5 = 39).
+/// Total feature dimension for Strategy B's Q-function (38 + 5 = 43).
 pub const STRATEGY_B_FEATURE_DIM: usize = FeatureVector::DIM + STRATEGY_B_EXTRA_DIM;
 
 /// Strategy B configuration.
@@ -122,7 +122,7 @@ pub struct StrategyBDecision {
 /// Strategy B: Volatility Decay Momentum.
 ///
 /// Detects momentum continuation after volatility spikes begin to decay. Uses extended
-/// feature vector (39-dim) with strategy-specific nonlinear and interaction terms focused
+/// feature vector (43-dim) with strategy-specific nonlinear and interaction terms focused
 /// on momentum signals. Episodes are bounded by MAX_HOLD_TIME (minutes scale).
 pub struct StrategyB {
     config: StrategyBConfig,
@@ -164,9 +164,9 @@ impl StrategyB {
             && regime_kl < self.config.regime_kl_threshold
     }
 
-    /// Extract Strategy B's extended feature vector (39-dim).
+    /// Extract Strategy B's extended feature vector (43-dim).
     ///
-    /// Appends 5 strategy-specific features to base 34-dim:
+    /// Appends 5 strategy-specific features to base 38-dim:
     /// 1. rv_spike × trend (realized_vol × OBI direction)
     /// 2. OFI × intensity (delta_obi × trade_intensity)
     /// 3. p_continue_B (emphasizing momentum continuation signals)
@@ -696,7 +696,7 @@ mod tests {
         let strategy = StrategyB::new(make_config());
         let phi = strategy.extract_features(&make_zero_features());
         assert_eq!(phi.len(), STRATEGY_B_FEATURE_DIM);
-        assert_eq!(phi.len(), 41);
+        assert_eq!(phi.len(), 43);
     }
 
     #[test]

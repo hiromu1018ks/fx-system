@@ -9,6 +9,7 @@ use crate::bus::{EventPublisher, PartitionedEventBus};
 use crate::event::{Event, GenericEvent};
 use crate::header::EventHeader;
 use crate::proto;
+use crate::runtime::{parse_strategy_id, proto_header};
 
 #[derive(Debug, Clone)]
 pub struct Position {
@@ -97,6 +98,16 @@ fn proto_strategy_to_core(proto_id: i32) -> Option<StrategyId> {
     }
 }
 
+fn decision_payload_present(decision: &proto::DecisionEventPayload) -> bool {
+    decision.strategy_id != proto::StrategyId::Unspecified as i32
+        || decision.action != proto::ActionType::Unspecified as i32
+        || decision.decision != proto::TradeDecision::Unspecified as i32
+        || !decision.feature_vector.is_empty()
+        || decision.lots > 0
+        || decision.q_selected.abs() > f64::EPSILON
+        || !decision.skip_reason.is_empty()
+}
+
 impl StateProjector {
     pub fn new(bus: &PartitionedEventBus, global_position_limit: f64, schema_version: u32) -> Self {
         let state_publisher = bus.publisher(StreamId::State);
@@ -165,16 +176,36 @@ impl StateProjector {
     }
 
     fn process_strategy_event(&mut self, event: &GenericEvent) -> Result<(), ProjectorError> {
-        let decision = proto::DecisionEventPayload::decode(event.payload_bytes())
-            .map_err(|e| ProjectorError::Decode(e.to_string()))?;
-
-        if let Some(sid) = proto_strategy_to_core(decision.strategy_id) {
-            self.last_active_strategy = sid;
+        if let Ok(decision) = proto::DecisionEventPayload::decode(event.payload_bytes()) {
+            if decision_payload_present(&decision) {
+                if let Some(sid) = proto_strategy_to_core(decision.strategy_id) {
+                    self.last_active_strategy = sid;
+                }
+                self.snapshot.lot_multiplier = decision.lot_multiplier.clamp(0.0, 1.0);
+                self.recompute_staleness(event.header.timestamp_ns);
+                return Ok(());
+            }
         }
 
-        self.recompute_staleness(event.header.timestamp_ns);
+        if let Ok(skip) = proto::TradeSkipEvent::decode(event.payload_bytes()) {
+            if let Some(sid) = parse_strategy_id(&skip.strategy_id) {
+                self.last_active_strategy = sid;
+            }
+            self.snapshot.lot_multiplier = skip.lot_multiplier.clamp(0.0, 1.0);
+            self.recompute_staleness(event.header.timestamp_ns);
+            return Ok(());
+        }
 
-        Ok(())
+        if proto::PolicyCommand::decode(event.payload_bytes()).is_ok()
+            || proto::GapEventPayload::decode(event.payload_bytes()).is_ok()
+        {
+            self.recompute_staleness(event.header.timestamp_ns);
+            return Ok(());
+        }
+
+        Err(ProjectorError::InvalidEvent(
+            "unsupported strategy stream payload".to_string(),
+        ))
     }
 
     fn process_execution_event(
@@ -356,6 +387,16 @@ impl StateProjector {
             .map_err(|e| ProjectorError::Publish(e.to_string()))
     }
 
+    pub fn build_snapshot_event(&self, header: EventHeader) -> GenericEvent {
+        assert!(
+            header.stream_id == StreamId::State,
+            "build_snapshot_event requires State stream header"
+        );
+        let mut payload = self.build_proto_payload();
+        payload.header = Some(proto_header(&header));
+        GenericEvent::new(header, payload.encode_to_vec())
+    }
+
     pub fn build_proto_payload(&self) -> proto::StateSnapshotPayload {
         let positions: Vec<proto::PositionState> = self
             .snapshot
@@ -518,6 +559,7 @@ mod tests {
             regime_posterior: vec![],
             regime_entropy: 0.0,
             skip_reason: String::new(),
+            ..Default::default()
         }
         .encode_to_vec();
 
@@ -550,6 +592,7 @@ mod tests {
             latency_ms: 1.0,
             reject_reason: proto::RejectReason::Unspecified as i32,
             reject_message: String::new(),
+            ..Default::default()
         }
         .encode_to_vec();
 

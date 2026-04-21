@@ -6,7 +6,7 @@
 //! a tens-of-minutes horizon with the slowest decay (λ_C << λ_B << λ_A).
 //!
 //! Trigger: session_active ∧ OBI_significant ∧ time_since_open_in_window ∧ regime_kl < threshold
-//! Feature vector: base 34-dim + 5 strategy-specific = 39 dimensions.
+//! Feature vector: base 38-dim + 5 strategy-specific = 43 dimensions.
 //! MAX_HOLD_TIME: tens of minutes (default 600s = 10 min).
 
 use std::collections::HashMap;
@@ -22,7 +22,7 @@ use crate::policy::Action;
 /// Number of extra features Strategy C appends to the base FeatureVector.
 pub const STRATEGY_C_EXTRA_DIM: usize = 5;
 
-/// Total feature dimension for Strategy C's Q-function (34 + 5 = 39).
+/// Total feature dimension for Strategy C's Q-function (38 + 5 = 43).
 pub const STRATEGY_C_FEATURE_DIM: usize = FeatureVector::DIM + STRATEGY_C_EXTRA_DIM;
 
 /// Strategy C configuration.
@@ -123,7 +123,7 @@ pub struct StrategyCDecision {
 /// Strategy C: Session Structural Bias.
 ///
 /// Detects persistent directional biases during specific trading sessions. Uses extended
-/// feature vector (39-dim) with strategy-specific nonlinear and interaction terms focused
+/// feature vector (43-dim) with strategy-specific nonlinear and interaction terms focused
 /// on session-structure and trend signals. Episodes are bounded by MAX_HOLD_TIME (tens of minutes).
 pub struct StrategyC {
     config: StrategyCConfig,
@@ -170,9 +170,9 @@ impl StrategyC {
             && regime_kl < self.config.regime_kl_threshold
     }
 
-    /// Extract Strategy C's extended feature vector (39-dim).
+    /// Extract Strategy C's extended feature vector (43-dim).
     ///
-    /// Appends 5 strategy-specific features to base 34-dim:
+    /// Appends 5 strategy-specific features to base 38-dim:
     /// 1. session × OBI (OBI weighted by dominant session)
     /// 2. range_break × liquidity_resiliency (depth_change × queue_position)
     /// 3. p_trend_c (adaptive trend estimate from session/OBI/time signals)
@@ -735,7 +735,7 @@ mod tests {
         let strategy = StrategyC::new(make_config());
         let phi = strategy.extract_features(&make_zero_features());
         assert_eq!(phi.len(), STRATEGY_C_FEATURE_DIM);
-        assert_eq!(phi.len(), 41);
+        assert_eq!(phi.len(), 43);
     }
 
     #[test]

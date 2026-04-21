@@ -268,7 +268,12 @@ fn make_forward_config(strategies: &[&str], speed: f64) -> fx_forward::config::F
         },
         risk_config: fx_forward::config::ForwardRiskConfig {
             max_position_lots: 10.0,
-            max_daily_loss: 500.0,
+            max_daily_loss_mtm: 500.0,
+            max_daily_loss_realized: 1_000.0,
+            max_weekly_loss: 2_500.0,
+            max_monthly_loss: 5_000.0,
+            daily_mtm_lot_fraction: 0.25,
+            daily_mtm_q_threshold: 0.01,
             max_drawdown: 1000.0,
         },
         comparison_config: None,
@@ -367,7 +372,12 @@ format = "json"
 
 [forward.risk]
 max_position_lots = 10.0
-max_daily_loss = 500.0
+max_daily_loss_mtm = 500.0
+max_daily_loss_realized = 1000.0
+max_weekly_loss = 2500.0
+max_monthly_loss = 5000.0
+daily_mtm_lot_fraction = 0.25
+daily_mtm_q_threshold = 0.01
 max_drawdown = 1000.0
 "#,
     )

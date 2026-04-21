@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::feed::DataSourceConfig;
+use fx_risk::limits::RiskLimitsConfig;
 use fx_strategy::regime::RegimeConfig;
 
 /// Forward test configuration.
@@ -61,7 +62,18 @@ pub enum ReportFormat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardRiskConfig {
     pub max_position_lots: f64,
-    pub max_daily_loss: f64,
+    /// Absolute MTM loss magnitude that triggers stage-1 daily warning logic.
+    pub max_daily_loss_mtm: f64,
+    /// Absolute realized loss magnitude that triggers daily hard stop.
+    pub max_daily_loss_realized: f64,
+    /// Absolute realized weekly loss magnitude.
+    pub max_weekly_loss: f64,
+    /// Absolute realized monthly loss magnitude.
+    pub max_monthly_loss: f64,
+    /// Lot fraction to apply while MTM warning is active.
+    pub daily_mtm_lot_fraction: f64,
+    /// Minimum |Q| required while MTM warning is active.
+    pub daily_mtm_q_threshold: f64,
     pub max_drawdown: f64,
 }
 
@@ -96,7 +108,12 @@ impl Default for ForwardTestConfig {
             },
             risk_config: ForwardRiskConfig {
                 max_position_lots: 10.0,
-                max_daily_loss: 500.0,
+                max_daily_loss_mtm: 500.0,
+                max_daily_loss_realized: 1_000.0,
+                max_weekly_loss: 2_500.0,
+                max_monthly_loss: 5_000.0,
+                daily_mtm_lot_fraction: 0.25,
+                daily_mtm_q_threshold: 0.01,
                 max_drawdown: 1000.0,
             },
             comparison_config: None,
@@ -154,10 +171,47 @@ impl ForwardTestConfig {
             );
         }
 
-        if self.risk_config.max_daily_loss <= 0.0 {
+        if self.risk_config.max_daily_loss_mtm <= 0.0 {
             anyhow::bail!(
-                "max_daily_loss must be positive, got {}",
-                self.risk_config.max_daily_loss
+                "max_daily_loss_mtm must be positive, got {}",
+                self.risk_config.max_daily_loss_mtm
+            );
+        }
+
+        if self.risk_config.max_daily_loss_realized <= 0.0 {
+            anyhow::bail!(
+                "max_daily_loss_realized must be positive, got {}",
+                self.risk_config.max_daily_loss_realized
+            );
+        }
+
+        if self.risk_config.max_weekly_loss <= 0.0 {
+            anyhow::bail!(
+                "max_weekly_loss must be positive, got {}",
+                self.risk_config.max_weekly_loss
+            );
+        }
+
+        if self.risk_config.max_monthly_loss <= 0.0 {
+            anyhow::bail!(
+                "max_monthly_loss must be positive, got {}",
+                self.risk_config.max_monthly_loss
+            );
+        }
+
+        if self.risk_config.daily_mtm_lot_fraction <= 0.0
+            || self.risk_config.daily_mtm_lot_fraction > 1.0
+        {
+            anyhow::bail!(
+                "daily_mtm_lot_fraction must be in (0, 1], got {}",
+                self.risk_config.daily_mtm_lot_fraction
+            );
+        }
+
+        if self.risk_config.daily_mtm_q_threshold < 0.0 {
+            anyhow::bail!(
+                "daily_mtm_q_threshold must be >= 0, got {}",
+                self.risk_config.daily_mtm_q_threshold
             );
         }
 
@@ -204,6 +258,19 @@ impl ForwardTestConfig {
     /// Check if a strategy is enabled.
     pub fn is_strategy_enabled(&self, strategy: &str) -> bool {
         self.enabled_strategies.contains(strategy)
+    }
+}
+
+impl ForwardRiskConfig {
+    pub fn to_risk_limits_config(&self) -> RiskLimitsConfig {
+        RiskLimitsConfig {
+            max_daily_loss_mtm: -self.max_daily_loss_mtm.abs(),
+            max_daily_loss_realized: -self.max_daily_loss_realized.abs(),
+            max_weekly_loss: -self.max_weekly_loss.abs(),
+            max_monthly_loss: -self.max_monthly_loss.abs(),
+            daily_mtm_lot_fraction: self.daily_mtm_lot_fraction,
+            daily_mtm_q_threshold: self.daily_mtm_q_threshold,
+        }
     }
 }
 
@@ -280,7 +347,12 @@ format = "Json"
 
 [risk_config]
 max_position_lots = 5.0
-max_daily_loss = 300.0
+max_daily_loss_mtm = 300.0
+max_daily_loss_realized = 600.0
+max_weekly_loss = 1500.0
+max_monthly_loss = 3000.0
+daily_mtm_lot_fraction = 0.25
+daily_mtm_q_threshold = 0.01
 max_drawdown = 800.0
 "#;
         let config = ForwardTestConfig::load_from_str(toml_str).unwrap();
@@ -309,7 +381,12 @@ format = "Both"
 
 [risk_config]
 max_position_lots = 10.0
-max_daily_loss = 500.0
+max_daily_loss_mtm = 500.0
+max_daily_loss_realized = 1000.0
+max_weekly_loss = 2500.0
+max_monthly_loss = 5000.0
+daily_mtm_lot_fraction = 0.25
+daily_mtm_q_threshold = 0.01
 max_drawdown = 1000.0
 "#;
         let config = ForwardTestConfig::load_from_str(toml_str).unwrap();

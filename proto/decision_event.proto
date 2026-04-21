@@ -63,4 +63,20 @@ message DecisionEventPayload {
 
   // Skip reason (if decision == SKIP)
   string skip_reason = 70;
+
+  // Runtime-parity diagnostics (design.md §8.1-compatible additions)
+  repeated double q_tilde_final_values = 71;
+  double q_point_selected = 72;
+  double q_tilde_selected = 73;
+  double sigma_model = 74;
+  double sigma_execution = 75;
+  double sigma_latency = 76;
+  double sigma_non_model = 77;
+  double dynamic_k = 78;
+  double position_before = 79;
+  double position_after = 80;
+  double position_max_limit = 81;
+  double velocity_limit = 82;
+  double dynamic_cost = 83;
+  double latency_penalty = 84;
 }

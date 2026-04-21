@@ -1,5 +1,7 @@
 use tracing::warn;
 
+use crate::features::FeatureVector;
+
 const MAX_REGIMES: usize = 16;
 const MIN_PROB: f64 = 1e-12;
 
@@ -27,6 +29,22 @@ impl OnnxRegimeModel {
             .map_err(|e| format!("ORT builder error: {e}"))?
             .commit_from_file(path)
             .map_err(|e| format!("Failed to load ONNX model from {}: {e}", path))?;
+        let feature_dim = session
+            .inputs()
+            .first()
+            .and_then(|input| input.dtype().tensor_shape())
+            .and_then(|shape| shape.iter().last().copied())
+            .filter(|dim| *dim > 0)
+            .map(|dim| dim as usize)
+            .unwrap_or(FeatureVector::DIM);
+        let n_regimes = session
+            .outputs()
+            .first()
+            .and_then(|output| output.dtype().tensor_shape())
+            .and_then(|shape| shape.iter().last().copied())
+            .filter(|dim| *dim > 0)
+            .map(|dim| dim as usize)
+            .unwrap_or(4);
 
         let input_info: Vec<String> = session
             .inputs()
@@ -43,19 +61,20 @@ impl OnnxRegimeModel {
 
         Ok(Self {
             session: std::sync::Mutex::new(session),
-            n_regimes: 4,
-            feature_dim: 36,
+            n_regimes,
+            feature_dim,
         })
     }
 
     /// Run inference on a feature vector, returning regime posterior probabilities.
     pub fn predict(&self, features: &[f64]) -> Result<Vec<f64>, String> {
-        assert!(
-            features.len() == self.feature_dim,
-            "features length {} != model feature_dim {}",
-            features.len(),
-            self.feature_dim
-        );
+        if features.len() != self.feature_dim {
+            return Err(format!(
+                "features length {} != model feature_dim {}",
+                features.len(),
+                self.feature_dim
+            ));
+        }
 
         let features_f32: Vec<f32> = features.iter().map(|&v| v as f32).collect();
         let input_tensor = ort::value::TensorRef::from_array_view((
@@ -83,12 +102,13 @@ impl OnnxRegimeModel {
 
         let posterior: Vec<f64> = data.iter().map(|&v| v as f64).collect();
 
-        assert!(
-            posterior.len() == self.n_regimes,
-            "output length {} != n_regimes {}",
-            posterior.len(),
-            self.n_regimes
-        );
+        if posterior.len() != self.n_regimes {
+            return Err(format!(
+                "output length {} != n_regimes {}",
+                posterior.len(),
+                self.n_regimes
+            ));
+        }
 
         Ok(posterior)
     }
@@ -119,7 +139,7 @@ impl Default for RegimeConfig {
             n_regimes: 4,
             unknown_regime_entropy_threshold: 1.8,
             regime_ar_coeff: 0.9,
-            feature_dim: 36,
+            feature_dim: FeatureVector::DIM,
             model_path: None,
         }
     }
@@ -195,14 +215,32 @@ pub struct RegimeCache {
 impl RegimeCache {
     pub fn new(config: RegimeConfig) -> Self {
         let state = RegimeState::new(config.n_regimes, config.feature_dim);
+        let expected_feature_dim = config.feature_dim;
+        let expected_n_regimes = config.n_regimes;
         let onnx_model = config.model_path.as_ref().and_then(|path| {
             OnnxRegimeModel::load_from_path(path)
-                .map(std::sync::Arc::new)
                 .map_err(|e| {
                     warn!(path, error = %e, "Failed to load ONNX regime model, falling back to heuristic");
                     e
                 })
                 .ok()
+                .and_then(|model| {
+                    if model.feature_dim() != expected_feature_dim
+                        || model.n_regimes() != expected_n_regimes
+                    {
+                        warn!(
+                            path,
+                            model_feature_dim = model.feature_dim(),
+                            expected_feature_dim,
+                            model_n_regimes = model.n_regimes(),
+                            expected_n_regimes,
+                            "ONNX regime model shape mismatch, falling back to heuristic"
+                        );
+                        None
+                    } else {
+                        Some(std::sync::Arc::new(model))
+                    }
+                })
         });
         Self {
             config,
@@ -591,7 +629,7 @@ mod tests {
         assert!(!cache.state().is_initialized());
         assert!(!cache.state().is_unknown());
         assert_eq!(cache.state().posterior().len(), 4);
-        assert_eq!(cache.state().drift().len(), 36);
+        assert_eq!(cache.state().drift().len(), FeatureVector::DIM);
     }
 
     #[test]
@@ -639,7 +677,7 @@ mod tests {
         let posterior = vec![1.0, 0.0, 0.0, 0.0];
         cache.update(posterior, 1000);
 
-        let features = vec![0.0; 36];
+        let features = vec![0.0; FeatureVector::DIM];
         cache.update_drift(&features);
         assert!(cache.state().drift().iter().all(|d| d.abs() < 1e-10));
     }
@@ -650,7 +688,7 @@ mod tests {
         let posterior = vec![1.0, 0.0, 0.0, 0.0];
         cache.update(posterior, 1000);
 
-        let features = vec![0.0; 36];
+        let features = vec![0.0; FeatureVector::DIM];
         cache.update_drift(&features);
         assert!(cache.state().drift().iter().all(|d| d.abs() < 1e-10));
 
@@ -803,7 +841,7 @@ mod tests {
     fn test_regime_cache_no_onnx_model_by_default() {
         let cache = RegimeCache::with_defaults();
         assert!(!cache.has_onnx_model());
-        assert!(cache.predict_onnx(&vec![0.0; 36]).is_none());
+        assert!(cache.predict_onnx(&vec![0.0; FeatureVector::DIM]).is_none());
     }
 
     #[test]
@@ -828,7 +866,7 @@ mod tests {
         // If ORT is available, test actual loading behavior
         let cache = RegimeCache::new(config);
         assert!(!cache.has_onnx_model());
-        assert!(cache.predict_onnx(&vec![0.0; 36]).is_none());
+        assert!(cache.predict_onnx(&vec![0.0; FeatureVector::DIM]).is_none());
         let posterior = vec![0.9, 0.05, 0.03, 0.02];
         let mut cache = cache;
         cache.update(posterior, 1000);

@@ -56,4 +56,13 @@ message ExecutionEventPayload {
   // Reject details
   RejectReason reject_reason = 60;
   string reject_message = 61;
+
+  // Runtime-parity diagnostics (design.md §8.1-compatible additions)
+  double expected_fill_price = 70;
+  double actual_fill_price = 71;
+  double estimated_fill_prob = 72;
+  double execution_drift_trend = 73;
+  double hidden_liquidity_sigma = 74;
+  double fill_prediction_error = 75;
+  double lp_fill_rate_rolling = 76;
 }

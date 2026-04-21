@@ -106,6 +106,41 @@ impl PreFailureMetrics {
     ];
 }
 
+pub fn shannon_entropy(probabilities: &[f64]) -> f64 {
+    probabilities
+        .iter()
+        .copied()
+        .filter(|p| *p > 0.0)
+        .map(|p| -p * p.ln())
+        .sum()
+}
+
+pub fn softmax_entropy(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let max_value = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let exp_values: Vec<f64> = values
+        .iter()
+        .map(|value| (value - max_value).exp())
+        .collect();
+    let total: f64 = exp_values.iter().sum();
+    if total <= f64::EPSILON {
+        return 0.0;
+    }
+    let probabilities: Vec<f64> = exp_values.into_iter().map(|value| value / total).collect();
+    shannon_entropy(&probabilities)
+}
+
+pub fn l2_distance(lhs: &[f64], rhs: &[f64]) -> f64 {
+    assert_eq!(lhs.len(), rhs.len(), "vector length mismatch");
+    lhs.iter()
+        .zip(rhs.iter())
+        .map(|(left, right)| (left - right).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
 // ---------------------------------------------------------------------------
 // Online rolling statistics
 // ---------------------------------------------------------------------------
@@ -641,6 +676,24 @@ mod tests {
         let m2: PreFailureMetrics = serde_json::from_str(&json).unwrap();
         assert!((m2.rolling_variance_latency - 1.5).abs() < f64::EPSILON);
         assert!((m2.policy_entropy - 2.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn shannon_entropy_zero_for_deterministic_distribution() {
+        assert!((shannon_entropy(&[1.0, 0.0, 0.0]) - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn softmax_entropy_positive_for_mixed_scores() {
+        let entropy = softmax_entropy(&[2.0, 1.0, 0.0]);
+        assert!(entropy > 0.0);
+        assert!(entropy < 1.2);
+    }
+
+    #[test]
+    fn l2_distance_matches_expected_value() {
+        let distance = l2_distance(&[0.0, 3.0, 4.0], &[0.0, 0.0, 0.0]);
+        assert!((distance - 5.0).abs() < 1e-12);
     }
 
     // -- RollingStats --------------------------------------------------------

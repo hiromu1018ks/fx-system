@@ -4,8 +4,10 @@ mod output;
 
 use anyhow::{Context, Result};
 use args::{Cli, Commands};
+use chrono::DateTime;
 use clap::Parser;
 use fx_core::types::StrategyId;
+use fx_events::store::{EventStore, Tier1Store};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::info;
@@ -164,8 +166,17 @@ fn run_forward_test(cmd: args::ForwardTestCmd) -> Result<()> {
         fx_forward::feed::DataSourceConfig::Recorded {
             event_store_path,
             speed,
-            ..
-        } => run_recorded_forward(config, event_store_path, *speed, seed, &output_dir),
+            start_time,
+            end_time,
+        } => run_recorded_forward(
+            config,
+            event_store_path,
+            *speed,
+            start_time.as_deref(),
+            end_time.as_deref(),
+            seed,
+            &output_dir,
+        ),
         fx_forward::feed::DataSourceConfig::ExternalApi {
             provider,
             credentials_path,
@@ -185,19 +196,29 @@ fn run_recorded_forward(
     config: fx_forward::config::ForwardTestConfig,
     data_path: &str,
     speed: f64,
+    start_time: Option<&str>,
+    end_time: Option<&str>,
     seed: u64,
     output_dir: &Path,
 ) -> Result<()> {
     let path = PathBuf::from(data_path);
-    let ticks = fx_backtest::data::load_csv(&path)
-        .with_context(|| format!("Failed to load data from: {}", path.display()))?;
-    let total_ticks = ticks.len();
-    info!(tick_count = total_ticks, "Loaded tick data");
-    println!("Loaded {total_ticks} ticks from {}", path.display());
+    let events = load_recorded_market_events(&path)?;
+    let total_ticks = events.len();
+    let start_time_ns = parse_recorded_time(start_time)?;
+    let end_time_ns = parse_recorded_time(end_time)?;
+    info!(
+        event_count = total_ticks,
+        ?start_time_ns,
+        ?end_time_ns,
+        "Loaded recorded market events"
+    );
+    println!(
+        "Loaded {total_ticks} recorded market events from {}",
+        path.display()
+    );
 
-    let events = fx_backtest::data::ticks_to_events(&ticks);
     let store = fx_forward::feed::VecEventStore::new(events);
-    let feed = fx_forward::feed::RecordedDataFeed::new(store, speed, None, None);
+    let feed = fx_forward::feed::RecordedDataFeed::new(store, speed, start_time_ns, end_time_ns);
     let mut runner = fx_forward::runner::ForwardTestRunner::new(feed, config);
 
     println!("Running forward test on {total_ticks} events...");
@@ -224,6 +245,8 @@ fn run_recorded_forward(
             total_ticks: 0,
             total_decisions: 0,
             total_trades: snapshot.total_trades,
+            strategy_events_published: 0,
+            state_snapshots_published: 0,
             duration_secs: elapsed.as_secs_f64(),
             final_pnl: snapshot.cumulative_pnl,
             strategies_used: vec![],
@@ -250,6 +273,46 @@ fn run_recorded_forward(
     info!(dir = %output_dir.display(), "Forward test results written");
     println!("Results written to {}", output_dir.display());
     Ok(())
+}
+
+fn load_recorded_market_events(path: &Path) -> Result<Vec<fx_events::event::GenericEvent>> {
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+    {
+        let ticks = fx_backtest::data::load_csv(path)
+            .with_context(|| format!("Failed to load CSV data from: {}", path.display()))?;
+        return Ok(fx_backtest::data::ticks_to_events(&ticks));
+    }
+
+    let store = Tier1Store::open(
+        path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid event store path: {}", path.display()))?,
+    )
+    .with_context(|| format!("Failed to open recorded Event Store: {}", path.display()))?;
+    store
+        .replay(fx_core::types::StreamId::Market, 0)
+        .with_context(|| format!("Failed to replay market events from: {}", path.display()))
+}
+
+fn parse_recorded_time(value: Option<&str>) -> Result<Option<u64>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    if let Ok(ns) = raw.parse::<u64>() {
+        return Ok(Some(ns));
+    }
+
+    let timestamp = DateTime::parse_from_rfc3339(raw)
+        .with_context(|| format!("Invalid recorded timestamp '{raw}'. Use ns or RFC3339."))?;
+    let ns = timestamp
+        .timestamp_nanos_opt()
+        .ok_or_else(|| anyhow::anyhow!("Recorded timestamp out of range: {raw}"))?;
+    if ns < 0 {
+        anyhow::bail!("Recorded timestamp must be >= 0: {raw}");
+    }
+    Ok(Some(ns as u64))
 }
 
 fn run_external_forward(
@@ -294,6 +357,8 @@ fn run_external_forward(
             total_ticks: 0,
             total_decisions: 0,
             total_trades: snapshot.total_trades,
+            strategy_events_published: 0,
+            state_snapshots_published: 0,
             duration_secs: elapsed.as_secs_f64(),
             final_pnl: snapshot.cumulative_pnl,
             strategies_used: vec![],
@@ -400,20 +465,18 @@ fn run_validate(cmd: args::ValidateCmd) -> Result<()> {
     let validation_output = output_dir.join("validation_result.json");
 
     // Build arguments for Python bridge
-    let num_features_arg = cmd
-        .num_features
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "45".to_string());
-
     println!("Running Python validation pipeline...");
-    let output = std::process::Command::new(&cmd.python_path)
+    let mut command = std::process::Command::new(&cmd.python_path);
+    command
         .arg(&bridge_script)
         .arg("--input")
         .arg(result_path)
         .arg("--output")
-        .arg(&validation_output)
-        .arg("--num-features")
-        .arg(&num_features_arg)
+        .arg(&validation_output);
+    if let Some(num_features) = cmd.num_features {
+        command.arg("--num-features").arg(num_features.to_string());
+    }
+    let output = command
         .output()
         .with_context(|| format!("Failed to execute Python at '{}'", cmd.python_path))?;
 

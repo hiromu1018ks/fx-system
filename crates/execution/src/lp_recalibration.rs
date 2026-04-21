@@ -371,6 +371,17 @@ impl LpRecalibrationManager {
     pub fn config(&self) -> &RecalibrationConfig {
         &self.config
     }
+
+    pub fn completion_progress(&self) -> f64 {
+        if self.status != RecalibrationStatus::SafeMode {
+            return 1.0;
+        }
+        if self.config.min_recalibration_observations == 0 {
+            return 1.0;
+        }
+        (self.observations as f64 / self.config.min_recalibration_observations as f64)
+            .clamp(0.0, 1.0)
+    }
 }
 
 // ============================================================

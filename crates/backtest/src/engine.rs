@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use fx_core::observability::{AnomalyConfig, ObservabilityManager, PreFailureMetrics};
+use fx_core::observability::{
+    l2_distance, softmax_entropy, AnomalyConfig, ObservabilityManager, PreFailureMetrics,
+    RollingStats,
+};
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::{Event, GenericEvent};
@@ -9,6 +12,10 @@ use fx_events::gap_detector::GapDetector;
 use fx_events::header::EventHeader;
 use fx_events::projector::{StateProjector, StateSnapshot};
 use fx_events::proto;
+use fx_events::runtime::{
+    action_type, build_decision_event, build_trade_skip_event, proto_header, DecisionEventContext,
+    RuntimeSequencer,
+};
 use fx_events::store::EventStore;
 use fx_execution::gateway::{
     ExecutionGateway, ExecutionGatewayConfig, ExecutionRequest, ExecutionResult,
@@ -32,6 +39,7 @@ use prost::Message as _;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use chrono::{DateTime, Datelike};
 use chrono_tz::Tz;
@@ -215,6 +223,10 @@ pub struct BacktestResult {
     pub execution_stats: ExecutionStats,
     /// Execution events generated during the run, ready for EventBus replay.
     pub execution_events: Vec<GenericEvent>,
+    /// Strategy-stream events generated during the run.
+    pub strategy_events_published: u64,
+    /// State snapshot events generated during the run.
+    pub state_snapshots_published: u64,
     /// Number of times ObservabilityManager::tick() was called (PreFailureMetrics collected).
     pub observability_ticks: u64,
 }
@@ -225,6 +237,138 @@ struct PositionSnapshot {
     size: f64,
     #[allow(dead_code)]
     entry_timestamp_ns: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+struct PeriodicLimitTracker {
+    day_key: Option<(i32, u32)>,
+    week_key: Option<(i32, u32)>,
+    month_key: Option<(i32, u32)>,
+    day_realized_start: f64,
+    week_realized_start: f64,
+    month_realized_start: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeObservabilityState {
+    execution_drift: RollingStats,
+    q_value_adjustment_frequency: RollingStats,
+    liquidity_evolvement: RollingStats,
+    dynamic_cost_estimate_error: RollingStats,
+    policy_entropy: f64,
+    self_impact_ratio: f64,
+    bayesian_posterior_drift: f64,
+    last_action_scores: HashMap<StrategyId, [f64; 3]>,
+}
+
+impl Default for RuntimeObservabilityState {
+    fn default() -> Self {
+        Self {
+            execution_drift: RollingStats::new(256),
+            q_value_adjustment_frequency: RollingStats::new(256),
+            liquidity_evolvement: RollingStats::new(256),
+            dynamic_cost_estimate_error: RollingStats::new(256),
+            policy_entropy: 0.0,
+            self_impact_ratio: 0.0,
+            bayesian_posterior_drift: 0.0,
+            last_action_scores: HashMap::new(),
+        }
+    }
+}
+
+impl RuntimeObservabilityState {
+    fn record_action_scores(&mut self, strategy_id: StrategyId, action_scores: [f64; 3]) {
+        let adjustment = self
+            .last_action_scores
+            .insert(strategy_id, action_scores)
+            .map(|previous| {
+                let relative_change = action_scores
+                    .iter()
+                    .zip(previous.iter())
+                    .map(|(current, prior)| (current - prior).abs() / prior.abs().max(1e-6))
+                    .fold(0.0_f64, f64::max);
+                if relative_change > 0.05 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        self.q_value_adjustment_frequency.update(adjustment);
+    }
+
+    fn record_liquidity_evolvement(&mut self, depth_change_rate: f64) {
+        self.liquidity_evolvement.update(depth_change_rate.abs());
+    }
+
+    fn record_execution_fill(
+        &mut self,
+        execution_drift: f64,
+        slippage: f64,
+        estimated_dynamic_cost: Option<f64>,
+    ) {
+        self.execution_drift.update(execution_drift);
+        if let Some(dynamic_cost) = estimated_dynamic_cost {
+            self.dynamic_cost_estimate_error
+                .update((dynamic_cost.abs() - slippage.abs()).abs());
+        }
+    }
+}
+
+fn mean_or_zero(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        0.0
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+impl PeriodicLimitTracker {
+    fn update(
+        &mut self,
+        tick_ns: u64,
+        total_realized_pnl: f64,
+        total_unrealized_pnl: f64,
+        config: &RiskLimitsConfig,
+    ) -> fx_events::projector::LimitStateData {
+        let helsinki: Tz = chrono_tz::Europe::Helsinki;
+        let secs = (tick_ns / 1_000_000_000) as i64;
+        let nanos = (tick_ns % 1_000_000_000) as u32;
+        let timestamp = DateTime::from_timestamp(secs, nanos)
+            .unwrap_or_default()
+            .with_timezone(&helsinki);
+
+        let day_key = (timestamp.year(), timestamp.ordinal());
+        let iso_week = timestamp.iso_week();
+        let week_key = (iso_week.year(), iso_week.week());
+        let month_key = (timestamp.year(), timestamp.month());
+
+        if self.day_key != Some(day_key) {
+            self.day_key = Some(day_key);
+            self.day_realized_start = total_realized_pnl;
+        }
+        if self.week_key != Some(week_key) {
+            self.week_key = Some(week_key);
+            self.week_realized_start = total_realized_pnl;
+        }
+        if self.month_key != Some(month_key) {
+            self.month_key = Some(month_key);
+            self.month_realized_start = total_realized_pnl;
+        }
+
+        let daily_realized = total_realized_pnl - self.day_realized_start;
+        let weekly_realized = total_realized_pnl - self.week_realized_start;
+        let monthly_realized = total_realized_pnl - self.month_realized_start;
+        let daily_mtm = daily_realized + total_unrealized_pnl;
+
+        HierarchicalRiskLimiter::compute_limit_state(
+            config,
+            daily_mtm,
+            daily_realized,
+            weekly_realized,
+            monthly_realized,
+        )
+    }
 }
 
 /// Backtest engine: loads historical MarketEvents from an EventStore and replays
@@ -315,12 +459,17 @@ impl BacktestEngine {
         let mut all_trades: Vec<TradeRecord> = Vec::new();
         let mut all_decisions: Vec<BacktestDecision> = Vec::new();
         let mut all_execution_events: Vec<GenericEvent> = Vec::new();
+        let mut strategy_events_published: u64 = 0;
+        let mut state_snapshots_published: u64 = 0;
         let mut first_batch = true;
 
         let mut batch: Vec<GenericEvent> = Vec::with_capacity(Self::STREAM_BATCH_SIZE);
+        let mut market_sequence_id: u64 = 0;
 
         for tick in tick_source {
-            let event = tick_to_event(&tick);
+            market_sequence_id = market_sequence_id.saturating_add(1);
+            let mut event = tick_to_event(&tick);
+            event.header.sequence_id = market_sequence_id;
             if event.header.timestamp_ns < self.config.start_time_ns
                 || event.header.timestamp_ns > self.config.end_time_ns
             {
@@ -335,6 +484,10 @@ impl BacktestEngine {
                 all_trades.extend(batch_result.trades);
                 all_decisions.extend(batch_result.decisions);
                 all_execution_events.extend(batch_result.execution_events);
+                strategy_events_published = strategy_events_published
+                    .saturating_add(batch_result.strategy_events_published);
+                state_snapshots_published = state_snapshots_published
+                    .saturating_add(batch_result.state_snapshots_published);
                 first_batch = false;
                 batch.clear();
             }
@@ -348,6 +501,10 @@ impl BacktestEngine {
             all_trades.extend(batch_result.trades);
             all_decisions.extend(batch_result.decisions);
             all_execution_events.extend(batch_result.execution_events);
+            strategy_events_published =
+                strategy_events_published.saturating_add(batch_result.strategy_events_published);
+            state_snapshots_published =
+                state_snapshots_published.saturating_add(batch_result.state_snapshots_published);
         }
 
         let wall_time_ms = wall_start.elapsed().as_millis() as u64;
@@ -372,6 +529,8 @@ impl BacktestEngine {
             summary,
             execution_stats,
             execution_events: all_execution_events,
+            strategy_events_published,
+            state_snapshots_published,
             observability_ticks: 0,
         }
     }
@@ -409,6 +568,8 @@ impl BacktestEngine {
                     summary: TradeSummary::empty(),
                     execution_stats: ExecutionStats::empty(),
                     execution_events: Vec::new(),
+                    strategy_events_published: 0,
+                    state_snapshots_published: 0,
                     observability_ticks: 0,
                 };
             }
@@ -456,6 +617,8 @@ impl BacktestEngine {
                 summary: TradeSummary::empty(),
                 execution_stats: ExecutionStats::empty(),
                 execution_events: Vec::new(),
+                strategy_events_published: 0,
+                state_snapshots_published: 0,
                 observability_ticks: 0,
             };
         }
@@ -478,6 +641,8 @@ impl BacktestEngine {
                 summary: TradeSummary::empty(),
                 execution_stats: ExecutionStats::empty(),
                 execution_events: Vec::new(),
+                strategy_events_published: 0,
+                state_snapshots_published: 0,
                 observability_ticks: 0,
             };
         }
@@ -488,13 +653,19 @@ impl BacktestEngine {
             FeatureExtractor::new(self.config.feature_extractor_config.clone());
         let mut gap_detector = GapDetector::new(&bus, 1);
         let mut observability_manager = ObservabilityManager::new(AnomalyConfig::default());
+        let mut limit_tracker = PeriodicLimitTracker::default();
+        let mut runtime_sequencer = RuntimeSequencer::new(1);
 
         let mut trades: Vec<TradeRecord> = Vec::new();
         let mut decisions: Vec<BacktestDecision> = Vec::new();
         let mut execution_events: Vec<GenericEvent> = Vec::new();
+        let mut strategy_events_published: u64 = 0;
+        let mut state_snapshots_published: u64 = 0;
         let mut total_ticks: u64 = 0;
         let mut total_decision_ticks: u64 = 0;
         let mut prev_tick_ns: u64 = 0;
+        let mut runtime_observability = RuntimeObservabilityState::default();
+        let mut posterior_snapshots: HashMap<String, Vec<f64>> = HashMap::new();
 
         // Clone to release borrow on self.config before mutating self
         let enabled_strategies: Vec<StrategyId> =
@@ -520,6 +691,22 @@ impl BacktestEngine {
                 continue;
             }
 
+            let limit_state = limit_tracker.update(
+                tick_ns,
+                projector.snapshot().total_realized_pnl,
+                projector.snapshot().total_unrealized_pnl,
+                &self.config.risk_limits_config,
+            );
+            projector.update_limit_state(limit_state);
+            self.maybe_emit_snapshot_event(
+                &mut runtime_sequencer,
+                &projector,
+                tick_ns,
+                Some(event.header.event_id),
+                false,
+                &mut state_snapshots_published,
+            );
+
             feature_extractor.process_market_event(event);
 
             let market_payload = match proto::MarketEventPayload::decode(event.payload_bytes()) {
@@ -539,32 +726,42 @@ impl BacktestEngine {
                     "Weekend gap detected — force-closing all open positions"
                 );
                 self.close_all_positions(
+                    &mut runtime_sequencer,
                     &mut projector,
                     &mut feature_extractor,
+                    &mut runtime_observability,
                     &mut trades,
                     &mut execution_events,
                     mid_price,
                     volatility,
                     tick_ns,
+                    Some(event.header.event_id),
                     "WEEKEND_HALT",
+                );
+                let limit_state = limit_tracker.update(
+                    tick_ns,
+                    projector.snapshot().total_realized_pnl,
+                    projector.snapshot().total_unrealized_pnl,
+                    &self.config.risk_limits_config,
+                );
+                projector.update_limit_state(limit_state);
+                self.maybe_emit_snapshot_event(
+                    &mut runtime_sequencer,
+                    &projector,
+                    tick_ns,
+                    Some(event.header.event_id),
+                    true,
+                    &mut state_snapshots_published,
                 );
             }
 
-            let snapshot = projector.snapshot();
-
-            // Collect pre-failure metrics for observability (design.md §8.2)
-            let metrics = self.collect_pre_failure_metrics(
-                &snapshot,
-                &self.config.risk_limits_config,
-                tick_ns,
-            );
-            observability_manager.tick(metrics, tick_ns);
+            let snapshot = projector.snapshot().clone();
 
             // Extract features per strategy into a map for O(1) lookup
             let tick_contexts: HashMap<StrategyId, TickContext> = StrategyId::all()
                 .iter()
                 .map(|&sid| {
-                    let features = feature_extractor.extract(event, snapshot, sid, tick_ns);
+                    let features = feature_extractor.extract(event, &snapshot, sid, tick_ns);
                     (
                         sid,
                         TickContext {
@@ -577,6 +774,19 @@ impl BacktestEngine {
                     )
                 })
                 .collect();
+
+            self.update_runtime_observability(
+                &enabled_strategies,
+                &tick_contexts,
+                &mut posterior_snapshots,
+                &mut runtime_observability,
+            );
+            let metrics = self.collect_pre_failure_metrics(
+                &snapshot,
+                &self.config.risk_limits_config,
+                &runtime_observability,
+            );
+            observability_manager.tick(metrics, tick_ns);
 
             // Phase 1: Close positions that exceeded per-strategy MAX_HOLD_TIME
             for &sid in &enabled_strategies {
@@ -596,16 +806,27 @@ impl BacktestEngine {
                             );
 
                             if result.filled {
+                                runtime_observability.record_execution_fill(
+                                    result.fill_price - result.requested_price,
+                                    result.slippage,
+                                    None,
+                                );
                                 let (trade_pnl, exec_event) = self.process_execution_result(
+                                    &mut runtime_sequencer,
                                     sid,
                                     &result,
                                     direction,
                                     tick_ns,
+                                    Some(event.header.event_id),
                                     &mut projector,
                                 );
                                 if let Some(ref exec_ev) = exec_event {
                                     feature_extractor.process_execution_event(exec_ev);
                                 }
+                                let snapshot_parent = exec_event
+                                    .as_ref()
+                                    .map(|ev| ev.header.event_id)
+                                    .or(Some(event.header.event_id));
                                 if let Some(ev) = exec_event {
                                     execution_events.push(ev);
                                 }
@@ -621,6 +842,21 @@ impl BacktestEngine {
                                     latency_ms: result.latency_ms,
                                     close_reason: Some("MAX_HOLD_TIME".to_string()),
                                 });
+                                let limit_state = limit_tracker.update(
+                                    tick_ns,
+                                    projector.snapshot().total_realized_pnl,
+                                    projector.snapshot().total_unrealized_pnl,
+                                    &self.config.risk_limits_config,
+                                );
+                                projector.update_limit_state(limit_state);
+                                self.maybe_emit_snapshot_event(
+                                    &mut runtime_sequencer,
+                                    &projector,
+                                    tick_ns,
+                                    snapshot_parent,
+                                    true,
+                                    &mut state_snapshots_published,
+                                );
                             }
 
                             self.end_strategy_episode(
@@ -660,68 +896,89 @@ impl BacktestEngine {
             self.prev_regime_unknown = current_unknown;
 
             // Phase 2: Collect strategy decisions (skip culled strategies)
-            let snapshot = projector.snapshot();
+            let snapshot = projector.snapshot().clone();
             let mut strategy_q: HashMap<StrategyId, f64> = HashMap::new();
-            let mut strategy_decisions: Vec<(StrategyId, StrategyDecision)> = Vec::new();
+            let mut strategy_decisions: Vec<(StrategyId, FeatureVector, StrategyDecision)> =
+                Vec::new();
 
             for &sid in &enabled_strategies {
                 // Skip all strategies when trading is halted due to severe gap
                 if gap_halted {
-                    strategy_decisions.push((
+                    self.emit_trade_skip_event(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        Some(event.header.event_id),
+                        tick_ns,
                         sid,
-                        StrategyDecision {
-                            action: Action::Hold,
-                            q_point: 0.0,
-                            q_sampled: 0.0,
-                            posterior_std: 0.0,
-                            triggered: false,
-                            episode_active: false,
-                            should_close: false,
-                            skip_reason: Some("gap_detected".to_string()),
-                            remaining_hold_time_ms: 0,
-                        },
-                    ));
+                        "gap_detected",
+                        0.0,
+                        0.0,
+                        &snapshot,
+                    );
+                    strategy_events_published = strategy_events_published.saturating_add(1);
                     continue;
                 }
                 // Skip all strategies when regime is unknown
                 if self.regime_cache.state().is_unknown() {
-                    strategy_decisions.push((
+                    self.emit_trade_skip_event(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        Some(event.header.event_id),
+                        tick_ns,
                         sid,
-                        StrategyDecision {
-                            action: Action::Hold,
-                            q_point: 0.0,
-                            q_sampled: 0.0,
-                            posterior_std: 0.0,
-                            triggered: false,
-                            episode_active: false,
-                            should_close: false,
-                            skip_reason: Some("unknown_regime".to_string()),
-                            remaining_hold_time_ms: 0,
-                        },
-                    ));
+                        "unknown_regime",
+                        0.0,
+                        0.0,
+                        &snapshot,
+                    );
+                    strategy_events_published = strategy_events_published.saturating_add(1);
                     continue;
                 }
                 // Skip culled strategies (lifecycle manager hard-block)
                 if !self.lifecycle_manager.is_alive(sid) {
+                    self.emit_trade_skip_event(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        Some(event.header.event_id),
+                        tick_ns,
+                        sid,
+                        "strategy_culled",
+                        0.0,
+                        0.0,
+                        &snapshot,
+                    );
+                    strategy_events_published = strategy_events_published.saturating_add(1);
                     continue;
                 }
                 let ctx = tick_contexts.get(&sid).unwrap();
-                let decision = self.get_strategy_decision(sid, &ctx.features, snapshot, tick_ns);
+                let decision = self.get_strategy_decision(sid, &ctx.features, &snapshot, tick_ns);
                 strategy_q.insert(sid, decision.q_sampled);
-                strategy_decisions.push((sid, decision));
+                strategy_decisions.push((sid, ctx.features.clone(), decision));
             }
 
             // Sort by Q-value descending for priority (design.md §9.5)
             strategy_decisions.sort_by(|a, b| {
-                b.1.q_sampled
-                    .partial_cmp(&a.1.q_sampled)
+                b.2.q_sampled
+                    .partial_cmp(&a.2.q_sampled)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             // Phase 3: Execute strategy decisions
-            for (sid, decision) in strategy_decisions {
+            for (sid, features, decision) in strategy_decisions {
                 let triggered = decision.triggered;
                 let skip = decision.skip_reason.clone();
+                let decision_snapshot = projector.snapshot().clone();
+                let decision_event_id = self.emit_decision_event(
+                    &mut runtime_sequencer,
+                    &mut projector,
+                    Some(event.header.event_id),
+                    tick_ns,
+                    sid,
+                    &features,
+                    &decision_snapshot,
+                    &decision,
+                );
+                strategy_events_published = strategy_events_published.saturating_add(1);
 
                 match decision.action {
                     Action::Buy(lots) | Action::Sell(lots) => {
@@ -739,6 +996,19 @@ impl BacktestEngine {
                             .unwrap_or(false);
 
                         if has_position {
+                            let skip_snapshot = projector.snapshot().clone();
+                            self.emit_trade_skip_event(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                Some(decision_event_id),
+                                tick_ns,
+                                sid,
+                                "already_in_position",
+                                decision.q_sampled,
+                                decision.q_point,
+                                &skip_snapshot,
+                            );
+                            strategy_events_published = strategy_events_published.saturating_add(1);
                             decisions.push(BacktestDecision {
                                 timestamp_ns: tick_ns,
                                 strategy_id: sid,
@@ -755,6 +1025,19 @@ impl BacktestEngine {
 
                         // 1. KillSwitch: anomaly-based order masking
                         if self.kill_switch.validate_order().is_err() {
+                            let skip_snapshot = projector.snapshot().clone();
+                            self.emit_trade_skip_event(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                Some(decision_event_id),
+                                tick_ns,
+                                sid,
+                                "kill_switch_masked",
+                                decision.q_sampled,
+                                decision.q_point,
+                                &skip_snapshot,
+                            );
+                            strategy_events_published = strategy_events_published.saturating_add(1);
                             decisions.push(BacktestDecision {
                                 timestamp_ns: tick_ns,
                                 strategy_id: sid,
@@ -769,6 +1052,19 @@ impl BacktestEngine {
 
                         // 2. LifecycleManager: culled strategy check
                         if self.lifecycle_manager.validate_order(sid).is_err() {
+                            let skip_snapshot = projector.snapshot().clone();
+                            self.emit_trade_skip_event(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                Some(decision_event_id),
+                                tick_ns,
+                                sid,
+                                "strategy_culled",
+                                decision.q_sampled,
+                                decision.q_point,
+                                &skip_snapshot,
+                            );
+                            strategy_events_published = strategy_events_published.saturating_add(1);
                             decisions.push(BacktestDecision {
                                 timestamp_ns: tick_ns,
                                 strategy_id: sid,
@@ -797,24 +1093,46 @@ impl BacktestEngine {
                                 CloseReason::WeekendHalt => "weekend_halt",
                             };
                             self.close_all_positions(
+                                &mut runtime_sequencer,
                                 &mut projector,
                                 &mut feature_extractor,
+                                &mut runtime_observability,
                                 &mut trades,
                                 &mut execution_events,
                                 mid_price,
                                 volatility,
                                 tick_ns,
+                                Some(event.header.event_id),
                                 reason_str,
                             );
-
-                            // Reset monthly loss counter after halt so trading can resume
-                            // BLR posterior is preserved (NOT reset) — learning continues across month boundary
-                            if reason == CloseReason::MonthlyHalt {
-                                let mut reset_state = projector.snapshot().limit_state;
-                                reset_state.monthly_pnl = 0.0;
-                                reset_state.monthly_halted = false;
-                                projector.update_limit_state(reset_state);
-                            }
+                            let limit_state = limit_tracker.update(
+                                tick_ns,
+                                projector.snapshot().total_realized_pnl,
+                                projector.snapshot().total_unrealized_pnl,
+                                &self.config.risk_limits_config,
+                            );
+                            projector.update_limit_state(limit_state);
+                            self.maybe_emit_snapshot_event(
+                                &mut runtime_sequencer,
+                                &projector,
+                                tick_ns,
+                                Some(event.header.event_id),
+                                true,
+                                &mut state_snapshots_published,
+                            );
+                            let skip_snapshot = projector.snapshot().clone();
+                            self.emit_trade_skip_event(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                Some(decision_event_id),
+                                tick_ns,
+                                sid,
+                                reason_str,
+                                decision.q_sampled,
+                                decision.q_point,
+                                &skip_snapshot,
+                            );
+                            strategy_events_published = strategy_events_published.saturating_add(1);
                             decisions.push(BacktestDecision {
                                 timestamp_ns: tick_ns,
                                 strategy_id: sid,
@@ -830,6 +1148,20 @@ impl BacktestEngine {
                         let limit_check = match limit_result {
                             Ok(c) => c,
                             Err(_) => {
+                                let skip_snapshot = projector.snapshot().clone();
+                                self.emit_trade_skip_event(
+                                    &mut runtime_sequencer,
+                                    &mut projector,
+                                    Some(decision_event_id),
+                                    tick_ns,
+                                    sid,
+                                    "risk_limit_rejected",
+                                    decision.q_sampled,
+                                    decision.q_point,
+                                    &skip_snapshot,
+                                );
+                                strategy_events_published =
+                                    strategy_events_published.saturating_add(1);
                                 decisions.push(BacktestDecision {
                                     timestamp_ns: tick_ns,
                                     strategy_id: sid,
@@ -866,6 +1198,20 @@ impl BacktestEngine {
                                     q_other
                                 },
                             ) {
+                                let skip_snapshot = projector.snapshot().clone();
+                                self.emit_trade_skip_event(
+                                    &mut runtime_sequencer,
+                                    &mut projector,
+                                    Some(decision_event_id),
+                                    tick_ns,
+                                    sid,
+                                    "mtm_q_threshold_rejected",
+                                    decision.q_sampled,
+                                    decision.q_point,
+                                    &skip_snapshot,
+                                );
+                                strategy_events_published =
+                                    strategy_events_published.saturating_add(1);
                                 decisions.push(BacktestDecision {
                                     timestamp_ns: tick_ns,
                                     strategy_id: sid,
@@ -885,6 +1231,20 @@ impl BacktestEngine {
                             match self.risk_barrier.validate_order(staleness_ms) {
                                 Ok(info) => (info.lot_multiplier, info.effective_lot_size as f64),
                                 Err(_) => {
+                                    let skip_snapshot = projector.snapshot().clone();
+                                    self.emit_trade_skip_event(
+                                        &mut runtime_sequencer,
+                                        &mut projector,
+                                        Some(decision_event_id),
+                                        tick_ns,
+                                        sid,
+                                        "staleness_rejected",
+                                        decision.q_sampled,
+                                        decision.q_point,
+                                        &skip_snapshot,
+                                    );
+                                    strategy_events_published =
+                                        strategy_events_published.saturating_add(1);
                                     decisions.push(BacktestDecision {
                                         timestamp_ns: tick_ns,
                                         strategy_id: sid,
@@ -913,6 +1273,20 @@ impl BacktestEngine {
                         let mut effective_lots = match pos_result {
                             Ok(r) => r.effective_lot.max(0.0),
                             Err(_) => {
+                                let skip_snapshot = projector.snapshot().clone();
+                                self.emit_trade_skip_event(
+                                    &mut runtime_sequencer,
+                                    &mut projector,
+                                    Some(decision_event_id),
+                                    tick_ns,
+                                    sid,
+                                    "global_position_rejected",
+                                    decision.q_sampled,
+                                    decision.q_point,
+                                    &skip_snapshot,
+                                );
+                                strategy_events_published =
+                                    strategy_events_published.saturating_add(1);
                                 decisions.push(BacktestDecision {
                                     timestamp_ns: tick_ns,
                                     strategy_id: sid,
@@ -932,6 +1306,19 @@ impl BacktestEngine {
                         let effective_lots = effective_lots.max(0.0) as u64;
 
                         if effective_lots == 0 {
+                            let skip_snapshot = projector.snapshot().clone();
+                            self.emit_trade_skip_event(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                Some(decision_event_id),
+                                tick_ns,
+                                sid,
+                                "zero_effective_lot",
+                                decision.q_sampled,
+                                decision.q_point,
+                                &skip_snapshot,
+                            );
+                            strategy_events_published = strategy_events_published.saturating_add(1);
                             decisions.push(BacktestDecision {
                                 timestamp_ns: tick_ns,
                                 strategy_id: sid,
@@ -954,16 +1341,27 @@ impl BacktestEngine {
                         );
 
                         if result.filled {
+                            runtime_observability.record_execution_fill(
+                                result.fill_price - result.requested_price,
+                                result.slippage,
+                                Some(features.dynamic_cost),
+                            );
                             let (trade_pnl, exec_event) = self.process_execution_result(
+                                &mut runtime_sequencer,
                                 sid,
                                 &result,
                                 direction,
                                 tick_ns,
+                                Some(decision_event_id),
                                 &mut projector,
                             );
                             if let Some(ref exec_ev) = exec_event {
                                 feature_extractor.process_execution_event(exec_ev);
                             }
+                            let snapshot_parent = exec_event
+                                .as_ref()
+                                .map(|ev| ev.header.event_id)
+                                .or(Some(decision_event_id));
                             if let Some(ev) = exec_event {
                                 execution_events.push(ev);
                             }
@@ -980,6 +1378,21 @@ impl BacktestEngine {
                                 latency_ms: result.latency_ms,
                                 close_reason: None,
                             });
+                            let limit_state = limit_tracker.update(
+                                tick_ns,
+                                projector.snapshot().total_realized_pnl,
+                                projector.snapshot().total_unrealized_pnl,
+                                &self.config.risk_limits_config,
+                            );
+                            projector.update_limit_state(limit_state);
+                            self.maybe_emit_snapshot_event(
+                                &mut runtime_sequencer,
+                                &projector,
+                                tick_ns,
+                                snapshot_parent,
+                                true,
+                                &mut state_snapshots_published,
+                            );
 
                             // Start MC episode
                             self.start_strategy_episode(sid, tick_ns, projector.snapshot());
@@ -997,6 +1410,21 @@ impl BacktestEngine {
                                 Some("execution_rejected".to_string())
                             },
                         });
+                        if !result.filled {
+                            let skip_snapshot = projector.snapshot().clone();
+                            self.emit_trade_skip_event(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                Some(decision_event_id),
+                                tick_ns,
+                                sid,
+                                "execution_rejected",
+                                decision.q_sampled,
+                                decision.q_point,
+                                &skip_snapshot,
+                            );
+                            strategy_events_published = strategy_events_published.saturating_add(1);
+                        }
                         total_decision_ticks += 1;
                     }
                     Action::Hold => {
@@ -1075,13 +1503,24 @@ impl BacktestEngine {
                     );
 
                     if result.filled {
+                        runtime_observability.record_execution_fill(
+                            result.fill_price - result.requested_price,
+                            result.slippage,
+                            None,
+                        );
                         let (trade_pnl, exec_event) = self.process_execution_result(
+                            &mut runtime_sequencer,
                             pos_snap.strategy_id,
                             &result,
                             direction,
                             last_ns,
+                            Some(last_event.header.event_id),
                             &mut projector,
                         );
+                        let snapshot_parent = exec_event
+                            .as_ref()
+                            .map(|ev| ev.header.event_id)
+                            .or(Some(last_event.header.event_id));
                         if let Some(ev) = exec_event {
                             execution_events.push(ev);
                         }
@@ -1097,6 +1536,21 @@ impl BacktestEngine {
                             latency_ms: result.latency_ms,
                             close_reason: Some("END_OF_DATA".to_string()),
                         });
+                        let limit_state = limit_tracker.update(
+                            last_ns,
+                            projector.snapshot().total_realized_pnl,
+                            projector.snapshot().total_unrealized_pnl,
+                            &self.config.risk_limits_config,
+                        );
+                        projector.update_limit_state(limit_state);
+                        self.maybe_emit_snapshot_event(
+                            &mut runtime_sequencer,
+                            &projector,
+                            last_ns,
+                            snapshot_parent,
+                            true,
+                            &mut state_snapshots_published,
+                        );
                     }
 
                     self.end_strategy_episode(
@@ -1107,6 +1561,14 @@ impl BacktestEngine {
                     );
                 }
             }
+            self.maybe_emit_snapshot_event(
+                &mut runtime_sequencer,
+                &projector,
+                last_event.header.timestamp_ns,
+                Some(last_event.header.event_id),
+                true,
+                &mut state_snapshots_published,
+            );
         }
 
         let wall_time_ms = wall_start.elapsed().as_millis() as u64;
@@ -1135,6 +1597,8 @@ impl BacktestEngine {
             summary,
             execution_stats,
             execution_events,
+            strategy_events_published,
+            state_snapshots_published,
             observability_ticks: observability_manager.total_ticks(),
         }
     }
@@ -1167,18 +1631,82 @@ impl BacktestEngine {
         }
     }
 
-    /// Close all open positions (used when a hard risk limit fires).
-    #[allow(clippy::too_many_arguments)]
-    /// Check if there is a weekend gap between two consecutive ticks.
-    ///
+    fn update_runtime_observability(
+        &self,
+        enabled_strategies: &[StrategyId],
+        tick_contexts: &HashMap<StrategyId, TickContext>,
+        posterior_snapshots: &mut HashMap<String, Vec<f64>>,
+        runtime_observability: &mut RuntimeObservabilityState,
+    ) {
+        let mut entropies = Vec::new();
+        let mut impact_ratios = Vec::new();
+        let mut drifts = Vec::new();
+        let mut liquidity_changes = Vec::new();
+
+        for strategy_id in enabled_strategies {
+            let Some(context) = tick_contexts.get(strategy_id) else {
+                continue;
+            };
+            let (phi, q_function) = match strategy_id {
+                StrategyId::A => (
+                    self.strategy_a.extract_features(&context.features),
+                    self.strategy_a.q_function(),
+                ),
+                StrategyId::B => (
+                    self.strategy_b.extract_features(&context.features),
+                    self.strategy_b.q_function(),
+                ),
+                StrategyId::C => (
+                    self.strategy_c.extract_features(&context.features),
+                    self.strategy_c.q_function(),
+                ),
+            };
+
+            let q_values = q_function.q_values(&phi);
+            let action_scores = [
+                q_values[&QAction::Buy],
+                q_values[&QAction::Sell],
+                q_values[&QAction::Hold],
+            ];
+            runtime_observability.record_action_scores(*strategy_id, action_scores);
+            entropies.push(softmax_entropy(&action_scores));
+            liquidity_changes.push(context.features.depth_change_rate.abs());
+
+            let max_abs_q = action_scores
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            if max_abs_q > f64::EPSILON {
+                impact_ratios.push(context.features.self_impact.abs() / max_abs_q);
+            }
+
+            for &action in QAction::all() {
+                let key = format!("{strategy_id:?}:{action:?}");
+                let weights: Vec<f64> =
+                    q_function.model(action).weights().iter().copied().collect();
+                let drift = posterior_snapshots
+                    .get(&key)
+                    .map(|previous| l2_distance(previous, &weights))
+                    .unwrap_or(0.0);
+                posterior_snapshots.insert(key, weights);
+                drifts.push(drift);
+            }
+        }
+
+        runtime_observability.policy_entropy = mean_or_zero(&entropies);
+        runtime_observability.self_impact_ratio = mean_or_zero(&impact_ratios);
+        runtime_observability.bayesian_posterior_drift = mean_or_zero(&drifts);
+        runtime_observability.record_liquidity_evolvement(mean_or_zero(&liquidity_changes));
+    }
+
     fn collect_pre_failure_metrics(
         &self,
         snapshot: &StateSnapshot,
         risk_config: &fx_risk::limits::RiskLimitsConfig,
-        _tick_ns: u64,
+        runtime_observability: &RuntimeObservabilityState,
     ) -> PreFailureMetrics {
         let ks_stats = self.kill_switch.stats();
-        let regime_entropy = self.regime_cache.state().entropy();
+        let regime_state = self.regime_cache.state();
 
         let daily_pnl_vs_limit = if risk_config.max_daily_loss_mtm.abs() > f64::EPSILON {
             snapshot.limit_state.daily_pnl_mtm / risk_config.max_daily_loss_mtm.abs()
@@ -1195,27 +1723,36 @@ impl BacktestEngine {
         } else {
             0.0
         };
+        let position_constraint_saturation_rate =
+            if snapshot.global_position_limit.abs() > f64::EPSILON {
+                snapshot.global_position.abs() / snapshot.global_position_limit.abs()
+            } else {
+                0.0
+            };
 
         PreFailureMetrics {
             rolling_variance_latency: ks_stats.std_interval_ns,
-            feature_distribution_kl_divergence: 0.0,
-            q_value_adjustment_frequency: 0.0,
-            execution_drift_trend: 0.0,
-            latency_risk_trend: 0.0,
-            self_impact_ratio: 0.0,
-            liquidity_evolvement: 0.0,
-            policy_entropy: 0.0,
-            regime_posterior_entropy: regime_entropy,
-            hidden_liquidity_sigma: 0.0,
-            position_constraint_saturation_rate: 0.0,
-            last_look_rejection_rate: 0.0,
-            dynamic_cost_estimate_error: 0.0,
-            lp_adversarial_score: 0.0,
+            feature_distribution_kl_divergence: regime_state.kl_divergence(),
+            q_value_adjustment_frequency: runtime_observability.q_value_adjustment_frequency.mean(),
+            execution_drift_trend: runtime_observability.execution_drift.mean(),
+            latency_risk_trend: snapshot.staleness_ms as f64,
+            self_impact_ratio: runtime_observability.self_impact_ratio,
+            liquidity_evolvement: runtime_observability.liquidity_evolvement.mean(),
+            policy_entropy: runtime_observability.policy_entropy,
+            regime_posterior_entropy: regime_state.entropy(),
+            hidden_liquidity_sigma: self
+                .execution_gateway
+                .active_hidden_liquidity_sigma()
+                .max(runtime_observability.execution_drift.std()),
+            position_constraint_saturation_rate,
+            last_look_rejection_rate: self.execution_gateway.aggregate_rejection_rate(),
+            dynamic_cost_estimate_error: runtime_observability.dynamic_cost_estimate_error.mean(),
+            lp_adversarial_score: self.execution_gateway.active_lp_adversarial_score(),
             daily_pnl_vs_limit,
             weekly_pnl_vs_limit,
             monthly_pnl_vs_limit,
-            lp_recalibration_progress: 0.0,
-            bayesian_posterior_drift: 0.0,
+            lp_recalibration_progress: self.execution_gateway.lp_recalibration_progress(),
+            bayesian_posterior_drift: runtime_observability.bayesian_posterior_drift,
         }
     }
 
@@ -1249,17 +1786,28 @@ impl BacktestEngine {
         prev_weekday <= 4 && curr_weekday == 0 && gap_ns >= min_gap_ns
     }
 
+    /// Close all open positions (used when a hard risk limit fires).
+    #[allow(clippy::too_many_arguments)]
     fn close_all_positions(
         &mut self,
+        runtime_sequencer: &mut RuntimeSequencer,
         projector: &mut StateProjector,
         feature_extractor: &mut FeatureExtractor,
+        runtime_observability: &mut RuntimeObservabilityState,
         trades: &mut Vec<TradeRecord>,
         execution_events: &mut Vec<GenericEvent>,
         mid_price: f64,
         volatility: f64,
         tick_ns: u64,
+        parent_event_id: Option<Uuid>,
         reason: &str,
     ) {
+        let terminal_reason = match reason {
+            "weekly_halt" => TerminalReason::WeeklyHardLimit,
+            "monthly_halt" => TerminalReason::MonthlyHardLimit,
+            "weekend_halt" | "WEEKEND_HALT" => TerminalReason::WeekendHalt,
+            _ => TerminalReason::DailyHardLimit,
+        };
         let open_positions = self.collect_all_open_positions(projector);
         for pos_snap in &open_positions {
             let direction = if pos_snap.size > 0.0 {
@@ -1279,11 +1827,18 @@ impl BacktestEngine {
             );
 
             if result.filled {
+                runtime_observability.record_execution_fill(
+                    result.fill_price - result.requested_price,
+                    result.slippage,
+                    None,
+                );
                 let (trade_pnl, exec_event) = self.process_execution_result(
+                    runtime_sequencer,
                     pos_snap.strategy_id,
                     &result,
                     direction,
                     tick_ns,
+                    parent_event_id,
                     projector,
                 );
                 if let Some(ref exec_ev) = exec_event {
@@ -1308,7 +1863,7 @@ impl BacktestEngine {
 
             self.end_strategy_episode(
                 pos_snap.strategy_id,
-                TerminalReason::DailyHardLimit,
+                terminal_reason,
                 tick_ns,
                 projector.snapshot(),
             );
@@ -1362,13 +1917,164 @@ impl BacktestEngine {
         }
     }
 
-    /// Extract strategy-specific feature vector (41-dim including strategy extras).
+    /// Extract strategy-specific feature vector (43-dim including strategy extras).
     fn extract_strategy_features(&self, sid: StrategyId, base: &FeatureVector) -> Vec<f64> {
         match sid {
             StrategyId::A => self.strategy_a.extract_features(base),
             StrategyId::B => self.strategy_b.extract_features(base),
             StrategyId::C => self.strategy_c.extract_features(base),
         }
+    }
+
+    fn decision_event_context(
+        &self,
+        sid: StrategyId,
+        features: &FeatureVector,
+        snapshot: &StateSnapshot,
+        decision: &StrategyDecision,
+        direction: Option<Direction>,
+        lots: u64,
+    ) -> DecisionEventContext {
+        let position = snapshot.positions.get(&sid);
+        let position_before = position.map(|p| p.size).unwrap_or_default();
+        let signed_lots = match direction {
+            Some(Direction::Buy) => lots as f64,
+            Some(Direction::Sell) => -(lots as f64),
+            None => 0.0,
+        };
+        let selected = decision.q_sampled;
+
+        DecisionEventContext {
+            feature_vector: features.flattened(),
+            q_buy: if matches!(direction, Some(Direction::Buy)) {
+                selected
+            } else {
+                0.0
+            },
+            q_sell: if matches!(direction, Some(Direction::Sell)) {
+                selected
+            } else {
+                0.0
+            },
+            q_hold: if direction.is_none() { selected } else { 0.0 },
+            q_selected: selected,
+            posterior_mean: decision.q_point,
+            posterior_std: decision.posterior_std,
+            sampled_q: decision.q_sampled,
+            position_size: position_before,
+            entry_price: position.map(|p| p.entry_price).unwrap_or_default(),
+            pnl_unrealized: position.map(|p| p.unrealized_pnl).unwrap_or_default(),
+            holding_time_ms: position
+                .map(|p| p.holding_time_ms(snapshot.last_market_data_ns) as f64)
+                .unwrap_or_default(),
+            staleness_ms: snapshot.staleness_ms as f64,
+            lot_multiplier: snapshot.lot_multiplier,
+            daily_pnl: snapshot.limit_state.daily_pnl_realized,
+            regime_posterior: self.regime_cache.state().posterior().to_vec(),
+            regime_entropy: self.regime_cache.state().entropy(),
+            q_tilde_final_values: vec![selected],
+            q_point_selected: decision.q_point,
+            q_tilde_selected: decision.q_sampled,
+            sigma_model: decision.posterior_std,
+            position_before,
+            position_after: position_before + signed_lots,
+            position_max_limit: snapshot.global_position_limit,
+            velocity_limit: lots as f64,
+            dynamic_cost: features.dynamic_cost,
+            ..DecisionEventContext::default()
+        }
+    }
+
+    fn emit_decision_event(
+        &self,
+        sequencer: &mut RuntimeSequencer,
+        projector: &mut StateProjector,
+        parent_event_id: Option<Uuid>,
+        tick_ns: u64,
+        sid: StrategyId,
+        features: &FeatureVector,
+        snapshot: &StateSnapshot,
+        decision: &StrategyDecision,
+    ) -> Uuid {
+        let (direction, lots) = match decision.action {
+            Action::Buy(lots) => (Some(Direction::Buy), lots),
+            Action::Sell(lots) => (Some(Direction::Sell), lots),
+            Action::Hold => (None, 0),
+        };
+        let header = sequencer.next_header(
+            StreamId::Strategy,
+            tick_ns,
+            EventTier::Tier2Derived,
+            parent_event_id,
+        );
+        let event = build_decision_event(
+            header.clone(),
+            sid,
+            action_type(direction),
+            lots,
+            self.decision_event_context(sid, features, snapshot, decision, direction, lots),
+            decision.skip_reason.as_deref(),
+        );
+        let _ = projector.process_event(&event);
+        header.event_id
+    }
+
+    fn emit_trade_skip_event(
+        &self,
+        sequencer: &mut RuntimeSequencer,
+        projector: &mut StateProjector,
+        parent_event_id: Option<Uuid>,
+        tick_ns: u64,
+        sid: StrategyId,
+        reason: &str,
+        q_selected: f64,
+        q_point_selected: f64,
+        snapshot: &StateSnapshot,
+    ) {
+        let header = sequencer.next_header(
+            StreamId::Strategy,
+            tick_ns,
+            EventTier::Tier2Derived,
+            parent_event_id,
+        );
+        let event = build_trade_skip_event(
+            header,
+            sid,
+            reason,
+            q_selected,
+            q_point_selected,
+            snapshot.staleness_ms as f64,
+            self.regime_cache.state().entropy(),
+            snapshot.lot_multiplier,
+        );
+        let _ = projector.process_event(&event);
+    }
+
+    fn maybe_emit_snapshot_event(
+        &self,
+        sequencer: &mut RuntimeSequencer,
+        projector: &StateProjector,
+        tick_ns: u64,
+        parent_event_id: Option<Uuid>,
+        force: bool,
+        published: &mut u64,
+    ) {
+        const SNAPSHOT_INTERVAL: u64 = 100;
+        if !force && projector.state_version() % SNAPSHOT_INTERVAL != 0 {
+            return;
+        }
+        let header = sequencer.next_header(
+            StreamId::State,
+            tick_ns,
+            EventTier::Tier1Critical,
+            parent_event_id,
+        );
+        let event = projector.build_snapshot_event(header);
+        assert!(
+            !event.payload.is_empty(),
+            "snapshot event payload must not be empty"
+        );
+        *published = published.saturating_add(1);
     }
 
     /// Start an MC episode and strategy episode for the given strategy.
@@ -1565,10 +2271,12 @@ impl BacktestEngine {
     /// along with the constructed execution event for downstream use (e.g. feature extractor).
     fn process_execution_result(
         &self,
+        runtime_sequencer: &mut RuntimeSequencer,
         strategy_id: StrategyId,
         result: &ExecutionResult,
         direction: Direction,
         timestamp_ns: u64,
+        parent_event_id: Option<Uuid>,
         projector: &mut StateProjector,
     ) -> (f64, Option<GenericEvent>) {
         if !result.filled {
@@ -1582,39 +2290,27 @@ impl BacktestEngine {
             .map(|p| p.realized_pnl)
             .unwrap_or(0.0);
 
-        let signed_size = match direction {
-            Direction::Buy => result.fill_size,
-            Direction::Sell => -result.fill_size,
-        };
-
-        let proto_event = proto::ExecutionEventPayload {
-            header: None,
-            order_id: result.order_id.clone(),
+        let request = ExecutionRequest {
+            direction,
+            lots: result.fill_size.round().max(0.0) as u64,
+            strategy_id,
+            current_mid_price: result.requested_price,
+            volatility: 0.0,
+            expected_profit: 0.0,
             symbol: self.config.symbol.clone(),
-            order_type: proto::OrderType::OrderMarket as i32,
-            fill_status: proto::FillStatus::Filled as i32,
-            fill_price: result.fill_price,
-            fill_size: signed_size,
-            slippage: result.slippage,
-            requested_price: result.requested_price,
-            requested_size: result.requested_size,
-            fill_probability: result.fill_probability,
-            effective_fill_probability: result.effective_fill_probability,
-            price_improvement: result.price_improvement,
-            last_look_rejection_prob: result.last_look_rejection_prob,
-            lp_id: result.lp_id.clone(),
-            latency_ms: result.latency_ms,
-            reject_reason: proto::RejectReason::Unknown as i32,
-            reject_message: result.reject_reason.clone().unwrap_or_default(),
-        };
-
-        let header = EventHeader {
-            stream_id: StreamId::Execution,
-            sequence_id: 0,
             timestamp_ns,
-            ..EventHeader::new(StreamId::Execution, 0, EventTier::Tier1Critical)
+            time_urgent: false,
         };
-
+        let mut proto_event = self
+            .execution_gateway
+            .build_execution_event(&request, result);
+        let header = runtime_sequencer.next_header(
+            StreamId::Execution,
+            timestamp_ns,
+            EventTier::Tier1Critical,
+            parent_event_id,
+        );
+        proto_event.header = Some(proto_header(&header));
         let generic_event = GenericEvent::new(header, proto_event.encode_to_vec());
         let _ = projector.process_execution_for_strategy(&generic_event, strategy_id);
 
@@ -1796,6 +2492,21 @@ mod tests {
     use super::*;
     use fx_events::store::Tier3Store;
     use std::time::Duration as StdDuration;
+
+    #[test]
+    fn test_runtime_observability_tracks_non_placeholder_metrics() {
+        let mut state = RuntimeObservabilityState::default();
+
+        state.record_action_scores(StrategyId::A, [0.10, 0.05, 0.01]);
+        state.record_action_scores(StrategyId::A, [0.20, 0.05, 0.01]);
+        state.record_liquidity_evolvement(-0.25);
+        state.record_execution_fill(0.003, 0.002, Some(0.001));
+
+        assert!(state.q_value_adjustment_frequency.mean() > 0.0);
+        assert!(state.liquidity_evolvement.mean() > 0.0);
+        assert!(state.dynamic_cost_estimate_error.mean() > 0.0);
+        assert!(state.execution_drift.mean() > 0.0);
+    }
 
     fn default_config() -> BacktestConfig {
         BacktestConfig {
@@ -2436,8 +3147,26 @@ mod tests {
                     StreamId::Execution,
                     "Execution events should be on the Execution stream"
                 );
+                assert!(
+                    ev.header.sequence_id > 0,
+                    "Execution runtime events should have monotonic sequence ids"
+                );
             }
         }
+    }
+
+    #[test]
+    fn test_runtime_event_counts_published() {
+        let events = generate_synthetic_ticks(1_000_000_000_000_000, 300, 100, 110.0, 0.005);
+        let config = BacktestConfig {
+            rng_seed: Some([42u8; 32]),
+            ..default_config()
+        };
+        let mut engine = BacktestEngine::new(config);
+        let result = engine.run_from_events(&events);
+
+        assert!(result.strategy_events_published > 0);
+        assert!(result.state_snapshots_published > 0);
     }
 
     #[test]
@@ -2580,6 +3309,11 @@ mod tests {
                 "Execution event should decode as ExecutionEventPayload"
             );
             let payload = decoded.unwrap();
+            let payload_header = payload
+                .header
+                .expect("execution payload should carry header");
+            assert_eq!(payload_header.sequence_id, ev.header.sequence_id);
+            assert_eq!(payload_header.timestamp_ns, ev.header.timestamp_ns);
             // Fill price should be positive for filled trades
             assert!(
                 payload.fill_price > 0.0,
@@ -2590,6 +3324,7 @@ mod tests {
                 !payload.lp_id.is_empty(),
                 "LP ID should be set in execution event"
             );
+            assert!(payload.estimated_fill_prob >= 0.0);
         }
     }
 
@@ -3648,7 +4383,7 @@ mod tests {
         // Verify via strategy A's Q-function using correct dimension
         let strategy_a = engine.strategy_a();
         let dim = strategy_a.q_function().dim();
-        assert_eq!(dim, 41, "Strategy A should use 41-dim feature vector");
+        assert_eq!(dim, 43, "Strategy A should use 43-dim feature vector");
         let phi_ones = vec![1.0; dim];
         let w_buy = strategy_a.q_function().q_value(QAction::Buy, &phi_ones);
         let w_hold = strategy_a.q_function().q_value(QAction::Hold, &phi_ones);

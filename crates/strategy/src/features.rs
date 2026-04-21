@@ -31,6 +31,8 @@ pub struct FeatureVector {
     pub signed_volume: f64,
     pub recent_fill_rate: f64,
     pub recent_slippage: f64,
+    pub recent_reject_rate: f64,
+    pub execution_drift_trend: f64,
     pub self_impact: f64,
     pub time_decay: f64,
     pub dynamic_cost: f64,
@@ -46,7 +48,7 @@ pub struct FeatureVector {
 }
 
 impl FeatureVector {
-    pub const DIM: usize = 36;
+    pub const DIM: usize = 38;
 
     pub fn flattened(&self) -> Vec<f64> {
         vec![
@@ -74,6 +76,8 @@ impl FeatureVector {
             self.signed_volume,
             self.recent_fill_rate,
             self.recent_slippage,
+            self.recent_reject_rate,
+            self.execution_drift_trend,
             self.self_impact,
             self.time_decay,
             self.dynamic_cost,
@@ -118,18 +122,20 @@ impl FeatureVector {
             signed_volume: values[21],
             recent_fill_rate: values[22],
             recent_slippage: values[23],
-            self_impact: values[24],
-            time_decay: values[25],
-            dynamic_cost: values[26],
-            p_revert: values[27],
-            p_continue: values[28],
-            p_trend: values[29],
-            spread_z_x_vol: values[30],
-            obi_x_session: values[31],
-            depth_drop_x_vol_spike: values[32],
-            position_size_x_vol: values[33],
-            obi_x_vol: values[34],
-            spread_z_x_self_impact: values[35],
+            recent_reject_rate: values[24],
+            execution_drift_trend: values[25],
+            self_impact: values[26],
+            time_decay: values[27],
+            dynamic_cost: values[28],
+            p_revert: values[29],
+            p_continue: values[30],
+            p_trend: values[31],
+            spread_z_x_vol: values[32],
+            obi_x_session: values[33],
+            depth_drop_x_vol_spike: values[34],
+            position_size_x_vol: values[35],
+            obi_x_vol: values[36],
+            spread_z_x_self_impact: values[37],
         })
     }
 
@@ -160,6 +166,8 @@ impl FeatureVector {
             signed_volume: 0.0,
             recent_fill_rate: 0.0,
             recent_slippage: 0.0,
+            recent_reject_rate: 0.0,
+            execution_drift_trend: 0.0,
             self_impact: 0.0,
             time_decay: 0.0,
             dynamic_cost: 0.0,
@@ -186,6 +194,8 @@ mod tests {
         fv.spread = 0.5;
         fv.obi = -0.3;
         fv.session_tokyo = 1.0;
+        fv.recent_reject_rate = 0.2;
+        fv.execution_drift_trend = 0.01;
         fv.p_revert = 0.8;
 
         let flat = fv.flattened();
@@ -195,6 +205,8 @@ mod tests {
         assert!((restored.spread - 0.5).abs() < 1e-15);
         assert!((restored.obi - (-0.3)).abs() < 1e-15);
         assert!((restored.session_tokyo - 1.0).abs() < 1e-15);
+        assert!((restored.recent_reject_rate - 0.2).abs() < 1e-15);
+        assert!((restored.execution_drift_trend - 0.01).abs() < 1e-15);
         assert!((restored.p_revert - 0.8).abs() < 1e-15);
     }
 
@@ -210,9 +222,9 @@ mod tests {
         let flat = fv.flattened();
         // Most fields are 0.0, probability fields default to 0.5
         assert!((flat[0] - 0.0).abs() < 1e-15);
-        assert!((flat[27] - 0.5).abs() < 1e-15); // p_revert
-        assert!((flat[28] - 0.5).abs() < 1e-15); // p_continue
-        assert!((flat[29] - 0.5).abs() < 1e-15); // p_trend
+        assert!((flat[29] - 0.5).abs() < 1e-15); // p_revert
+        assert!((flat[30] - 0.5).abs() < 1e-15); // p_continue
+        assert!((flat[31] - 0.5).abs() < 1e-15); // p_trend
     }
 
     #[test]

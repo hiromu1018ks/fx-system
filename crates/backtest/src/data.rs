@@ -1,6 +1,5 @@
 use std::io::Read;
 use std::path::Path;
-use tracing::warn;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDateTime;
@@ -108,24 +107,24 @@ pub fn load_csv_reader<R: Read>(reader: R) -> Result<Vec<ValidatedTick>, DataLoa
         })?;
 
         if tick.bid >= tick.ask {
-            warn!(
-                row = idx + 2,
-                bid = tick.bid,
-                ask = tick.ask,
-                "skipping row: bid >= ask (crossed market)"
-            );
-            continue;
+            return Err(DataLoadError::Validation {
+                row: idx + 2,
+                message: format!(
+                    "bid {} must be strictly less than ask {}",
+                    tick.bid, tick.ask
+                ),
+            });
         }
 
         if let Some(prev) = prev_ts {
             if ts_ns <= prev {
-                warn!(
-                    row = idx + 2,
-                    timestamp_ns = ts_ns,
-                    prev = prev,
-                    "skipping row: timestamp not monotonically increasing"
-                );
-                continue;
+                return Err(DataLoadError::Validation {
+                    row: idx + 2,
+                    message: format!(
+                        "timestamp {} must be strictly greater than previous {}",
+                        ts_ns, prev
+                    ),
+                });
             }
         }
 
@@ -146,11 +145,19 @@ pub fn load_csv_reader<R: Read>(reader: R) -> Result<Vec<ValidatedTick>, DataLoa
 
 /// Convert validated ticks into `GenericEvent`s suitable for `BacktestEngine::run_from_events`.
 pub fn ticks_to_events(ticks: &[ValidatedTick]) -> Vec<GenericEvent> {
-    ticks.iter().map(tick_to_event).collect()
+    ticks
+        .iter()
+        .enumerate()
+        .map(|(index, tick)| tick_to_event_with_sequence(tick, index as u64 + 1))
+        .collect()
 }
 
 /// Convert a single validated tick to a `GenericEvent`.
 pub fn tick_to_event(tick: &ValidatedTick) -> GenericEvent {
+    tick_to_event_with_sequence(tick, 0)
+}
+
+fn tick_to_event_with_sequence(tick: &ValidatedTick, sequence_id: u64) -> GenericEvent {
     let payload = proto::MarketEventPayload {
         header: None,
         symbol: tick.symbol.clone(),
@@ -168,9 +175,9 @@ pub fn tick_to_event(tick: &ValidatedTick) -> GenericEvent {
     let header = EventHeader {
         timestamp_ns: tick.timestamp_ns,
         stream_id: StreamId::Market,
-        sequence_id: 0,
+        sequence_id,
         tier: EventTier::Tier3Raw,
-        ..EventHeader::new(StreamId::Market, 0, EventTier::Tier3Raw)
+        ..EventHeader::new(StreamId::Market, sequence_id, EventTier::Tier3Raw)
     };
 
     GenericEvent::new(header, payload)
@@ -486,6 +493,8 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].header.timestamp_ns, 1000);
         assert_eq!(events[1].header.timestamp_ns, 2000);
+        assert_eq!(events[0].header.sequence_id, 1);
+        assert_eq!(events[1].header.sequence_id, 2);
     }
 
     #[test]

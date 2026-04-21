@@ -399,6 +399,50 @@ impl ExecutionGateway {
         &self.recalibration_manager
     }
 
+    pub fn aggregate_rejection_rate(&self) -> f64 {
+        let (requests, rejections) = self.lp_monitor.all_lp_states().values().fold(
+            (0_u64, 0_u64),
+            |(requests, rejections), state| {
+                (
+                    requests.saturating_add(state.total_requests),
+                    rejections.saturating_add(state.total_rejections),
+                )
+            },
+        );
+        if requests == 0 {
+            0.0
+        } else {
+            rejections as f64 / requests as f64
+        }
+    }
+
+    pub fn active_hidden_liquidity_sigma(&self) -> f64 {
+        self.slippage_model
+            .get_lp_stats(self.active_lp_id())
+            .map(|stats| stats.variance.max(0.0).sqrt())
+            .unwrap_or(0.0)
+    }
+
+    pub fn active_lp_adversarial_score(&self) -> f64 {
+        self.lp_monitor
+            .get_lp_state(self.active_lp_id())
+            .map(|state| {
+                if state.is_adversarial {
+                    1.0
+                } else {
+                    state
+                        .rejection_rate_ema
+                        .max((1.0 - state.fill_rate_ema).max(0.0))
+                }
+            })
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    }
+
+    pub fn lp_recalibration_progress(&self) -> f64 {
+        self.recalibration_manager.completion_progress()
+    }
+
     // --- Proto Conversion ---
 
     pub fn build_execution_event(
@@ -406,6 +450,10 @@ impl ExecutionGateway {
         request: &ExecutionRequest,
         result: &ExecutionResult,
     ) -> proto::ExecutionEventPayload {
+        let signed_fill_size = match request.direction {
+            Direction::Buy => result.fill_size,
+            Direction::Sell => -result.fill_size,
+        };
         let order_type_i32 = match result.order_type {
             OtcOrderType::Market => proto::OrderType::OrderMarket as i32,
             OtcOrderType::Limit => proto::OrderType::OrderLimit as i32,
@@ -440,7 +488,7 @@ impl ExecutionGateway {
             order_type: order_type_i32,
             fill_status: fill_status_i32,
             fill_price: result.fill_price,
-            fill_size: result.fill_size,
+            fill_size: signed_fill_size,
             slippage: result.slippage,
             requested_price: result.requested_price,
             requested_size: result.requested_size,
@@ -452,6 +500,14 @@ impl ExecutionGateway {
             latency_ms: result.latency_ms,
             reject_reason: reject_reason_i32,
             reject_message: result.reject_reason.clone().unwrap_or_default(),
+            expected_fill_price: result.requested_price,
+            actual_fill_price: result.fill_price,
+            estimated_fill_prob: result.effective_fill_probability,
+            execution_drift_trend: result.fill_price - result.requested_price,
+            hidden_liquidity_sigma: result.slippage.abs(),
+            fill_prediction_error: (if result.filled { 1.0 } else { 0.0 })
+                - result.effective_fill_probability,
+            lp_fill_rate_rolling: self.lp_monitor.active_fill_rate(),
         }
     }
 
@@ -633,6 +689,18 @@ mod tests {
         assert!(params.beta > 1.0); // prior(1) + 1
         let state = gw.lp_monitor().get_lp_state("LP_PRIMARY").unwrap();
         assert_eq!(state.total_rejections, 1);
+    }
+
+    #[test]
+    fn aggregate_rejection_rate_tracks_lp_state() {
+        let mut gw = make_gateway();
+        gw.process_rejection("LP_PRIMARY", "LAST_LOOK");
+        gw.process_rejection("LP_PRIMARY", "LAST_LOOK");
+        gw.process_fill("LP_PRIMARY", 0.0001);
+
+        assert!((gw.aggregate_rejection_rate() - (2.0 / 3.0)).abs() < 1e-12);
+        assert!(gw.active_lp_adversarial_score() > 0.0);
+        assert_eq!(gw.lp_recalibration_progress(), 1.0);
     }
 
     // --- LP Switch ---

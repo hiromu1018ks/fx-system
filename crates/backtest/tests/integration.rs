@@ -105,6 +105,13 @@ fn make_execution_event(
         latency_ms: 1.0,
         reject_reason: proto::RejectReason::Unknown as i32,
         reject_message: String::new(),
+        expected_fill_price: fill_price - slippage,
+        actual_fill_price: fill_price,
+        estimated_fill_prob: 0.90,
+        execution_drift_trend: slippage,
+        hidden_liquidity_sigma: slippage.abs(),
+        fill_prediction_error: 0.10,
+        lp_fill_rate_rolling: 0.90,
     }
     .encode_to_vec();
 
@@ -139,6 +146,13 @@ fn make_execution_reject_event(timestamp_ns: u64, order_id: &str, symbol: &str) 
         latency_ms: 0.5,
         reject_reason: proto::RejectReason::LastLook as i32,
         reject_message: "LAST_LOOK".to_string(),
+        expected_fill_price: 110.0,
+        actual_fill_price: 0.0,
+        estimated_fill_prob: 0.0,
+        execution_drift_trend: -110.0,
+        hidden_liquidity_sigma: 0.0,
+        fill_prediction_error: 0.0,
+        lp_fill_rate_rolling: 0.0,
     }
     .encode_to_vec();
 
@@ -204,6 +218,8 @@ fn make_liquididity_shock_features() -> FeatureVector {
         signed_volume: 50000.0,
         recent_fill_rate: 0.9,
         recent_slippage: 0.0001,
+        recent_reject_rate: 0.05,
+        execution_drift_trend: 0.0001,
         self_impact: 0.00001,
         time_decay: 1.0,
         dynamic_cost: 0.0002,
@@ -246,6 +262,8 @@ fn make_volatility_decay_features() -> FeatureVector {
         signed_volume: 20000.0,
         recent_fill_rate: 0.85,
         recent_slippage: 0.0001,
+        recent_reject_rate: 0.08,
+        execution_drift_trend: 0.0001,
         self_impact: 0.00001,
         time_decay: 1.0,
         dynamic_cost: 0.0002,
@@ -288,6 +306,8 @@ fn make_session_bias_features() -> FeatureVector {
         signed_volume: 10000.0,
         recent_fill_rate: 0.88,
         recent_slippage: 0.0001,
+        recent_reject_rate: 0.04,
+        execution_drift_trend: 0.0001,
         self_impact: 0.00001,
         time_decay: 1.0,
         dynamic_cost: 0.0002,
@@ -3636,7 +3656,7 @@ fn test_s12_drawdown_self_freeze_recovery() {
 #[test]
 fn test_full_pipeline_design_gap_conformance() {
     // Comprehensive integration test verifying all design.md gap implementations:
-    // - Feature 36-dim + strategy 5-dim = 41-dim
+    // - Feature 38-dim + strategy 5-dim = 43-dim
     // - GapDetector halts on severe gaps
     // - PreFailureMetrics observed (observability_ticks > 0)
     // - Regime heuristic updates during run
@@ -3683,23 +3703,23 @@ fn test_full_pipeline_design_gap_conformance() {
         "Default regime should have 4 regimes"
     );
 
-    // 4. Feature dimensions: FeatureVector::DIM = 36 (Task 4)
-    assert_eq!(FeatureVector::DIM, 36, "FeatureVector should be 36-dim");
+    // 4. Feature dimensions: FeatureVector::DIM = 38 (Task 4)
+    assert_eq!(FeatureVector::DIM, 38, "FeatureVector should be 38-dim");
 
-    // 5. Strategy feature dim = 36 + 5 = 41 (Task 4)
+    // 5. Strategy feature dim = 38 + 5 = 43 (Task 4)
     assert_eq!(
         fx_strategy::strategy_a::STRATEGY_A_FEATURE_DIM,
-        41,
-        "Strategy A should use 41-dim features"
+        43,
+        "Strategy A should use 43-dim features"
     );
     assert_eq!(
         fx_strategy::strategy_b::STRATEGY_B_FEATURE_DIM,
-        41,
-        "Strategy B should use 41-dim features"
+        43,
+        "Strategy B should use 43-dim features"
     );
     assert_eq!(
         fx_strategy::strategy_c::STRATEGY_C_FEATURE_DIM,
-        41,
-        "Strategy C should use 41-dim features"
+        43,
+        "Strategy C should use 43-dim features"
     );
 }

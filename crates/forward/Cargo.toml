@@ -30,6 +30,7 @@ tracing = { workspace = true }
 
 # Time
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 
 # Math
 ndarray = { workspace = true }

@@ -28,4 +28,6 @@ message TradeSkipEvent {
   double q_selected = 20;
   double staleness_ms = 21;
   double regime_entropy = 22;
+  double q_point_selected = 23;
+  double lot_multiplier = 24;
 }

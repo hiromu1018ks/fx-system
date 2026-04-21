@@ -145,6 +145,8 @@ mod tests {
                 total_ticks: 1000,
                 total_decisions: 500,
                 total_trades: 100,
+                strategy_events_published: 0,
+                state_snapshots_published: 0,
                 duration_secs: 60.0,
                 final_pnl: 50.0,
                 strategies_used: vec!["A".to_string()],
