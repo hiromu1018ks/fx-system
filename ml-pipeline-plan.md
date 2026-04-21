@@ -38,14 +38,13 @@ python -m research.models.train_regime \
 
 ## ステップ3: ONNXモデルを使ったバックテスト
 
+**前提**: ONNX Runtime共有ライブラリのパスを環境変数で指定する必要がある。
+
 ```bash
-cargo run -p fx-cli -- backtest \
-  --data USDJPY_Ticks_2024.04.20_2026.04.20.csv \
-  --config config/backtest.toml \
-  --output artifacts/backtest-onnx
+export ORT_DYLIB_PATH=".venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4"
 ```
 
-`config/backtest.toml` に以下を記載:
+設定ファイル（`config/backtest-onnx.toml` は既に作成済み）:
 
 ```toml
 [regime]
@@ -54,7 +53,17 @@ n_regimes = 4
 model_path = "research/models/onnx/regime_v1.onnx"
 ```
 
-`model_path` を省略するとヒューリスティック推定にフォールバック。
+実行:
+
+```bash
+ORT_DYLIB_PATH=".venv/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4" \
+cargo run -p fx-cli -- backtest \
+  --data USDJPY_Ticks_2024.04.20_2026.04.20.csv \
+  --config config/backtest-onnx.toml \
+  --output artifacts/backtest-onnx
+```
+
+`model_path` を省略するとヒューリスティック推定にフォールバック（ORT_DYLIB_PATHも不要）。
 
 ## テスト確認
 
