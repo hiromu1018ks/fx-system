@@ -39,9 +39,25 @@ pub struct BacktestCmd {
     #[arg(short, long)]
     pub strategies: Option<String>,
 
+    /// Inclusive start timestamp for the backtest period (nanoseconds or RFC3339).
+    #[arg(long)]
+    pub start_time: Option<String>,
+
+    /// Inclusive end timestamp for the backtest period (nanoseconds or RFC3339).
+    #[arg(long)]
+    pub end_time: Option<String>,
+
     /// Optional CSV path to stream regime-input features during backtest.
     #[arg(long)]
     pub dump_features: Option<PathBuf>,
+
+    /// Path to a previously exported Q-state snapshot (.json or .bin) to import.
+    #[arg(long)]
+    pub import_q_state: Option<PathBuf>,
+
+    /// Path to write the learned Q-state snapshot after the run (.json or .bin).
+    #[arg(long)]
+    pub export_q_state: Option<PathBuf>,
 }
 
 /// Forward-test subcommand arguments.
@@ -123,7 +139,11 @@ mod tests {
                 assert_eq!(cmd.data, PathBuf::from("ticks.csv"));
                 assert!(cmd.config.is_none());
                 assert!(cmd.strategies.is_none());
+                assert!(cmd.start_time.is_none());
+                assert!(cmd.end_time.is_none());
                 assert!(cmd.dump_features.is_none());
+                assert!(cmd.import_q_state.is_none());
+                assert!(cmd.export_q_state.is_none());
             }
             _ => panic!("expected Backtest command"),
         }
@@ -142,8 +162,16 @@ mod tests {
             "/tmp/results",
             "--strategies",
             "A,B",
+            "--start-time",
+            "2024-01-01T00:00:00Z",
+            "--end-time",
+            "2024-01-01T01:00:00Z",
             "--dump-features",
             "/tmp/features.csv",
+            "--import-q-state",
+            "/tmp/q-state.json",
+            "--export-q-state",
+            "/tmp/q-state.bin",
         ]);
         assert!(cli.is_ok());
         let cli = cli.unwrap();
@@ -153,7 +181,11 @@ mod tests {
                 assert_eq!(cmd.config, Some(PathBuf::from("config.toml")));
                 assert_eq!(cmd.output, Some(PathBuf::from("/tmp/results")));
                 assert_eq!(cmd.strategies.as_deref(), Some("A,B"));
+                assert_eq!(cmd.start_time.as_deref(), Some("2024-01-01T00:00:00Z"));
+                assert_eq!(cmd.end_time.as_deref(), Some("2024-01-01T01:00:00Z"));
                 assert_eq!(cmd.dump_features, Some(PathBuf::from("/tmp/features.csv")));
+                assert_eq!(cmd.import_q_state, Some(PathBuf::from("/tmp/q-state.json")));
+                assert_eq!(cmd.export_q_state, Some(PathBuf::from("/tmp/q-state.bin")));
             }
             _ => panic!("expected Backtest command"),
         }

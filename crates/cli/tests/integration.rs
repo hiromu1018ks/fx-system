@@ -136,6 +136,25 @@ fn test_backtest_feature_dump_writes_schema_and_rows() {
 }
 
 #[test]
+fn test_backtest_time_range_filters_ticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 100);
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let start_time_ns = ticks[20].timestamp_ns;
+    let end_time_ns = ticks[39].timestamp_ns;
+
+    let mut config = fx_backtest::engine::BacktestConfig::default();
+    config.start_time_ns = start_time_ns;
+    config.end_time_ns = end_time_ns;
+
+    let mut engine = fx_backtest::engine::BacktestEngine::new(config);
+    let result = engine.run_from_stream_file(&csv_path).unwrap();
+
+    assert_eq!(result.total_ticks, 20);
+}
+
+#[test]
 fn test_cli_backtest_with_toml_config() {
     let dir = tempfile::tempdir().unwrap();
     let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 200);
@@ -218,6 +237,73 @@ fn crate_integration_config_load(path: &Path) -> fx_backtest::engine::BacktestCo
         }
     }
     config
+}
+
+#[test]
+fn test_backtest_q_state_export_import_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 200);
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+
+    let mut config = fx_backtest::engine::BacktestConfig::default();
+    config.rng_seed = Some([13u8; 32]);
+
+    let mut trained_engine = fx_backtest::engine::BacktestEngine::new(config.clone());
+    let _ = trained_engine.run_from_events(&events[..120]);
+
+    let snapshot = trained_engine.export_q_state();
+    let snapshot_path = dir.path().join("q_state.json");
+    snapshot.write_to_path(&snapshot_path).unwrap();
+    assert!(snapshot_path.exists());
+
+    let loaded =
+        fx_strategy::q_state::StrategySetQStateSnapshot::read_from_path(&snapshot_path).unwrap();
+    assert_eq!(loaded, snapshot);
+
+    let mut imported_engine = fx_backtest::engine::BacktestEngine::new(config);
+    imported_engine.import_q_state(&loaded).unwrap();
+
+    assert_eq!(imported_engine.export_q_state(), snapshot);
+}
+
+#[test]
+fn test_backtest_import_rejects_schema_version_mismatch() {
+    let mut engine =
+        fx_backtest::engine::BacktestEngine::new(fx_backtest::engine::BacktestConfig::default());
+    let mut snapshot = engine.export_q_state();
+    snapshot.schema_version += 1;
+
+    let err = engine.import_q_state(&snapshot).unwrap_err().to_string();
+    assert!(err.contains("Unsupported q-state schema version"));
+}
+
+#[test]
+fn test_backtest_import_rejects_feature_schema_version_mismatch() {
+    let mut engine =
+        fx_backtest::engine::BacktestEngine::new(fx_backtest::engine::BacktestConfig::default());
+    let mut snapshot = engine.export_q_state();
+    snapshot.feature_schema_version = "feature-v999".to_string();
+
+    let err = engine.import_q_state(&snapshot).unwrap_err().to_string();
+    assert!(err.contains("feature schema version"));
+}
+
+#[test]
+fn test_backtest_import_rejects_feature_dimension_mismatch() {
+    let mut engine =
+        fx_backtest::engine::BacktestEngine::new(fx_backtest::engine::BacktestConfig::default());
+    let mut snapshot = engine.export_q_state();
+    let strategy_a_snapshot = snapshot
+        .strategies
+        .iter_mut()
+        .find(|strategy| strategy.strategy_id == fx_core::types::StrategyId::A)
+        .unwrap();
+    strategy_a_snapshot.q_function.dim += 1;
+
+    let err = engine.import_q_state(&snapshot).unwrap_err().to_string();
+    assert!(err.contains("feature dimension"));
 }
 
 #[test]

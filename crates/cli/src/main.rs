@@ -30,23 +30,35 @@ fn main() -> Result<()> {
 }
 
 fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
-    info!(data = ?cmd.data, config = ?cmd.config, output = ?cmd.output, "Starting backtest");
+    info!(
+        data = ?cmd.data,
+        config = ?cmd.config,
+        output = ?cmd.output,
+        start_time = ?cmd.start_time,
+        end_time = ?cmd.end_time,
+        import_q_state = ?cmd.import_q_state,
+        export_q_state = ?cmd.export_q_state,
+        "Starting backtest"
+    );
 
-    let config = if let Some(config_path) = &cmd.config {
+    let mut config = if let Some(config_path) = &cmd.config {
         config::load_backtest_config(config_path)?
     } else {
         fx_backtest::engine::BacktestConfig::default()
     };
 
-    let mut config = config;
-    if let Some(strategies_str) = &cmd.strategies {
-        config.enabled_strategies = parse_strategies(strategies_str)?;
-    }
+    apply_backtest_overrides(&mut config, &cmd)?;
 
     println!("Running streaming backtest on {}", cmd.data.display());
 
     let start = std::time::Instant::now();
     let mut engine = fx_backtest::engine::BacktestEngine::new(config);
+    if let Some(path) = &cmd.import_q_state {
+        let snapshot = fx_strategy::q_state::StrategySetQStateSnapshot::read_from_path(path)?;
+        engine.import_q_state(&snapshot).with_context(|| {
+            format!("Failed to import q-state snapshot from {}", path.display())
+        })?;
+    }
     if let Some(path) = &cmd.dump_features {
         engine.enable_feature_dump(path)?;
     }
@@ -92,6 +104,13 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
     })?;
 
     output::write_backtest_result(&result, &output_dir)?;
+    if let Some(path) = &cmd.export_q_state {
+        let snapshot = engine.export_q_state();
+        snapshot
+            .write_to_path(path)
+            .with_context(|| format!("Failed to export q-state snapshot to {}", path.display()))?;
+        println!("Q-state snapshot written to {}", path.display());
+    }
 
     info!(dir = %output_dir.display(), "Results written");
     println!("Results written to {}", output_dir.display());
@@ -207,8 +226,7 @@ fn run_recorded_forward(
     let path = PathBuf::from(data_path);
     let events = load_recorded_market_events(&path)?;
     let total_ticks = events.len();
-    let start_time_ns = parse_recorded_time(start_time)?;
-    let end_time_ns = parse_recorded_time(end_time)?;
+    let (start_time_ns, end_time_ns) = resolve_cli_time_range(start_time, end_time)?;
     info!(
         event_count = total_ticks,
         ?start_time_ns,
@@ -299,7 +317,41 @@ fn load_recorded_market_events(path: &Path) -> Result<Vec<fx_events::event::Gene
         .with_context(|| format!("Failed to replay market events from: {}", path.display()))
 }
 
-fn parse_recorded_time(value: Option<&str>) -> Result<Option<u64>> {
+fn apply_backtest_overrides(
+    config: &mut fx_backtest::engine::BacktestConfig,
+    cmd: &args::BacktestCmd,
+) -> Result<()> {
+    if let Some(strategies_str) = &cmd.strategies {
+        config.enabled_strategies = parse_strategies(strategies_str)?;
+    }
+
+    let (start_time_ns, end_time_ns) =
+        resolve_cli_time_range(cmd.start_time.as_deref(), cmd.end_time.as_deref())?;
+    if let Some(start_time_ns) = start_time_ns {
+        config.start_time_ns = start_time_ns;
+    }
+    if let Some(end_time_ns) = end_time_ns {
+        config.end_time_ns = end_time_ns;
+    }
+
+    Ok(())
+}
+
+fn resolve_cli_time_range(
+    start_time: Option<&str>,
+    end_time: Option<&str>,
+) -> Result<(Option<u64>, Option<u64>)> {
+    let start_time_ns = parse_cli_time(start_time)?;
+    let end_time_ns = parse_cli_time(end_time)?;
+    if let (Some(start), Some(end)) = (start_time_ns, end_time_ns) {
+        if start > end {
+            anyhow::bail!("--start-time must be <= --end-time");
+        }
+    }
+    Ok((start_time_ns, end_time_ns))
+}
+
+fn parse_cli_time(value: Option<&str>) -> Result<Option<u64>> {
     let Some(raw) = value else {
         return Ok(None);
     };
@@ -308,12 +360,12 @@ fn parse_recorded_time(value: Option<&str>) -> Result<Option<u64>> {
     }
 
     let timestamp = DateTime::parse_from_rfc3339(raw)
-        .with_context(|| format!("Invalid recorded timestamp '{raw}'. Use ns or RFC3339."))?;
+        .with_context(|| format!("Invalid timestamp '{raw}'. Use ns or RFC3339."))?;
     let ns = timestamp
         .timestamp_nanos_opt()
-        .ok_or_else(|| anyhow::anyhow!("Recorded timestamp out of range: {raw}"))?;
+        .ok_or_else(|| anyhow::anyhow!("Timestamp out of range: {raw}"))?;
     if ns < 0 {
-        anyhow::bail!("Recorded timestamp must be >= 0: {raw}");
+        anyhow::bail!("Timestamp must be >= 0: {raw}");
     }
     Ok(Some(ns as u64))
 }
@@ -526,6 +578,7 @@ fn find_bridge_script() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_parse_strategies_single() {
@@ -561,5 +614,49 @@ mod tests {
     fn test_parse_strategies_empty_fails() {
         let result = parse_strategies("");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_cli_time_accepts_nanoseconds() {
+        let parsed = parse_cli_time(Some("1704067200000000000")).unwrap();
+        assert_eq!(parsed, Some(1_704_067_200_000_000_000));
+    }
+
+    #[test]
+    fn test_parse_cli_time_accepts_rfc3339() {
+        let parsed = parse_cli_time(Some("2024-01-01T00:00:00Z")).unwrap();
+        assert_eq!(parsed, Some(1_704_067_200_000_000_000));
+    }
+
+    #[test]
+    fn test_resolve_cli_time_range_rejects_inverted_range() {
+        let err =
+            resolve_cli_time_range(Some("2024-01-01T01:00:00Z"), Some("2024-01-01T00:00:00Z"))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("--start-time must be <= --end-time"));
+    }
+
+    #[test]
+    fn test_apply_backtest_overrides_sets_time_range() {
+        let mut config = fx_backtest::engine::BacktestConfig::default();
+        let cmd = args::BacktestCmd {
+            data: PathBuf::from("ticks.csv"),
+            config: None,
+            output: None,
+            strategies: Some("A,B".to_string()),
+            start_time: Some("2024-01-01T00:00:00Z".to_string()),
+            end_time: Some("2024-01-01T00:01:00Z".to_string()),
+            dump_features: None,
+            import_q_state: None,
+            export_q_state: None,
+        };
+
+        apply_backtest_overrides(&mut config, &cmd).unwrap();
+
+        assert!(config.enabled_strategies.contains(&StrategyId::A));
+        assert!(config.enabled_strategies.contains(&StrategyId::B));
+        assert_eq!(config.start_time_ns, 1_704_067_200_000_000_000);
+        assert_eq!(config.end_time_ns, 1_704_067_260_000_000_000);
     }
 }

@@ -4,6 +4,7 @@ pub mod extractor;
 pub mod features;
 pub mod mc_eval;
 pub mod policy;
+pub mod q_state;
 pub mod regime;
 pub mod strategy_a;
 pub mod strategy_b;

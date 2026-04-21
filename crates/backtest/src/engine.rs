@@ -3,7 +3,7 @@ use std::io::BufWriter;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use fx_core::observability::{
     l2_distance, softmax_entropy, AnomalyConfig, ObservabilityManager, PreFailureMetrics,
     RollingStats,
@@ -34,10 +34,19 @@ use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
 use fx_strategy::features::FeatureVector;
 use fx_strategy::mc_eval::{McEvalConfig, McEvaluator, TerminalReason};
 use fx_strategy::policy::Action;
+use fx_strategy::q_state::{
+    StrategyQStateSnapshot, StrategySetQStateSnapshot, Q_STATE_SCHEMA_VERSION,
+};
 use fx_strategy::regime::{RegimeCache, RegimeConfig};
-use fx_strategy::strategy_a::{StrategyA, StrategyAConfig, StrategyADecision};
-use fx_strategy::strategy_b::{StrategyB, StrategyBConfig, StrategyBDecision};
-use fx_strategy::strategy_c::{StrategyC, StrategyCConfig, StrategyCDecision};
+use fx_strategy::strategy_a::{
+    StrategyA, StrategyAConfig, StrategyADecision, STRATEGY_A_FEATURE_DIM,
+};
+use fx_strategy::strategy_b::{
+    StrategyB, StrategyBConfig, StrategyBDecision, STRATEGY_B_FEATURE_DIM,
+};
+use fx_strategy::strategy_c::{
+    StrategyC, StrategyCConfig, StrategyCDecision, STRATEGY_C_FEATURE_DIM,
+};
 use prost::Message as _;
 use rand::prelude::*;
 use rand::rngs::SmallRng;
@@ -455,6 +464,88 @@ impl BacktestEngine {
             source_strategy: StrategyId::A,
         });
         Ok(())
+    }
+
+    pub fn export_q_state(&self) -> StrategySetQStateSnapshot {
+        StrategySetQStateSnapshot::new(vec![
+            StrategyQStateSnapshot {
+                strategy_id: StrategyId::A,
+                q_function: self.strategy_a.q_function().snapshot(),
+            },
+            StrategyQStateSnapshot {
+                strategy_id: StrategyId::B,
+                q_function: self.strategy_b.q_function().snapshot(),
+            },
+            StrategyQStateSnapshot {
+                strategy_id: StrategyId::C,
+                q_function: self.strategy_c.q_function().snapshot(),
+            },
+        ])
+    }
+
+    pub fn import_q_state(&mut self, snapshot: &StrategySetQStateSnapshot) -> Result<()> {
+        if snapshot.schema_version != Q_STATE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Unsupported q-state schema version {} (expected {})",
+                snapshot.schema_version,
+                Q_STATE_SCHEMA_VERSION
+            );
+        }
+        if snapshot.feature_schema_version != FeatureVector::SCHEMA_VERSION {
+            anyhow::bail!(
+                "Q-state feature schema version '{}' does not match current '{}'",
+                snapshot.feature_schema_version,
+                FeatureVector::SCHEMA_VERSION
+            );
+        }
+        if snapshot.strategies.len() != StrategyId::all().len() {
+            anyhow::bail!(
+                "Q-state snapshot must contain {} strategies, found {}",
+                StrategyId::all().len(),
+                snapshot.strategies.len()
+            );
+        }
+
+        let mut seen = HashSet::new();
+        for strategy_snapshot in &snapshot.strategies {
+            if !seen.insert(strategy_snapshot.strategy_id) {
+                anyhow::bail!(
+                    "Q-state snapshot contains duplicate strategy {:?}",
+                    strategy_snapshot.strategy_id
+                );
+            }
+        }
+
+        *self.strategy_a.q_function_mut() =
+            Self::restore_q_function(snapshot, StrategyId::A, STRATEGY_A_FEATURE_DIM)?;
+        *self.strategy_b.q_function_mut() =
+            Self::restore_q_function(snapshot, StrategyId::B, STRATEGY_B_FEATURE_DIM)?;
+        *self.strategy_c.q_function_mut() =
+            Self::restore_q_function(snapshot, StrategyId::C, STRATEGY_C_FEATURE_DIM)?;
+
+        Ok(())
+    }
+
+    fn restore_q_function(
+        snapshot: &StrategySetQStateSnapshot,
+        strategy_id: StrategyId,
+        expected_dim: usize,
+    ) -> Result<fx_strategy::bayesian_lr::QFunction> {
+        let strategy_snapshot = snapshot.strategy(strategy_id).ok_or_else(|| {
+            anyhow::anyhow!("Q-state snapshot is missing strategy {:?}", strategy_id)
+        })?;
+
+        if strategy_snapshot.q_function.dim != expected_dim {
+            anyhow::bail!(
+                "Q-state snapshot for strategy {:?} has feature dimension {}, expected {}",
+                strategy_id,
+                strategy_snapshot.q_function.dim,
+                expected_dim
+            );
+        }
+
+        fx_strategy::bayesian_lr::QFunction::from_snapshot(&strategy_snapshot.q_function)
+            .with_context(|| format!("Failed to restore q-state for strategy {:?}", strategy_id))
     }
 
     /// Run backtest over historical MarketEvents loaded from `store`.

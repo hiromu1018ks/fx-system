@@ -5,11 +5,18 @@
 //!
 //! σ_model is ONLY reflected through Thompson Sampling, NEVER in point estimates.
 
+use anyhow::{bail, Result};
 use std::collections::HashMap;
 
 use nalgebra::{Cholesky, DMatrix, DVector};
 use rand::Rng;
 use rand_distr::StandardNormal;
+use serde::{Deserialize, Serialize};
+
+use crate::q_state::{
+    ActionQStateSnapshot, BayesianLinearRegressionSnapshot, MatrixSnapshot, QFunctionSnapshot,
+    VectorSnapshot,
+};
 
 /// Result of a single Bayesian update.
 #[derive(Debug, Clone)]
@@ -229,6 +236,98 @@ impl BayesianLinearRegression {
     pub fn dim(&self) -> usize {
         self.dim
     }
+
+    pub fn snapshot(&self) -> BayesianLinearRegressionSnapshot {
+        BayesianLinearRegressionSnapshot {
+            dim: self.dim,
+            posterior_mean: VectorSnapshot::from_vec(self.w_hat.iter().copied().collect()),
+            posterior_covariance: MatrixSnapshot::from_column_major(
+                self.dim,
+                self.dim,
+                (self.a_inv.clone() * self.sigma2_noise).as_slice().to_vec(),
+            ),
+            precision_inverse: MatrixSnapshot::from_column_major(
+                self.dim,
+                self.dim,
+                self.a_inv.as_slice().to_vec(),
+            ),
+            b_vector: VectorSnapshot::from_vec(self.b.iter().copied().collect()),
+            sigma2_noise: self.sigma2_noise,
+            ema_alpha: self.ema_alpha,
+            residual_var_ema: self.residual_var_ema,
+            lambda_reg: self.lambda_reg,
+            prev_w_norm: self.prev_w_norm,
+            n_observations: self.n_observations,
+            divergence_threshold: self.divergence_threshold,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &BayesianLinearRegressionSnapshot) -> Result<Self> {
+        if snapshot.dim == 0 {
+            bail!("BayesianLinearRegression snapshot dimension must be positive");
+        }
+        if snapshot.lambda_reg <= 0.0 {
+            bail!("BayesianLinearRegression snapshot lambda_reg must be positive");
+        }
+        if snapshot.sigma2_noise <= 0.0 {
+            bail!("BayesianLinearRegression snapshot sigma2_noise must be positive");
+        }
+        if snapshot.residual_var_ema <= 0.0 {
+            bail!("BayesianLinearRegression snapshot residual_var_ema must be positive");
+        }
+        if !(0.0 < snapshot.ema_alpha && snapshot.ema_alpha <= 1.0) {
+            bail!("BayesianLinearRegression snapshot ema_alpha must be in (0, 1]");
+        }
+        if snapshot.divergence_threshold <= 0.0 {
+            bail!("BayesianLinearRegression snapshot divergence_threshold must be positive");
+        }
+
+        let posterior_mean =
+            vector_from_snapshot(&snapshot.posterior_mean, snapshot.dim, "posterior_mean")?;
+        let posterior_covariance = matrix_from_snapshot(
+            &snapshot.posterior_covariance,
+            snapshot.dim,
+            snapshot.dim,
+            "posterior_covariance",
+        )?;
+        let precision_inverse = matrix_from_snapshot(
+            &snapshot.precision_inverse,
+            snapshot.dim,
+            snapshot.dim,
+            "precision_inverse",
+        )?;
+        let b = vector_from_snapshot(&snapshot.b_vector, snapshot.dim, "b_vector")?;
+
+        let expected_covariance = precision_inverse.clone() * snapshot.sigma2_noise;
+        let covariance_diff = max_abs_matrix_diff(&expected_covariance, &posterior_covariance);
+        if covariance_diff > 1e-9 {
+            bail!(
+                "BayesianLinearRegression snapshot posterior_covariance does not match precision_inverse * sigma2_noise (max diff: {covariance_diff})"
+            );
+        }
+
+        let expected_w_hat = &precision_inverse * &b;
+        let mean_diff = max_abs_vector_diff(&expected_w_hat, &posterior_mean);
+        if mean_diff > 1e-9 {
+            bail!(
+                "BayesianLinearRegression snapshot posterior_mean does not match precision_inverse * b_vector (max diff: {mean_diff})"
+            );
+        }
+
+        Ok(Self {
+            dim: snapshot.dim,
+            a_inv: precision_inverse,
+            b,
+            w_hat: posterior_mean,
+            sigma2_noise: snapshot.sigma2_noise,
+            ema_alpha: snapshot.ema_alpha,
+            residual_var_ema: snapshot.residual_var_ema,
+            lambda_reg: snapshot.lambda_reg,
+            prev_w_norm: snapshot.prev_w_norm,
+            n_observations: snapshot.n_observations,
+            divergence_threshold: snapshot.divergence_threshold,
+        })
+    }
 }
 
 fn sample_standard_normal(dim: usize, rng: &mut impl Rng) -> DVector<f64> {
@@ -244,7 +343,7 @@ fn sample_standard_normal_scalar(rng: &mut impl Rng) -> f64 {
 }
 
 /// Action types for Q-function (without lot sizes — those are determined by execution layer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum QAction {
     Buy,
     Sell,
@@ -262,6 +361,7 @@ impl QAction {
 /// Manages separate BayesianLinearRegression for each action.
 /// Thompson Sampling is the sole action selection mechanism;
 /// σ_model is ONLY reflected through posterior sampling.
+#[derive(Debug, Clone)]
 pub struct QFunction {
     models: HashMap<QAction, BayesianLinearRegression>,
     dim: usize,
@@ -386,6 +486,138 @@ impl QFunction {
     pub fn dim(&self) -> usize {
         self.dim
     }
+
+    pub fn snapshot(&self) -> QFunctionSnapshot {
+        let actions = QAction::all()
+            .iter()
+            .map(|&action| ActionQStateSnapshot {
+                action,
+                model: self.models[&action].snapshot(),
+            })
+            .collect();
+
+        QFunctionSnapshot {
+            dim: self.dim,
+            initial_sigma2: self.initial_sigma2,
+            optimistic_bias: self.optimistic_bias,
+            actions,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: &QFunctionSnapshot) -> Result<Self> {
+        if snapshot.dim == 0 {
+            bail!("QFunction snapshot dimension must be positive");
+        }
+        if snapshot.initial_sigma2 <= 0.0 {
+            bail!("QFunction snapshot initial_sigma2 must be positive");
+        }
+        if snapshot.actions.len() != QAction::all().len() {
+            bail!(
+                "QFunction snapshot must contain {} actions, found {}",
+                QAction::all().len(),
+                snapshot.actions.len()
+            );
+        }
+
+        let mut models = HashMap::new();
+        for action_snapshot in &snapshot.actions {
+            if models.contains_key(&action_snapshot.action) {
+                bail!(
+                    "QFunction snapshot contains duplicate action {:?}",
+                    action_snapshot.action
+                );
+            }
+
+            let model = BayesianLinearRegression::from_snapshot(&action_snapshot.model)?;
+            if model.dim() != snapshot.dim {
+                bail!(
+                    "QFunction snapshot action {:?} has dimension {}, expected {}",
+                    action_snapshot.action,
+                    model.dim(),
+                    snapshot.dim
+                );
+            }
+            models.insert(action_snapshot.action, model);
+        }
+
+        for &action in QAction::all() {
+            if !models.contains_key(&action) {
+                bail!("QFunction snapshot is missing action {:?}", action);
+            }
+        }
+
+        Ok(Self {
+            models,
+            dim: snapshot.dim,
+            initial_sigma2: snapshot.initial_sigma2,
+            optimistic_bias: snapshot.optimistic_bias,
+        })
+    }
+}
+
+fn vector_from_snapshot(
+    snapshot: &VectorSnapshot,
+    expected_len: usize,
+    field_name: &str,
+) -> Result<DVector<f64>> {
+    if snapshot.len != expected_len {
+        bail!(
+            "Snapshot field '{field_name}' has length {}, expected {}",
+            snapshot.len,
+            expected_len
+        );
+    }
+    if snapshot.data.len() != expected_len {
+        bail!(
+            "Snapshot field '{field_name}' stores {} values, expected {}",
+            snapshot.data.len(),
+            expected_len
+        );
+    }
+    Ok(DVector::from_column_slice(&snapshot.data))
+}
+
+fn matrix_from_snapshot(
+    snapshot: &MatrixSnapshot,
+    expected_rows: usize,
+    expected_cols: usize,
+    field_name: &str,
+) -> Result<DMatrix<f64>> {
+    if snapshot.rows != expected_rows || snapshot.cols != expected_cols {
+        bail!(
+            "Snapshot field '{field_name}' has shape {}x{}, expected {}x{}",
+            snapshot.rows,
+            snapshot.cols,
+            expected_rows,
+            expected_cols
+        );
+    }
+    if snapshot.data.len() != expected_rows * expected_cols {
+        bail!(
+            "Snapshot field '{field_name}' stores {} values, expected {}",
+            snapshot.data.len(),
+            expected_rows * expected_cols
+        );
+    }
+    Ok(DMatrix::from_column_slice(
+        expected_rows,
+        expected_cols,
+        &snapshot.data,
+    ))
+}
+
+fn max_abs_vector_diff(lhs: &DVector<f64>, rhs: &DVector<f64>) -> f64 {
+    lhs.iter()
+        .zip(rhs.iter())
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f64, f64::max)
+}
+
+fn max_abs_matrix_diff(lhs: &DMatrix<f64>, rhs: &DMatrix<f64>) -> f64 {
+    lhs.iter()
+        .zip(rhs.iter())
+        .map(|(left, right)| (left - right).abs())
+        .fold(0.0_f64, f64::max)
 }
 
 #[cfg(test)]
@@ -1072,5 +1304,61 @@ mod tests {
             assert!(w_diag[i].is_finite());
             assert!(w_chol[i].is_finite());
         }
+    }
+
+    #[test]
+    fn test_bayesian_lr_snapshot_roundtrip() {
+        let mut model = make_model();
+        let phi = vec![1.0, -0.5, 0.25, 0.75, -1.25];
+        for target in [0.5, -0.25, 1.5, 0.8] {
+            model.update(&phi, target);
+        }
+
+        let snapshot = model.snapshot();
+        let restored = BayesianLinearRegression::from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(restored.dim(), model.dim());
+        assert_eq!(restored.n_observations(), model.n_observations());
+        assert!((restored.noise_variance() - model.noise_variance()).abs() < 1e-12);
+        for (restored_weight, original_weight) in
+            restored.weights().iter().zip(model.weights().iter())
+        {
+            assert!((restored_weight - original_weight).abs() < 1e-12);
+        }
+        assert!((restored.predict(&phi) - model.predict(&phi)).abs() < 1e-12);
+        assert!((restored.posterior_std(&phi) - model.posterior_std(&phi)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_qfunction_snapshot_roundtrip() {
+        let mut q_function = make_qfunction();
+        let phi = vec![0.5, -1.0, 0.25, 0.75, 1.25];
+
+        q_function.update(QAction::Buy, &phi, 1.0);
+        q_function.update(QAction::Sell, &phi, -0.7);
+        q_function.update(QAction::Hold, &phi, 0.1);
+
+        let snapshot = q_function.snapshot();
+        let restored = QFunction::from_snapshot(&snapshot).unwrap();
+
+        assert_eq!(restored.dim(), q_function.dim());
+        for &action in QAction::all() {
+            assert_eq!(
+                restored.model(action).n_observations(),
+                q_function.model(action).n_observations()
+            );
+            assert!(
+                (restored.q_value(action, &phi) - q_function.q_value(action, &phi)).abs() < 1e-12
+            );
+        }
+    }
+
+    #[test]
+    fn test_qfunction_snapshot_rejects_missing_action() {
+        let mut snapshot = make_qfunction().snapshot();
+        snapshot.actions.pop();
+
+        let err = QFunction::from_snapshot(&snapshot).unwrap_err().to_string();
+        assert!(err.contains("must contain"));
     }
 }

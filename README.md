@@ -121,10 +121,35 @@ cargo run -p fx-cli -- \
 
 - `--config <toml>`: `crates/cli/src/config.rs` が読む BacktestConfig 上書き
 - `--strategies A,B` : 有効戦略を限定
+- `--start-time <ns|RFC3339>` / `--end-time <ns|RFC3339>`: バックテスト対象期間を CLI から上書き
 - `--dump-features <csv>`: regime v1 学習用の 38 次元特徴量を CSV にストリーミング出力
+- `--import-q-state <path>`: 事前学習済みの Q 関数 posterior を読み込んで初期化
+- `--export-q-state <path>`: バックテスト終了時点の Q 関数 posterior を保存（`.json` / `.bin` で自動判定）
 - 出力物: `artifacts/backtest/backtest_result.json`, `artifacts/backtest/trades.csv`
 
 Validation や将来の比較に使うので、`backtest_result.json` は run ごとに保存場所を分けて保管すること。
+
+事前学習 → out-of-sample 検証の最短手順:
+
+```bash
+# 期間Aで学習して posterior を保存
+cargo run -p fx-cli -- \
+  backtest \
+  --data data/usd_jpy_ticks.csv \
+  --start-time 2024-01-01T00:00:00Z \
+  --end-time 2024-03-31T23:59:59Z \
+  --export-q-state artifacts/q-state/train-period.json \
+  --output artifacts/backtest-train
+
+# 期間Bで posterior を読み込んで検証
+cargo run -p fx-cli -- \
+  backtest \
+  --data data/usd_jpy_ticks.csv \
+  --start-time 2024-04-01T00:00:00Z \
+  --end-time 2024-04-30T23:59:59Z \
+  --import-q-state artifacts/q-state/train-period.json \
+  --output artifacts/backtest-oos
+```
 
 regime v1 用の特徴量ダンプも同じ backtest 経路で取得できる。
 
