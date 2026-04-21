@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::io::BufWriter;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use fx_core::observability::{
     l2_distance, softmax_entropy, AnomalyConfig, ObservabilityManager, PreFailureMetrics,
     RollingStats,
@@ -239,6 +242,11 @@ struct PositionSnapshot {
     entry_timestamp_ns: u64,
 }
 
+struct FeatureDumpWriter {
+    writer: csv::Writer<BufWriter<std::fs::File>>,
+    source_strategy: StrategyId,
+}
+
 #[derive(Debug, Default, Clone)]
 struct PeriodicLimitTracker {
     day_key: Option<(i32, u32)>,
@@ -385,6 +393,7 @@ pub struct BacktestEngine {
     kill_switch: KillSwitch,
     lifecycle_manager: LifecycleManager,
     regime_cache: RegimeCache,
+    feature_dump: Option<FeatureDumpWriter>,
     /// Tracks previous tick's `is_unknown` state to detect regime transitions.
     prev_regime_unknown: bool,
 }
@@ -409,11 +418,43 @@ impl BacktestEngine {
             kill_switch: KillSwitch::new(config.kill_switch_config.clone()),
             lifecycle_manager: LifecycleManager::new(config.lifecycle_config.clone()),
             regime_cache: RegimeCache::new(config.regime_config.clone()),
+            feature_dump: None,
             prev_regime_unknown: false,
             config,
             execution_gateway: ExecutionGateway::new(gateway_config),
             rng: SmallRng::from_seed(rng_seed),
         }
+    }
+
+    pub fn enable_feature_dump<P: AsRef<Path>>(&mut self, path: P) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create feature dump parent: {}", parent.display())
+            })?;
+        }
+
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("Failed to create feature dump file: {}", path.display()))?;
+        let mut writer = csv::Writer::from_writer(BufWriter::new(file));
+        let mut header = Vec::with_capacity(3 + FeatureVector::DIM);
+        header.push("timestamp_ns".to_string());
+        header.push("source_strategy".to_string());
+        header.push("feature_version".to_string());
+        header.extend(
+            FeatureVector::header_names()
+                .into_iter()
+                .map(str::to_string),
+        );
+        writer
+            .write_record(&header)
+            .with_context(|| format!("Failed to write feature dump header: {}", path.display()))?;
+
+        self.feature_dump = Some(FeatureDumpWriter {
+            writer,
+            source_strategy: StrategyId::A,
+        });
+        Ok(())
     }
 
     /// Run backtest over historical MarketEvents loaded from `store`.
@@ -441,7 +482,9 @@ impl BacktestEngine {
             "Loaded historical market events"
         );
 
-        self.run_inner(&market_events, wall_start)
+        let result = self.run_inner(&market_events, wall_start);
+        self.flush_feature_dump();
+        result
     }
 
     /// Run backtest from a streaming tick source (e.g. `StreamingCsvReader`).
@@ -518,6 +561,8 @@ impl BacktestEngine {
             wall_time_ms,
             "Backtest complete (streaming)"
         );
+
+        self.flush_feature_dump();
 
         BacktestResult {
             config: self.config.clone(),
@@ -625,7 +670,9 @@ impl BacktestEngine {
 
         // Convert &GenericEvent references to owned for uniform processing
         let owned: Vec<GenericEvent> = market_events.into_iter().cloned().collect();
-        self.run_inner(&owned, wall_start)
+        let result = self.run_inner(&owned, wall_start);
+        self.flush_feature_dump();
+        result
     }
 
     /// Core replay loop shared by `run` and `run_from_events`.
@@ -883,6 +930,7 @@ impl BacktestEngine {
             // Update regime cache from features (lightweight online indicator)
             // Use Strategy A's features as the representative feature vector
             if let Some(ctx_a) = tick_contexts.get(&StrategyId::A) {
+                self.dump_regime_features(ctx_a.timestamp_ns, &ctx_a.features);
                 self.update_regime(&ctx_a.features, tick_ns);
             }
 
@@ -2144,7 +2192,7 @@ impl BacktestEngine {
 
         // Use ONNX model if available, otherwise fall back to heuristic
         if self.regime_cache.has_onnx_model() {
-            let phi = features.flattened();
+            let phi = features.flattened_for_regime_model();
             if let Some(posterior) = self.regime_cache.predict_onnx(&phi) {
                 self.regime_cache.update(posterior, tick_ns);
                 if phi.len() == feature_dim {
@@ -2211,6 +2259,37 @@ impl BacktestEngine {
                 }
             })
             .collect()
+    }
+
+    fn dump_regime_features(&mut self, timestamp_ns: u64, features: &FeatureVector) {
+        let Some(feature_dump) = self.feature_dump.as_mut() else {
+            return;
+        };
+
+        let mut row = Vec::with_capacity(3 + FeatureVector::DIM);
+        row.push(timestamp_ns.to_string());
+        row.push(format!("{:?}", feature_dump.source_strategy));
+        row.push(FeatureVector::SCHEMA_VERSION.to_string());
+        row.extend(
+            features
+                .flattened_for_regime_model()
+                .into_iter()
+                .map(|value| value.to_string()),
+        );
+
+        feature_dump
+            .writer
+            .write_record(&row)
+            .expect("feature dump write failed after successful initialization");
+    }
+
+    fn flush_feature_dump(&mut self) {
+        if let Some(feature_dump) = self.feature_dump.as_mut() {
+            feature_dump
+                .writer
+                .flush()
+                .expect("feature dump flush failed after successful initialization");
+        }
     }
 
     // -- Internal helpers --

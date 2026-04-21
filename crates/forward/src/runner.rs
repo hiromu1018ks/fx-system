@@ -521,7 +521,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 let feature_dim = regime_cache.config().feature_dim;
 
                 if regime_cache.has_onnx_model() {
-                    let phi = base_features.flattened();
+                    let phi = base_features.flattened_for_regime_model();
                     if let Some(posterior) = regime_cache.predict_onnx(&phi) {
                         regime_cache.update(posterior, tick_ns);
                         if phi.len() == feature_dim {

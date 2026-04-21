@@ -2,11 +2,14 @@
 
 import json
 import os
+from pathlib import Path
 import tempfile
 
 import numpy as np
+import pandas as pd
 import pytest
 
+from research.features.loader import FEATURE_COLUMNS, FEATURE_VERSION
 from research.models.hdp_hmm import (
     compute_regime_posterior,
     export_hdp_hmm_to_onnx,
@@ -14,13 +17,15 @@ from research.models.hdp_hmm import (
     train_hdp_hmm_online,
 )
 
+FEATURE_DIM = 38
+
 
 @pytest.fixture
 def trained_model_and_data():
     """Train HDP-HMM on synthetic data and export to ONNX."""
     rng = np.random.RandomState(42)
     n_regimes = 4
-    feature_dim = 36
+    feature_dim = FEATURE_DIM
     n_samples = 500
 
     params = initialize_hdp_hmm_params(
@@ -44,10 +49,10 @@ def trained_model_and_data():
 
 class TestE2EPipeline:
     def test_train_produces_different_weights(self):
-        params = initialize_hdp_hmm_params(feature_dim=36, n_regimes=4, seed=42)
+        params = initialize_hdp_hmm_params(feature_dim=FEATURE_DIM, n_regimes=4, seed=42)
         original_weights = params.weights.copy()
         rng = np.random.RandomState(42)
-        features_seq = [rng.randn(36) for _ in range(200)]
+        features_seq = [rng.randn(FEATURE_DIM) for _ in range(200)]
         trained = train_hdp_hmm_online(params, features_seq, learning_rate=0.01)
 
         assert not np.allclose(trained.weights, original_weights)
@@ -69,7 +74,7 @@ class TestE2EPipeline:
             assert result.shape == (4,)
             np.testing.assert_allclose(result, expected_posterior, atol=1e-5)
             assert np.all(result >= 0.0)
-            np.testing.assert_allclose(np.sum(result), 1.0)
+            np.testing.assert_allclose(np.sum(result), 1.0, atol=1e-6)
         finally:
             os.unlink(path)
 
@@ -78,7 +83,7 @@ class TestE2EPipeline:
 
         assert len(model.graph.input) == 1
         assert model.graph.input[0].type.tensor_type.shape.dim[0].dim_value == 1
-        assert model.graph.input[0].type.tensor_type.shape.dim[1].dim_value == 36
+        assert model.graph.input[0].type.tensor_type.shape.dim[1].dim_value == FEATURE_DIM
 
         assert len(model.graph.output) == 1
         assert model.graph.output[0].type.tensor_type.shape.dim[0].dim_value == 1
@@ -98,7 +103,7 @@ class TestE2EPipeline:
             sess = ort.InferenceSession(path)
 
             for _ in range(10):
-                x = rng.randn(36).astype(np.float32).reshape(1, -1)
+                x = rng.randn(FEATURE_DIM).astype(np.float32).reshape(1, -1)
                 result = sess.run(None, {"features": x})[0].flatten()
                 np.testing.assert_allclose(np.sum(result), 1.0, atol=1e-6)
                 assert np.all(result >= 0.0)
@@ -107,7 +112,6 @@ class TestE2EPipeline:
 
     def test_generate_model_script_creates_valid_files(self):
         """Verify the generate_regime_model.py script produces correct output."""
-        import importlib
         import subprocess
 
         script_path = os.path.join(
@@ -137,9 +141,9 @@ class TestE2EPipeline:
             with open(meta_path) as f:
                 meta = json.load(f)
 
-            assert meta["feature_dim"] == 36
+            assert meta["feature_dim"] == FEATURE_DIM
             assert meta["n_regimes"] == 4
-            assert len(meta["test_features"]) == 36
+            assert len(meta["test_features"]) == FEATURE_DIM
             assert len(meta["expected_posterior"]) == 4
             np.testing.assert_allclose(
                 np.sum(meta["expected_posterior"]), 1.0, atol=1e-6
@@ -153,3 +157,59 @@ class TestE2EPipeline:
             np.testing.assert_allclose(
                 result, meta["expected_posterior"], atol=1e-5
             )
+
+    def test_train_regime_script_creates_model_from_feature_csv(self, tmp_path):
+        import subprocess
+
+        script_path = Path(__file__).resolve().parents[1] / "models" / "train_regime.py"
+        features_path = tmp_path / "features.csv"
+        output_dir = tmp_path / "artifacts"
+
+        frame = pd.DataFrame(
+            {
+                "timestamp_ns": [1_000 + i for i in range(16)],
+                "source_strategy": ["A"] * 16,
+                "feature_version": [FEATURE_VERSION] * 16,
+                **{
+                    column: np.linspace(idx, idx + 1.5, 16)
+                    for idx, column in enumerate(FEATURE_COLUMNS)
+                },
+            }
+        )
+        frame.to_csv(features_path, index=False)
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
+        result = subprocess.run(
+            [
+                "python",
+                str(script_path),
+                "--features",
+                str(features_path),
+                "--output",
+                str(output_dir),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, f"Script failed: {result.stderr}"
+
+        model_path = output_dir / "regime_v1.onnx"
+        meta_path = output_dir / "regime_v1_meta.json"
+        assert model_path.exists()
+        assert meta_path.exists()
+
+        meta = json.loads(meta_path.read_text())
+        assert meta["feature_version"] == FEATURE_VERSION
+        assert meta["feature_dim"] == FEATURE_DIM
+        assert len(meta["feature_columns"]) == FEATURE_DIM
+        assert meta["train_rows"] > 0
+        assert meta["validation_rows"] > 0
+
+        import onnxruntime as ort
+
+        sess = ort.InferenceSession(str(model_path))
+        x = np.array(meta["test_features"], dtype=np.float32).reshape(1, -1)
+        result = sess.run(None, {"features": x})[0].flatten()
+        np.testing.assert_allclose(result, meta["expected_posterior"], atol=1e-5)

@@ -38,6 +38,10 @@ pub struct BacktestCmd {
     /// Comma-separated list of strategies to enable (e.g., "A,B,C").
     #[arg(short, long)]
     pub strategies: Option<String>,
+
+    /// Optional CSV path to stream regime-input features during backtest.
+    #[arg(long)]
+    pub dump_features: Option<PathBuf>,
 }
 
 /// Forward-test subcommand arguments.
@@ -119,6 +123,7 @@ mod tests {
                 assert_eq!(cmd.data, PathBuf::from("ticks.csv"));
                 assert!(cmd.config.is_none());
                 assert!(cmd.strategies.is_none());
+                assert!(cmd.dump_features.is_none());
             }
             _ => panic!("expected Backtest command"),
         }
@@ -137,6 +142,8 @@ mod tests {
             "/tmp/results",
             "--strategies",
             "A,B",
+            "--dump-features",
+            "/tmp/features.csv",
         ]);
         assert!(cli.is_ok());
         let cli = cli.unwrap();
@@ -146,6 +153,7 @@ mod tests {
                 assert_eq!(cmd.config, Some(PathBuf::from("config.toml")));
                 assert_eq!(cmd.output, Some(PathBuf::from("/tmp/results")));
                 assert_eq!(cmd.strategies.as_deref(), Some("A,B"));
+                assert_eq!(cmd.dump_features, Some(PathBuf::from("/tmp/features.csv")));
             }
             _ => panic!("expected Backtest command"),
         }

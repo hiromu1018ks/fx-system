@@ -4,8 +4,13 @@ Online regime inference engine that estimates posterior regime probabilities
 from market feature vectors. Designed for ONNX export to Rust-side inference.
 """
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    import onnx
 
 
 class HdpHmmParams:
@@ -124,7 +129,6 @@ def compute_drift(
     Returns:
         Shape (n_regimes, feature_dim) updated per-regime drift vectors.
     """
-    p = np.asarray(posterior, dtype=np.float64).ravel()
     d = np.asarray(prev_drift, dtype=np.float64)
     x = np.asarray(features, dtype=np.float64).ravel()
 
@@ -224,6 +228,8 @@ def train_hdp_hmm_online(
 
 def export_hdp_hmm_to_onnx(
     params: HdpHmmParams,
+    feature_means: NDArray[np.float64] | None = None,
+    feature_scales: NDArray[np.float64] | None = None,
     opset_version: int = 17,
 ) -> "onnx.ModelProto":
     """Export HDP-HMM inference to ONNX for Rust-side deployment.
@@ -236,6 +242,8 @@ def export_hdp_hmm_to_onnx(
 
     Args:
         params: Trained HDP-HMM parameters.
+        feature_means: Optional per-feature means for in-graph standardization.
+        feature_scales: Optional per-feature scales for in-graph standardization.
         opset_version: ONNX opset version.
 
     Returns:
@@ -253,6 +261,46 @@ def export_hdp_hmm_to_onnx(
 
     nodes = []
     initializers = []
+    source_name = "features"
+
+    if (feature_means is None) != (feature_scales is None):
+        raise ValueError("feature_means and feature_scales must be provided together")
+    if feature_means is not None and feature_scales is not None:
+        means = np.asarray(feature_means, dtype=np.float32).ravel()
+        scales = np.asarray(feature_scales, dtype=np.float32).ravel()
+        if len(means) != params.feature_dim or len(scales) != params.feature_dim:
+            raise ValueError("standardization stats must match feature_dim")
+        if np.any(scales <= 0.0):
+            raise ValueError("feature_scales must be strictly positive")
+
+        mean_init = helper.make_tensor(
+            "feature_means",
+            TensorProto.FLOAT,
+            [params.feature_dim],
+            means.tolist(),
+        )
+        scale_init = helper.make_tensor(
+            "feature_scales",
+            TensorProto.FLOAT,
+            [params.feature_dim],
+            scales.tolist(),
+        )
+        initializers.extend([mean_init, scale_init])
+
+        sub_node = helper.make_node(
+            "Sub",
+            ["features", "feature_means"],
+            ["centered_features"],
+            name="feature_center",
+        )
+        div_node = helper.make_node(
+            "Div",
+            ["centered_features", "feature_scales"],
+            ["normalized_features"],
+            name="feature_scale",
+        )
+        nodes.extend([sub_node, div_node])
+        source_name = "normalized_features"
 
     w_init = helper.make_tensor(
         "regime_weights",
@@ -271,7 +319,7 @@ def export_hdp_hmm_to_onnx(
     initializers.append(b_init)
 
     matmul_node = helper.make_node(
-        "MatMul", ["features", "regime_weights"], ["scores"], name="regime_matmul"
+        "MatMul", [source_name, "regime_weights"], ["scores"], name="regime_matmul"
     )
     nodes.append(matmul_node)
 

@@ -121,9 +121,71 @@ cargo run -p fx-cli -- \
 
 - `--config <toml>`: `crates/cli/src/config.rs` が読む BacktestConfig 上書き
 - `--strategies A,B` : 有効戦略を限定
+- `--dump-features <csv>`: regime v1 学習用の 38 次元特徴量を CSV にストリーミング出力
 - 出力物: `artifacts/backtest/backtest_result.json`, `artifacts/backtest/trades.csv`
 
 Validation や将来の比較に使うので、`backtest_result.json` は run ごとに保存場所を分けて保管すること。
+
+regime v1 用の特徴量ダンプも同じ backtest 経路で取得できる。
+
+```bash
+cargo run -p fx-cli -- \
+  backtest \
+  --data data/usd_jpy_ticks.csv \
+  --output artifacts/backtest \
+  --dump-features artifacts/regime/features.csv
+```
+
+ダンプ CSV は `timestamp_ns, source_strategy, feature_version` に続いて、`feature_vector_v1_38` の 38 列を固定順で出力する。
+
+### 2.5. regime v1 ONNX の再学習と反映
+
+実データで regime v1 を更新する最短手順は次の 3 ステップ。
+
+1. backtest で特徴量をダンプする
+2. Python で ONNX と metadata JSON を再生成する
+3. `[regime] model_path` を指定した backtest/forward config で読み込む
+
+```bash
+python -m research.models.train_regime \
+  --features artifacts/regime/features.csv \
+  --output research/models/onnx
+```
+
+生成物:
+
+- `research/models/onnx/regime_v1.onnx`
+- `research/models/onnx/regime_v1_meta.json`
+
+`regime_v1_meta.json` には `feature_version`, `feature_dim`, `n_regimes`, `feature_columns`, `standardization_means`, `standardization_scales`, `test_features`, `expected_posterior` が保存される。`research.models.generate_regime_model` は synthetic fixture 用の薄いラッパーとして残してあり、実データ学習の主経路は `train_regime.py`。
+
+backtest 側で ONNX を使う設定例:
+
+```toml
+[regime]
+feature_dim = 38
+model_path = "research/models/onnx/regime_v1.onnx"
+```
+
+```bash
+export ORT_DYLIB_PATH="$(
+  python - <<'PY'
+import pathlib
+import onnxruntime
+root = pathlib.Path(onnxruntime.__file__).resolve().parent
+matches = list(root.rglob("libonnxruntime.so*"))
+if not matches:
+    raise SystemExit("libonnxruntime.so not found")
+print(matches[0])
+PY
+)"
+
+cargo run -p fx-cli -- \
+  backtest \
+  --data data/usd_jpy_ticks.csv \
+  --config config/backtest-regime.toml \
+  --output artifacts/backtest-regime
+```
 
 ### 3. フォワードテスト実行（recorded）
 
@@ -266,6 +328,8 @@ PY
 ```
 
 `model_path` が未設定、または ONNX モデル/共有ライブラリを読めない場合、現在の runtime はヒューリスティック regime 推定にフォールバックする。
+
+backtest 用設定は `[regime]`、forward 用設定は `[regime_config]` を使う。どちらも `model_path` に同じ `research/models/onnx/regime_v1.onnx` を指定できる。
 
 #### Webhook / レポート保存先（ユーザー作業）
 
@@ -531,7 +595,8 @@ P_max^global = Σ P_max^i / max(correlation_factor, FLOOR_CORRELATION)
 | `n_regimes` | 4 | レジーム数（calm, normal, turbulent, crisis） |
 | `unknown_regime_entropy_threshold` | 1.8 | 不明レジームのエントロピー閾値 |
 | `regime_ar_coeff` | 0.9 | レジームの自己回帰係数 |
-| `feature_dim` | 36 | 特徴量次元数 |
+| `feature_dim` | 38 | 特徴量次元数 |
+| `model_path` | `None` | 指定時は ONNX regime 推定を使用。未指定/読込失敗時はヒューリスティックにフォールバック |
 
 ### シミュレーションループの仕組み
 

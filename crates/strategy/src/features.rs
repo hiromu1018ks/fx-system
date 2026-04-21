@@ -49,6 +49,48 @@ pub struct FeatureVector {
 
 impl FeatureVector {
     pub const DIM: usize = 38;
+    pub const SCHEMA_VERSION: &str = "feature_vector_v1_38";
+    pub const TIME_SINCE_LAST_SPIKE_CAP_MS: f64 = 86_400_000.0;
+    pub const HEADER_NAMES: [&str; Self::DIM] = [
+        "spread",
+        "spread_zscore",
+        "obi",
+        "delta_obi",
+        "depth_change_rate",
+        "queue_position",
+        "realized_volatility",
+        "volatility_ratio",
+        "volatility_decay_rate",
+        "session_tokyo",
+        "session_london",
+        "session_ny",
+        "session_sydney",
+        "time_since_open_ms",
+        "time_since_last_spike_ms",
+        "holding_time_ms",
+        "position_size",
+        "position_direction",
+        "entry_price",
+        "pnl_unrealized",
+        "trade_intensity",
+        "signed_volume",
+        "recent_fill_rate",
+        "recent_slippage",
+        "recent_reject_rate",
+        "execution_drift_trend",
+        "self_impact",
+        "time_decay",
+        "dynamic_cost",
+        "p_revert",
+        "p_continue",
+        "p_trend",
+        "spread_z_x_vol",
+        "obi_x_session",
+        "depth_drop_x_vol_spike",
+        "position_size_x_vol",
+        "obi_x_vol",
+        "spread_z_x_self_impact",
+    ];
 
     pub fn flattened(&self) -> Vec<f64> {
         vec![
@@ -91,6 +133,43 @@ impl FeatureVector {
             self.obi_x_vol,
             self.spread_z_x_self_impact,
         ]
+    }
+
+    pub fn header_names() -> [&'static str; Self::DIM] {
+        Self::HEADER_NAMES
+    }
+
+    /// Regime-model input must be finite because Rust feeds these values directly
+    /// into ONNX float32 inference. Keep the ordering identical to `flattened()`
+    /// and apply only contract-level sanitization here.
+    pub fn flattened_for_regime_model(&self) -> Vec<f64> {
+        let mut values = self.flattened();
+        for (idx, value) in values.iter_mut().enumerate() {
+            *value = match idx {
+                13 | 15 => {
+                    if value.is_finite() && *value >= 0.0 {
+                        *value
+                    } else {
+                        0.0
+                    }
+                }
+                14 => {
+                    if value.is_finite() {
+                        value.clamp(0.0, Self::TIME_SINCE_LAST_SPIKE_CAP_MS)
+                    } else {
+                        Self::TIME_SINCE_LAST_SPIKE_CAP_MS
+                    }
+                }
+                _ => {
+                    if value.is_finite() {
+                        *value
+                    } else {
+                        0.0
+                    }
+                }
+            };
+        }
+        values
     }
 
     pub fn from_flattened(values: &[f64]) -> Option<Self> {
@@ -230,5 +309,44 @@ mod tests {
     #[test]
     fn test_dim_constant() {
         assert_eq!(FeatureVector::DIM, FeatureVector::zero().flattened().len());
+    }
+
+    #[test]
+    fn test_header_names_match_dimension_and_layout() {
+        let headers = FeatureVector::header_names();
+        assert_eq!(headers.len(), FeatureVector::DIM);
+        assert_eq!(headers[0], "spread");
+        assert_eq!(headers[14], "time_since_last_spike_ms");
+        assert_eq!(headers[37], "spread_z_x_self_impact");
+    }
+
+    #[test]
+    fn test_regime_model_input_sanitizes_non_finite_values() {
+        let mut fv = FeatureVector::zero();
+        fv.spread = f64::NAN;
+        fv.time_since_open_ms = -1.0;
+        fv.time_since_last_spike_ms = f64::INFINITY;
+        fv.holding_time_ms = -5.0;
+        fv.entry_price = f64::NEG_INFINITY;
+
+        let flat = fv.flattened_for_regime_model();
+        assert_eq!(flat[0], 0.0);
+        assert_eq!(flat[13], 0.0);
+        assert_eq!(flat[14], FeatureVector::TIME_SINCE_LAST_SPIKE_CAP_MS);
+        assert_eq!(flat[15], 0.0);
+        assert_eq!(flat[18], 0.0);
+    }
+
+    #[test]
+    fn test_regime_model_input_preserves_finite_values() {
+        let mut fv = FeatureVector::zero();
+        fv.spread = 0.25;
+        fv.time_since_last_spike_ms = 2_500.0;
+        fv.dynamic_cost = 1.5;
+
+        let flat = fv.flattened_for_regime_model();
+        assert_eq!(flat[0], 0.25);
+        assert_eq!(flat[14], 2_500.0);
+        assert_eq!(flat[28], 1.5);
     }
 }

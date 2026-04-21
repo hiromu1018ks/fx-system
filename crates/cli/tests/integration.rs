@@ -102,6 +102,40 @@ fn test_cli_backtest_writes_output_files() {
 }
 
 #[test]
+fn test_backtest_feature_dump_writes_schema_and_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 50);
+
+    let ticks = fx_backtest::data::load_csv(&csv_path).unwrap();
+    let events = fx_backtest::data::ticks_to_events(&ticks);
+
+    let mut engine =
+        fx_backtest::engine::BacktestEngine::new(fx_backtest::engine::BacktestConfig::default());
+    let dump_path = dir.path().join("artifacts").join("features.csv");
+    engine.enable_feature_dump(&dump_path).unwrap();
+    let result = engine.run_from_events(&events);
+
+    assert_eq!(result.total_ticks, 50);
+    assert!(dump_path.exists());
+
+    let mut reader = csv::Reader::from_path(&dump_path).unwrap();
+    let headers = reader.headers().unwrap().clone();
+    assert_eq!(headers.get(0), Some("timestamp_ns"));
+    assert_eq!(headers.get(1), Some("source_strategy"));
+    assert_eq!(headers.get(2), Some("feature_version"));
+    assert_eq!(headers.get(3), Some("spread"));
+    assert_eq!(headers.len(), 3 + fx_strategy::features::FeatureVector::DIM);
+
+    let rows: Vec<_> = reader.records().collect::<Result<_, _>>().unwrap();
+    assert_eq!(rows.len(), 50);
+    assert_eq!(rows[0].get(1), Some("A"));
+    assert_eq!(
+        rows[0].get(2),
+        Some(fx_strategy::features::FeatureVector::SCHEMA_VERSION)
+    );
+}
+
+#[test]
 fn test_cli_backtest_with_toml_config() {
     let dir = tempfile::tempdir().unwrap();
     let csv_path = write_synthetic_csv(dir.path(), "ticks.csv", 200);

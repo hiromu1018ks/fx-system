@@ -14,7 +14,7 @@ use fx_backtest::engine::BacktestConfig;
 /// - `[barrier]`: staleness-based lot reduction
 /// - `[kill_switch]`: tick-interval anomaly detection
 /// - `[lifecycle]`: strategy culling thresholds
-/// - `[regime]`: HDP-HMM lightweight online parameters
+/// - `[regime]`: regime parameters, including optional ONNX `model_path`
 /// - `[feature_extractor]`: feature pipeline windows
 /// - `[global_position]`: cross-strategy position constraints
 ///
@@ -189,6 +189,9 @@ pub fn load_backtest_config(path: &Path) -> Result<BacktestConfig> {
             config.regime_config.regime_ar_coeff = v
         });
         usize_field(rg, "feature_dim", |v| config.regime_config.feature_dim = v);
+        if let Some(v) = rg.get("model_path").and_then(|v| v.as_str()) {
+            config.regime_config.model_path = Some(v.to_string());
+        }
     }
 
     // Feature extractor
@@ -504,6 +507,8 @@ rolling_window = 100
 
 [regime]
 unknown_regime_entropy_threshold = 2.0
+feature_dim = 38
+model_path = "research/models/onnx/regime_v1.onnx"
 
 [feature_extractor]
 spread_window = 100
@@ -551,6 +556,11 @@ strategy_max_positions = {{ A = 3.0, B = 4.0, C = 5.0 }}
 
         // Regime
         assert!((config.regime_config.unknown_regime_entropy_threshold - 2.0).abs() < 1e-10);
+        assert_eq!(config.regime_config.feature_dim, 38);
+        assert_eq!(
+            config.regime_config.model_path.as_deref(),
+            Some("research/models/onnx/regime_v1.onnx")
+        );
 
         // Feature extractor
         assert_eq!(config.feature_extractor_config.spread_window, 100);
