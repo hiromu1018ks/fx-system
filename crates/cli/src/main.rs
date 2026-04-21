@@ -105,7 +105,7 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
 
     output::write_backtest_result(&result, &output_dir)?;
     if let Some(path) = &cmd.export_q_state {
-        let snapshot = engine.export_q_state();
+        let mut snapshot = engine.export_q_state();
         snapshot
             .write_to_path(path)
             .with_context(|| format!("Failed to export q-state snapshot to {}", path.display()))?;

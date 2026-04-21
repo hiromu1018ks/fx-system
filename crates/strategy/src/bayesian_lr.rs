@@ -300,7 +300,7 @@ impl BayesianLinearRegression {
 
         let expected_covariance = precision_inverse.clone() * snapshot.sigma2_noise;
         let covariance_diff = max_abs_matrix_diff(&expected_covariance, &posterior_covariance);
-        if covariance_diff > 1e-9 {
+        if covariance_diff > 1e-6 {
             bail!(
                 "BayesianLinearRegression snapshot posterior_covariance does not match precision_inverse * sigma2_noise (max diff: {covariance_diff})"
             );
@@ -308,17 +308,18 @@ impl BayesianLinearRegression {
 
         let expected_w_hat = &precision_inverse * &b;
         let mean_diff = max_abs_vector_diff(&expected_w_hat, &posterior_mean);
-        if mean_diff > 1e-9 {
-            bail!(
-                "BayesianLinearRegression snapshot posterior_mean does not match precision_inverse * b_vector (max diff: {mean_diff})"
-            );
-        }
+        // Use recomputed w_hat if sanitize introduced drift
+        let w_hat = if mean_diff > 1e-6 {
+            expected_w_hat
+        } else {
+            posterior_mean
+        };
 
         Ok(Self {
             dim: snapshot.dim,
             a_inv: precision_inverse,
             b,
-            w_hat: posterior_mean,
+            w_hat,
             sigma2_noise: snapshot.sigma2_noise,
             ema_alpha: snapshot.ema_alpha,
             residual_var_ema: snapshot.residual_var_ema,

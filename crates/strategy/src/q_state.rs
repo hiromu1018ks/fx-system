@@ -10,6 +10,14 @@ use crate::features::FeatureVector;
 
 pub const Q_STATE_SCHEMA_VERSION: u32 = 1;
 
+fn sanitize_f64(v: f64) -> f64 {
+    if v.is_nan() || v.is_infinite() { 0.0 } else { v }
+}
+
+fn sanitize_vec(data: Vec<f64>) -> Vec<f64> {
+    data.into_iter().map(sanitize_f64).collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VectorSnapshot {
     pub len: usize,
@@ -20,7 +28,7 @@ impl VectorSnapshot {
     pub fn from_vec(data: Vec<f64>) -> Self {
         Self {
             len: data.len(),
-            data,
+            data: sanitize_vec(data),
         }
     }
 }
@@ -34,7 +42,7 @@ pub struct MatrixSnapshot {
 
 impl MatrixSnapshot {
     pub fn from_column_major(rows: usize, cols: usize, data: Vec<f64>) -> Self {
-        Self { rows, cols, data }
+        Self { rows, cols, data: sanitize_vec(data) }
     }
 }
 
@@ -52,6 +60,17 @@ pub struct BayesianLinearRegressionSnapshot {
     pub prev_w_norm: f64,
     pub n_observations: usize,
     pub divergence_threshold: f64,
+}
+
+impl BayesianLinearRegressionSnapshot {
+    pub fn sanitize(&mut self) {
+        self.sigma2_noise = sanitize_f64(self.sigma2_noise).max(1e-10);
+        self.ema_alpha = sanitize_f64(self.ema_alpha);
+        self.residual_var_ema = sanitize_f64(self.residual_var_ema).max(1e-10);
+        self.lambda_reg = sanitize_f64(self.lambda_reg).max(1e-10);
+        self.prev_w_norm = sanitize_f64(self.prev_w_norm);
+        self.divergence_threshold = sanitize_f64(self.divergence_threshold);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,13 +110,22 @@ impl StrategySetQStateSnapshot {
         }
     }
 
+    pub fn sanitize(&mut self) {
+        for strategy in &mut self.strategies {
+            for action in &mut strategy.q_function.actions {
+                action.model.sanitize();
+            }
+        }
+    }
+
     pub fn strategy(&self, strategy_id: StrategyId) -> Option<&StrategyQStateSnapshot> {
         self.strategies
             .iter()
             .find(|snapshot| snapshot.strategy_id == strategy_id)
     }
 
-    pub fn write_to_path<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+    pub fn write_to_path<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        self.sanitize();
         let path = path.as_ref();
         if let Some(parent) = path
             .parent()

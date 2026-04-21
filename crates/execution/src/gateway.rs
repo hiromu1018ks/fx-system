@@ -162,7 +162,7 @@ impl ExecutionGateway {
             0.9, // preliminary estimate
             self.slippage_model.expected_slippage(
                 request.direction,
-                request.lots as f64,
+                request.lots as f64 / 100_000.0,
                 vol,
                 &lp_id,
             ),
@@ -179,7 +179,7 @@ impl ExecutionGateway {
         // Recalculate order type with actual fill prob
         let expected_slip = self.slippage_model.expected_slippage(
             request.direction,
-            request.lots as f64,
+            request.lots as f64 / 100_000.0,
             vol,
             &lp_id,
         );
@@ -269,7 +269,7 @@ impl ExecutionGateway {
         if filled {
             let actual_slippage = self.slippage_model.sample_slippage(
                 request.direction,
-                request.lots as f64,
+                request.lots as f64 / 100_000.0,
                 vol,
                 &lp_id,
                 rng,
