@@ -82,7 +82,7 @@ impl Default for StrategyCConfig {
             lambda_reg: 0.01,
             halflife: 500,
             initial_sigma2: 0.01,
-            optimistic_bias: 0.1,
+            optimistic_bias: 0.3,
             non_model_uncertainty_k: 0.1,
             latency_penalty_k: 0.001,
             min_trade_frequency: 0.02,
@@ -534,10 +534,14 @@ impl StrategyC {
         let all_point_q = self.q_function.q_values(&phi);
         let posterior_stds = self.q_function.posterior_stds(&phi);
 
-        // Step 6: Consistency check
+        // Step 6: Consistency check (only after sufficient observations)
         let q_buy_final = sampled_q_final[&QAction::Buy];
         let q_sell_final = sampled_q_final[&QAction::Sell];
-        let consistency_fallback = self.check_action_consistency(q_buy_final, q_sell_final);
+        let min_obs = 20;
+        let has_sufficient_data = self.q_function.model(QAction::Buy).n_observations() >= min_obs
+            && self.q_function.model(QAction::Sell).n_observations() >= min_obs;
+        let consistency_fallback =
+            has_sufficient_data && self.check_action_consistency(q_buy_final, q_sell_final);
 
         // Global position constraints
         let buy_allowed = state.global_position + 1.0 <= state.global_position_limit;

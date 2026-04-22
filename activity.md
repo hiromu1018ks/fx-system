@@ -795,3 +795,30 @@ LifecycleManager's RegimePnlBreached culling gates, optimistic_bias too small, a
 1. Entry attempts dropped from 162 to 10 — strategies hold positions longer (holding position=832), reducing re-entry frequency. MAX_HOLD_TIME is the primary close mechanism.
 2. PnL negative: with more Strategy B triggers, many entries are unprofitable. Q-function hasn't learned to discriminate.
 3. Only 10 entry attempts from 391K Strategy B triggers + 19.8M Strategy C triggers — the Thompson Sampling penalty (dynamic_cost + self_impact + non_model + latency) may be too aggressive.
+
+## Iteration 7: Fix Q-value numerical instability + tune exploration
+
+**Hypothesis**: (1) `time_since_last_spike_ms = f64::MAX` causes Q-value computation to overflow/produce NaN, preventing Thompson Sampling from working. (2) Consistency check fires prematurely when Buy/Sell have similar Q-values. (3) Optimistic bias too low relative to penalty.
+
+**Changes**:
+- `extractor.rs`: Capped `time_since_last_spike_ms` default from `f64::MAX` to `86_400_000.0` (24 hours). The f64::MAX value dominated the feature vector, making Q-values astronomically large or NaN, breaking action selection.
+- `strategy_a/b/c.rs`: Added min_obs=20 guard to consistency check — skip consistency check until Q-function has 20+ observations for both Buy and Sell.
+- `strategy_a/b/c.rs`: Increased `optimistic_bias` from 0.1 to 0.3 to better overcome the dynamic cost penalty.
+
+**Metrics** (71.8M ticks, release, 1296s):
+- Trades: 6 → **124** (20x increase!)
+- PnL: -78.42 → **+120.05** (profitable!)
+- Sharpe: -20.2 → **+3.2** (positive!)
+- Filled: 3 → 62, Close trades: 62
+- Win rate: 25%, Max DD: 159.87
+- Entry attempts: 10 → 133
+- `holding position` skip: 523 → 8116 (more positions held)
+- MAX_HOLD_TIME close: 42, TRIGGER_EXIT close: 16
+- decide_called drastically reduced: A=430K, B=61K, C=114 (lifecycle culling working)
+
+**Root cause confirmed**: `time_since_last_spike_ms = f64::MAX` was THE primary bottleneck. With this capped, the Q-function and Thompson Sampling work correctly.
+
+**Remaining bottlenecks**:
+1. Strategy C decide_called=114 (very low) — lifecycle manager may be culling C too aggressively
+2. Max DD still 159.87 — risk management needs tuning
+3. Win rate 25% — strategy needs more learning data

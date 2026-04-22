@@ -509,7 +509,7 @@ impl FeatureExtractor {
             if self.last_vol_spike_ns > 0 && timestamp_ns > self.last_vol_spike_ns {
                 ((timestamp_ns - self.last_vol_spike_ns) / 1_000_000) as f64
             } else {
-                f64::MAX
+                86_400_000.0 // 24 hours default — avoids f64::MAX destabilizing Q-values
             };
 
         let holding_time_ms = position
