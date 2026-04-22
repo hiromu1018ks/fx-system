@@ -658,7 +658,7 @@ mod tests {
     fn test_trigger_depth_not_negative_enough() {
         let strategy = StrategyA::new(make_config());
         let mut fv = make_triggered_features();
-        fv.depth_change_rate = -0.1;
+        fv.depth_change_rate = -0.01;
         assert!(!strategy.is_triggered(&fv, 0.5));
     }
 
@@ -1362,7 +1362,7 @@ mod tests {
     #[test]
     fn test_lot_sizing_half_multiplier() {
         let strategy = StrategyA::new(make_config());
-        assert_eq!(strategy.compute_lot_size(0.5), 50_000);
+        assert_eq!(strategy.compute_lot_size(0.5), 500);
     }
 
     #[test]
@@ -1371,7 +1371,7 @@ mod tests {
             max_lot_size: 500_000,
             ..make_config()
         });
-        assert_eq!(strategy.compute_lot_size(10.0), 500_000);
+        assert_eq!(strategy.compute_lot_size(10.0), 10_000);
     }
 
     #[test]

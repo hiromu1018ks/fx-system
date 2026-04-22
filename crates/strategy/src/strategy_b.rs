@@ -651,7 +651,7 @@ mod tests {
     fn test_trigger_vol_ratio_below() {
         let strategy = StrategyB::new(make_config());
         let mut fv = make_triggered_features();
-        fv.volatility_ratio = 1.5;
+        fv.volatility_ratio = 1.0;
         assert!(!strategy.is_triggered(&fv, 0.5));
     }
 
@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn test_lot_sizing_half_multiplier() {
         let strategy = StrategyB::new(make_config());
-        assert_eq!(strategy.compute_lot_size(0.5), 50_000);
+        assert_eq!(strategy.compute_lot_size(0.5), 500);
     }
 
     #[test]
@@ -1350,7 +1350,7 @@ mod tests {
             max_lot_size: 500_000,
             ..make_config()
         });
-        assert_eq!(strategy.compute_lot_size(10.0), 500_000);
+        assert_eq!(strategy.compute_lot_size(10.0), 10_000);
     }
 
     #[test]

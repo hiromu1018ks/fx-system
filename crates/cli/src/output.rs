@@ -530,6 +530,7 @@ mod tests {
             strategy_events_published: 0,
             state_snapshots_published: 0,
             observability_ticks: 0,
+            trigger_diagnostics: fx_backtest::engine::TriggerDiagnostics::default(),
         }
     }
 
@@ -651,6 +652,7 @@ mod tests {
             strategy_events_published: 0,
             state_snapshots_published: 0,
             observability_ticks: 0,
+            trigger_diagnostics: fx_backtest::engine::TriggerDiagnostics::default(),
         }
     }
 

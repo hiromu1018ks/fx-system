@@ -253,7 +253,7 @@ fn test_backtest_q_state_export_import_roundtrip() {
     let mut trained_engine = fx_backtest::engine::BacktestEngine::new(config.clone());
     let _ = trained_engine.run_from_events(&events[..120]);
 
-    let snapshot = trained_engine.export_q_state();
+    let mut snapshot = trained_engine.export_q_state();
     let snapshot_path = dir.path().join("q_state.json");
     snapshot.write_to_path(&snapshot_path).unwrap();
     assert!(snapshot_path.exists());

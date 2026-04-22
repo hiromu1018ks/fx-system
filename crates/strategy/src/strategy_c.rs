@@ -1264,9 +1264,13 @@ mod tests {
         strategy.start_episode(NOW_NS);
         let state = make_state_with_position(1000.0, NOW_NS);
 
+        let mut features = make_triggered_features();
+        // Ensure OBI does not cause OBI_REVERSAL for long position (obi must be > -0.03)
+        features.obi = 0.1;
+
         let mut rng = thread_rng();
         let decision = strategy.decide(
-            &make_zero_features(),
+            &features,
             &state,
             0.5,
             1.0,
@@ -1460,7 +1464,7 @@ mod tests {
     #[test]
     fn test_lot_sizing_half_multiplier() {
         let strategy = StrategyC::new(make_config());
-        assert_eq!(strategy.compute_lot_size(0.5), 50_000);
+        assert_eq!(strategy.compute_lot_size(0.5), 500);
     }
 
     #[test]
@@ -1469,7 +1473,7 @@ mod tests {
             max_lot_size: 500_000,
             ..make_config()
         });
-        assert_eq!(strategy.compute_lot_size(10.0), 500_000);
+        assert_eq!(strategy.compute_lot_size(10.0), 10_000);
     }
 
     #[test]
@@ -1672,8 +1676,11 @@ mod tests {
         let state = make_state_with_position(1000.0, NOW_NS);
         let mut rng = thread_rng();
 
+        let mut features = make_triggered_features();
+        features.obi = 0.1;
+
         let decision = strategy.decide(
-            &make_zero_features(),
+            &features,
             &state,
             0.5,
             1.0,
@@ -1717,6 +1724,8 @@ mod tests {
         let state = make_state_with_position(-1000.0, NOW_NS);
         let mut features = make_triggered_features();
         features.session_london = 0.0;
+        // Zero OBI to avoid OBI_REVERSAL check (short position with positive OBI triggers reversal)
+        features.obi = 0.0;
         let mut rng = thread_rng();
 
         let decision = strategy.decide(&features, &state, 0.5, 0.0, NOW_NS + 1, &mut rng);

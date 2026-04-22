@@ -1172,7 +1172,7 @@ mod tests {
         let event = make_market_event(0, 110.0, 110.005, 1e6, 1e6, 1);
         ext.process_market_event(&event);
         let fv = ext.extract(&event, &make_state_snapshot(), StrategyId::A, NS_BASE);
-        assert_eq!(fv.time_since_last_spike_ms, f64::MAX, "no spike → MAX");
+        assert_eq!(fv.time_since_last_spike_ms, 86_400_000.0, "no spike → 24h default");
     }
 
     #[test]

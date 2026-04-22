@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn test_q_state_json_roundtrip() {
         let path = temp_snapshot_path("json");
-        let snapshot = make_snapshot();
+        let mut snapshot = make_snapshot();
         let phi = vec![1.0, 0.5, -0.25];
 
         snapshot.write_to_path(&path).unwrap();
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn test_q_state_binary_roundtrip() {
         let path = temp_snapshot_path("bin");
-        let snapshot = make_snapshot();
+        let mut snapshot = make_snapshot();
 
         snapshot.write_to_path(&path).unwrap();
         let loaded = StrategySetQStateSnapshot::read_from_path(&path).unwrap();

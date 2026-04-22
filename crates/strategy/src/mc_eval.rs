@@ -519,6 +519,7 @@ mod tests {
             lambda_dd: 0.5,
             dd_cap: 100.0,
             gamma: 0.99,
+            pnl_scale: 10000.0,
         }
     }
 
@@ -568,7 +569,13 @@ mod tests {
     #[test]
     fn test_episode_buffer_record_basic() {
         let mut buf = EpisodeBuffer::new(StrategyId::A, 0, 0.0);
-        let config = default_reward_config();
+        let config = RewardConfig {
+            lambda_risk: 0.1,
+            lambda_dd: 0.5,
+            dd_cap: 100.0,
+            gamma: 0.99,
+            pnl_scale: 1.0,
+        };
 
         // Step 1: equity goes from 0 to 10
         buf.record(
@@ -601,6 +608,7 @@ mod tests {
             lambda_dd: 0.1,
             dd_cap: 50.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // equity drops from 100 to 80, position=1000, vol_sq=0.01
@@ -632,6 +640,7 @@ mod tests {
             lambda_dd: 1.0,
             dd_cap: 10.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // equity drops from 100 to 50, DD = 50, capped at 10
@@ -657,6 +666,7 @@ mod tests {
             lambda_dd: 0.0,
             dd_cap: 100.0,
             gamma: 0.99,
+            pnl_scale: 10000.0,
         };
 
         buf.record(1, QAction::Buy, phi_ones(5), 10.0, 0.0, 0.0, &config);
@@ -677,6 +687,7 @@ mod tests {
             lambda_dd: 1.0,
             dd_cap: 1000.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // Peak at 10, drop to 5: DD = 5
@@ -785,6 +796,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 1.0,
             },
         });
         let state = make_state_with_equity(StrategyId::A, 10.0, 100_000.0);
@@ -813,6 +825,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -841,6 +854,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.9,
+                pnl_scale: 1.0,
             },
         });
 
@@ -890,6 +904,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -1016,6 +1031,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -1102,6 +1118,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -1153,6 +1170,7 @@ mod tests {
             lambda_dd: 0.0,
             dd_cap: 100.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // Zero position size → position_variance = 0 → no risk penalty
@@ -1168,6 +1186,7 @@ mod tests {
             lambda_dd: 0.0,
             dd_cap: 100.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // Equity goes negative
@@ -1186,6 +1205,7 @@ mod tests {
             lambda_dd: 0.0,
             dd_cap: 100.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // Initial equity is 50, goes to 60 → delta = 10
@@ -1344,6 +1364,7 @@ mod tests {
                 lambda_dd: 0.1,
                 dd_cap: 50.0,
                 gamma: 0.99,
+                pnl_scale: 1.0,
             },
         });
 
@@ -1413,6 +1434,7 @@ mod tests {
                 lambda_dd: 1.0,
                 dd_cap: 200.0,
                 gamma: 0.95,
+                pnl_scale: 10000.0,
             },
         };
         let eval = McEvaluator::new(config);
@@ -1431,6 +1453,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 1.0,
             },
         });
 
@@ -1665,6 +1688,7 @@ mod tests {
             lambda_dd: 0.2,
             dd_cap: 30.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // Equity drops from 100 to 85, position=5000, vol²=0.0004
@@ -1706,6 +1730,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 1.0,
             },
         });
 
@@ -1747,6 +1772,7 @@ mod tests {
             lambda_dd: 1.0,
             dd_cap: 5.0,
             gamma: 0.99,
+            pnl_scale: 1.0,
         };
 
         // Equity drops from 100 to 50 → DD = 50, capped at 5
@@ -1900,6 +1926,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -1934,6 +1961,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 1.0,
             },
         });
 
@@ -2069,6 +2097,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -2107,6 +2136,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 1.0,
             },
         });
 
@@ -2163,6 +2193,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -2184,6 +2215,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.99,
+                pnl_scale: 10000.0,
             },
         });
 
@@ -2207,6 +2239,7 @@ mod tests {
                 lambda_dd: 0.0,
                 dd_cap: 100.0,
                 gamma: 0.9,
+                pnl_scale: 10000.0,
             },
         });
 
