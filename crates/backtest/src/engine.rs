@@ -39,13 +39,14 @@ use fx_strategy::q_state::{
 };
 use fx_strategy::regime::{RegimeCache, RegimeConfig};
 use fx_strategy::strategy_a::{
-    StrategyA, StrategyAConfig, StrategyADecision, STRATEGY_A_FEATURE_DIM,
+    EpisodeState as EpisodeStateA, StrategyA, StrategyAConfig, StrategyADecision,
+    STRATEGY_A_FEATURE_DIM,
 };
 use fx_strategy::strategy_b::{
-    StrategyB, StrategyBConfig, StrategyBDecision, STRATEGY_B_FEATURE_DIM,
+    EpisodeStateB, StrategyB, StrategyBConfig, StrategyBDecision, STRATEGY_B_FEATURE_DIM,
 };
 use fx_strategy::strategy_c::{
-    StrategyC, StrategyCConfig, StrategyCDecision, STRATEGY_C_FEATURE_DIM,
+    EpisodeStateC, StrategyC, StrategyCConfig, StrategyCDecision, STRATEGY_C_FEATURE_DIM,
 };
 use prost::Message as _;
 use rand::prelude::*;
@@ -241,6 +242,21 @@ pub struct BacktestResult {
     pub state_snapshots_published: u64,
     /// Number of times ObservabilityManager::tick() was called (PreFailureMetrics collected).
     pub observability_ticks: u64,
+    /// Per-strategy trigger diagnostics: how many ticks had is_triggered() = true.
+    pub trigger_diagnostics: TriggerDiagnostics,
+}
+
+/// Diagnostic counters for strategy trigger evaluation.
+#[derive(Debug, Clone, Default)]
+pub struct TriggerDiagnostics {
+    /// Total ticks where each strategy was evaluated (decide() called).
+    pub evaluated: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Ticks where is_triggered() returned true (while idle or active).
+    pub triggered: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Ticks where strategy was idle and triggered (eligible for new entry).
+    pub idle_triggered: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Ticks where decide() was actually called (after all skip checks).
+    pub decide_called: std::collections::HashMap<fx_core::types::StrategyId, u64>,
 }
 
 /// Collected position data to avoid borrow conflicts.
@@ -405,6 +421,8 @@ pub struct BacktestEngine {
     feature_dump: Option<FeatureDumpWriter>,
     /// Tracks previous tick's `is_unknown` state to detect regime transitions.
     prev_regime_unknown: bool,
+    /// Last tick timestamp from previous batch (for weekend gap detection across batches).
+    last_tick_ns: u64,
 }
 
 impl BacktestEngine {
@@ -429,6 +447,7 @@ impl BacktestEngine {
             regime_cache: RegimeCache::new(config.regime_config.clone()),
             feature_dump: None,
             prev_regime_unknown: false,
+            last_tick_ns: 0,
             config,
             execution_gateway: ExecutionGateway::new(gateway_config),
             rng: SmallRng::from_seed(rng_seed),
@@ -599,6 +618,25 @@ impl BacktestEngine {
 
         let mut batch: Vec<GenericEvent> = Vec::with_capacity(Self::STREAM_BATCH_SIZE);
         let mut market_sequence_id: u64 = 0;
+        let mut merged_trigger_diag = TriggerDiagnostics::default();
+        for &sid in StrategyId::all() {
+            merged_trigger_diag.evaluated.insert(sid, 0);
+            merged_trigger_diag.triggered.insert(sid, 0);
+            merged_trigger_diag.idle_triggered.insert(sid, 0);
+            merged_trigger_diag.decide_called.insert(sid, 0);
+        }
+        let mut merge_diag = |acc: &mut TriggerDiagnostics, batch: &TriggerDiagnostics| {
+            for &sid in StrategyId::all() {
+                *acc.evaluated.entry(sid).or_insert(0) +=
+                    batch.evaluated.get(&sid).unwrap_or(&0);
+                *acc.triggered.entry(sid).or_insert(0) +=
+                    batch.triggered.get(&sid).unwrap_or(&0);
+                *acc.idle_triggered.entry(sid).or_insert(0) +=
+                    batch.idle_triggered.get(&sid).unwrap_or(&0);
+                *acc.decide_called.entry(sid).or_insert(0) +=
+                    batch.decide_called.get(&sid).unwrap_or(&0);
+            }
+        };
 
         for tick in tick_source {
             market_sequence_id = market_sequence_id.saturating_add(1);
@@ -622,6 +660,7 @@ impl BacktestEngine {
                     .saturating_add(batch_result.strategy_events_published);
                 state_snapshots_published = state_snapshots_published
                     .saturating_add(batch_result.state_snapshots_published);
+                merge_diag(&mut merged_trigger_diag, &batch_result.trigger_diagnostics);
                 first_batch = false;
                 batch.clear();
             }
@@ -639,6 +678,7 @@ impl BacktestEngine {
                 strategy_events_published.saturating_add(batch_result.strategy_events_published);
             state_snapshots_published =
                 state_snapshots_published.saturating_add(batch_result.state_snapshots_published);
+            merge_diag(&mut merged_trigger_diag, &batch_result.trigger_diagnostics);
         }
 
         let wall_time_ms = wall_start.elapsed().as_millis() as u64;
@@ -668,6 +708,7 @@ impl BacktestEngine {
             strategy_events_published,
             state_snapshots_published,
             observability_ticks: 0,
+            trigger_diagnostics: merged_trigger_diag,
         }
     }
 
@@ -707,6 +748,7 @@ impl BacktestEngine {
                     strategy_events_published: 0,
                     state_snapshots_published: 0,
                     observability_ticks: 0,
+                    trigger_diagnostics: TriggerDiagnostics::default(),
                 };
             }
             let mut result = self.run_inner(&market_events, wall_start);
@@ -756,6 +798,7 @@ impl BacktestEngine {
                 strategy_events_published: 0,
                 state_snapshots_published: 0,
                 observability_ticks: 0,
+                trigger_diagnostics: TriggerDiagnostics::default(),
             };
         }
 
@@ -782,6 +825,7 @@ impl BacktestEngine {
                 strategy_events_published: 0,
                 state_snapshots_published: 0,
                 observability_ticks: 0,
+                trigger_diagnostics: TriggerDiagnostics::default(),
             };
         }
 
@@ -801,9 +845,16 @@ impl BacktestEngine {
         let mut state_snapshots_published: u64 = 0;
         let mut total_ticks: u64 = 0;
         let mut total_decision_ticks: u64 = 0;
-        let mut prev_tick_ns: u64 = 0;
+        let mut prev_tick_ns: u64 = self.last_tick_ns;
         let mut runtime_observability = RuntimeObservabilityState::default();
         let mut posterior_snapshots: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut trigger_diag = TriggerDiagnostics::default();
+        for &sid in StrategyId::all() {
+            trigger_diag.evaluated.insert(sid, 0);
+            trigger_diag.triggered.insert(sid, 0);
+            trigger_diag.idle_triggered.insert(sid, 0);
+            trigger_diag.decide_called.insert(sid, 0);
+        }
 
         // Clone to release borrow on self.config before mutating self
         let enabled_strategies: Vec<StrategyId> =
@@ -996,6 +1047,26 @@ impl BacktestEngine {
                 Vec::new();
 
             for &sid in &enabled_strategies {
+                // Diagnostic: count total evaluations per strategy (before any skips)
+                *trigger_diag.evaluated.entry(sid).or_insert(0) += 1;
+                let regime_kl = self.regime_cache.state().kl_divergence();
+                let is_trig = match sid {
+                    StrategyId::A => self.strategy_a.is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
+                    StrategyId::B => self.strategy_b.is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
+                    StrategyId::C => self.strategy_c.is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
+                };
+                if is_trig {
+                    *trigger_diag.triggered.entry(sid).or_insert(0) += 1;
+                }
+                let is_strategy_idle = match sid {
+                    StrategyId::A => self.strategy_a.episode_state() == &EpisodeStateA::Idle,
+                    StrategyId::B => self.strategy_b.episode_state() == &EpisodeStateB::Idle,
+                    StrategyId::C => self.strategy_c.episode_state() == &EpisodeStateC::Idle,
+                };
+                if is_trig && is_strategy_idle {
+                    *trigger_diag.idle_triggered.entry(sid).or_insert(0) += 1;
+                }
+
                 // Skip all strategies when trading is halted due to severe gap
                 if gap_halted {
                     self.emit_trade_skip_event(
@@ -1045,6 +1116,7 @@ impl BacktestEngine {
                     continue;
                 }
                 let ctx = tick_contexts.get(&sid).unwrap();
+                *trigger_diag.decide_called.entry(sid).or_insert(0) += 1;
                 let decision = self.get_strategy_decision(sid, &ctx.features, &snapshot, tick_ns);
                 strategy_q.insert(sid, decision.q_sampled);
                 strategy_decisions.push((sid, ctx.features.clone(), decision));
@@ -1732,6 +1804,7 @@ impl BacktestEngine {
             "Backtest complete"
         );
 
+        self.last_tick_ns = prev_tick_ns;
         BacktestResult {
             config: self.config.clone(),
             trades,
@@ -1745,6 +1818,7 @@ impl BacktestEngine {
             strategy_events_published,
             state_snapshots_published,
             observability_ticks: observability_manager.total_ticks(),
+            trigger_diagnostics: trigger_diag,
         }
     }
 
@@ -3088,7 +3162,7 @@ mod tests {
 
         assert_eq!(a_ns, 30_000_000_000u64, "StrategyA max hold = 30s");
         assert_eq!(b_ns, 300_000_000_000u64, "StrategyB max hold = 5min");
-        assert_eq!(c_ns, 600_000_000_000u64, "StrategyC max hold = 10min");
+        assert_eq!(c_ns, 180_000_000_000u64, "StrategyC max hold = 3min");
     }
 
     #[test]
@@ -3594,6 +3668,7 @@ mod tests {
                     lambda_dd: 0.5,
                     dd_cap: 100.0,
                     gamma: 0.99,
+                    pnl_scale: 10000.0,
                 },
             },
             ..default_config()
@@ -3796,6 +3871,7 @@ mod tests {
                     lambda_dd: 0.0,
                     dd_cap: 100.0,
                     gamma: 0.99,
+                    pnl_scale: 10000.0,
                 },
             },
             ..default_config()
@@ -3807,6 +3883,7 @@ mod tests {
                     lambda_dd: 0.0,
                     dd_cap: 100.0,
                     gamma: 0.99,
+                    pnl_scale: 10000.0,
                 },
             },
             ..default_config()

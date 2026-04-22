@@ -119,6 +119,19 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
         println!("  Top skips: {}", top_skips);
     }
 
+    // Trigger diagnostics
+    let td = &result.trigger_diagnostics;
+    for sid in fx_core::types::StrategyId::all() {
+        let eval = td.evaluated.get(sid).unwrap_or(&0);
+        let trig = td.triggered.get(sid).unwrap_or(&0);
+        let idle = td.idle_triggered.get(sid).unwrap_or(&0);
+        println!(
+            "  {:?}: evaluated={}, triggered={}, idle_triggered={}, decide_called={}",
+            sid, eval, trig, idle,
+            td.decide_called.get(sid).unwrap_or(&0)
+        );
+    }
+
     let output_dir = cmd.output.unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&output_dir).with_context(|| {
         format!(

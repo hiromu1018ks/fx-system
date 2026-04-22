@@ -115,9 +115,9 @@ impl EpisodeBuffer {
         price_volatility_sq: f64,
         config: &RewardConfig,
     ) {
-        let delta_pnl = current_equity - self.prev_equity;
+        let delta_pnl = (current_equity - self.prev_equity) / config.pnl_scale;
         let position_variance = position_size * position_size * price_volatility_sq;
-        let drawdown = (self.equity_peak - current_equity).max(0.0);
+        let drawdown = ((self.equity_peak - current_equity) / config.pnl_scale).max(0.0);
         let dd_capped = drawdown.min(config.dd_cap);
 
         let reward =
@@ -158,7 +158,7 @@ impl EpisodeBuffer {
 
 /// Reward configuration for the strategy-separated reward function.
 ///
-/// r_t^i = ΔPnL_t - λ_risk·σ²_i,t - λ_dd·min(DD_t^i, DD_cap)
+/// r_t^i = ΔPnL_t / pnl_scale - λ_risk·σ²_i,t - λ_dd·min(DD_t^i, DD_cap)
 #[derive(Debug, Clone)]
 pub struct RewardConfig {
     /// Risk penalty weight λ_risk.
@@ -169,6 +169,10 @@ pub struct RewardConfig {
     pub dd_cap: f64,
     /// Discount factor γ for MC returns.
     pub gamma: f64,
+    /// PnL normalization divisor. ΔPnL is divided by this before computing reward.
+    /// Aligns reward scale with Q-function penalty scale (dynamic_cost, self_impact, etc.).
+    /// Default 1.0 = no normalization.
+    pub pnl_scale: f64,
 }
 
 impl Default for RewardConfig {
@@ -178,6 +182,7 @@ impl Default for RewardConfig {
             lambda_dd: 0.5,
             dd_cap: 100.0,
             gamma: 0.99,
+            pnl_scale: 10000.0,
         }
     }
 }

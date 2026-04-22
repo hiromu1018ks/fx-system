@@ -728,3 +728,41 @@
   - フルシステム統合テスト
 - **修正**: fill_sizeの符号付き処理 (正=Buy/追加, 負=Sell/減少), GlobalPositionChecker単位変換ヘルパー, Kill Switchジッター付きtick間隔
 - **検証**: cargo test 40 passed, cargo clippy, cargo fmt --check 全て通過
+
+## 2026-04-22: Trade Frequency Improvement (Iterations 1-5)
+
+### Hypothesis
+LifecycleManager's RegimePnlBreached culling gates, optimistic_bias too small, and reward/penalty scale mismatch cause near-zero trade frequency (4 trades / 71.8M ticks).
+
+### Changes
+1. **LifecycleManager RegimePnlBreached gate** (`crates/risk/src/lifecycle.rs:219-228`): Added `min_episodes_for_eval` guard — regime PnL breach check now requires >= 20 episodes before culling. Prevents strategies from being killed after 1-2 trades.
+2. **Optimistic bias increase** (`crates/strategy/src/strategy_{a,b,c}.rs`): `optimistic_bias: 0.01 → 0.1` — spec §4.1 "初期化値はバックテストでの平均Q値から導出" requires bias large enough to overcome dynamic_cost (~0.12).
+3. **Default lot size reduction** (`crates/strategy/src/strategy_{a,b,c}.rs`): `default_lot_size: 100_000 → 1_000` — aligns PnL scale with Q-function operating range.
+4. **Reward normalization** (`crates/strategy/src/mc_eval.rs`): Added `pnl_scale: 10000.0` to RewardConfig — divides ΔPnL by 10000 before computing reward, aligning MC return scale with Q-value penalty scale.
+5. **Batch boundary tick preservation** (`crates/backtest/src/engine.rs`): Added `last_tick_ns` field to BacktestEngine, passed across batch boundaries to prevent spurious weekend-gap detection.
+
+### Spec Compliance Evidence
+- LifecycleManager change respects "Hard limits first" — culling still fires after min_episodes_for_eval
+- Optimistic bias follows spec §4.1 "楽観的初期化: 初期のThompson Samplingがbuy/sellを選択しやすくする"
+- pnl_scale is a normalization divisor that doesn't change reward function structure (still r_t = ΔPnL/SCALE - risk - DD)
+- OTC execution model untouched — Last-Look, fill probability, slippage all preserved
+- Thompson Sampling: sigma_model still only reflected through posterior sampling
+
+### Metrics
+| Metric | Before | After |
+|--------|--------|-------|
+| Total trades | 4 | 4 |
+| PnL | -1328.49 | +12.39 |
+| Sharpe | -8.87 | +9.62 |
+| Win rate | 25% | 50% |
+| Entry attempts | 151 | 12 |
+| Max DD | 1441.23 | 0.00 |
+| Strategy A triggered | 3,300 | 3,300 |
+| Strategy B triggered | 0 | 0 |
+| Strategy C triggered | 19.8M | 19.8M |
+| Decide called (all) | 71.8M (lifecycle culled after ~100K) | 71.8M (no culling) |
+
+### Remaining Bottleneck
+- **Trade count still 4**: Q-function learns "trading = slight loss after OTC spread cost" after first 4 episodes, then selects Hold for remaining 71.3M ticks. OTC spread (~0.11) creates negative reward on entry tick that outweighs optimistic bias.
+- **Strategy B never triggers**: `vol_ratio > 1.4 && vol_decay < 0.0` too strict for GBP/JPY data
+- **execution_rejected**: OTC fill probability rejects ~67% of entry attempts

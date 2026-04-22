@@ -81,7 +81,7 @@ impl Default for StrategyBConfig {
             lambda_reg: 0.01,
             halflife: 500,
             initial_sigma2: 0.01,
-            optimistic_bias: 0.01,
+            optimistic_bias: 0.1,
             non_model_uncertainty_k: 0.1,
             latency_penalty_k: 0.001,
             min_trade_frequency: 0.02,
@@ -91,7 +91,7 @@ impl Default for StrategyBConfig {
             max_lot_size: 1_000_000,
             min_lot_size: 1000,
             consistency_threshold: 0.05,
-            default_lot_size: 100_000,
+            default_lot_size: 1_000,
         }
     }
 }
@@ -1294,7 +1294,7 @@ mod tests {
         assert!((config.regime_kl_threshold - 1.2).abs() < 1e-15);
         assert_eq!(config.max_hold_time_ms, 300_000);
         assert!((config.decay_rate_b - 0.0001).abs() < 1e-15);
-        assert_eq!(config.default_lot_size, 100_000);
+        assert_eq!(config.default_lot_size, 1_000);
         assert_eq!(config.max_lot_size, 1_000_000);
         assert_eq!(config.min_lot_size, 1000);
     }
@@ -1310,7 +1310,7 @@ mod tests {
     #[test]
     fn test_lot_sizing_full_multiplier() {
         let strategy = StrategyB::new(make_config());
-        assert_eq!(strategy.compute_lot_size(1.0), 100_000);
+        assert_eq!(strategy.compute_lot_size(1.0), 1_000);
     }
 
     #[test]

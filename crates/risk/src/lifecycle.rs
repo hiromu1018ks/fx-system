@@ -216,8 +216,8 @@ impl LifecycleManager {
             }
         }
 
-        // Check regime PnL breach
-        if lifecycle.alive {
+        // Check regime PnL breach (only after sufficient episodes)
+        if lifecycle.alive && lifecycle.total_episodes >= self.config.min_episodes_for_eval {
             let regime_limit = compute_regime_pnl_limit(state);
             if let Some(limit) = regime_limit {
                 if lifecycle.regime_pnl < limit {
