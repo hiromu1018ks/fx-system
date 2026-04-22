@@ -399,6 +399,26 @@ impl StrategyB {
             };
         }
 
+        // Step 3.5: Active episode with no close signal → hold position
+        // Prevents engine from rejecting directional actions as already_in_position.
+        // Close only via MAX_HOLD_TIME (step 1) or external risk/execution.
+        if !is_idle {
+            self.record_trade(false);
+            return StrategyBDecision {
+                action: Action::Hold,
+                q_point: 0.0,
+                q_sampled: 0.0,
+                posterior_std: 0.0,
+                triggered: false,
+                episode_active: true,
+                should_close: false,
+                skip_reason: Some("holding position".to_string()),
+                remaining_hold_time_ms: self.remaining_hold_time_ms(now_ns),
+                hold_degeneration_detected: false,
+                consistency_fallback: false,
+            };
+        }
+
         // Step 4: Extract extended features
         let phi = self.extract_features(base_features);
 
@@ -1131,7 +1151,8 @@ mod tests {
             &mut rng,
         );
         assert!(decision.episode_active);
-        assert!(decision.skip_reason.is_none());
+        assert_eq!(decision.skip_reason.as_deref(), Some("holding position"));
+        assert!(matches!(decision.action, Action::Hold));
     }
 
     #[test]

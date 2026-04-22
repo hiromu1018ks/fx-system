@@ -374,6 +374,8 @@ impl FeatureExtractor {
         self.last_depth_total = total_depth;
 
         // Update volatility state
+        let current_realized_vol = self.vol_state.realized_volatility(self.config.vol_window);
+        self.vol_state.prev_realized_vol = current_realized_vol;
         self.vol_state.push_mid(mid);
 
         // Detect volatility spike

@@ -766,3 +766,32 @@ LifecycleManager's RegimePnlBreached culling gates, optimistic_bias too small, a
 - **Trade count still 4**: Q-function learns "trading = slight loss after OTC spread cost" after first 4 episodes, then selects Hold for remaining 71.3M ticks. OTC spread (~0.11) creates negative reward on entry tick that outweighs optimistic bias.
 - **Strategy B never triggers**: `vol_ratio > 1.4 && vol_decay < 0.0` too strict for GBP/JPY data
 - **execution_rejected**: OTC fill probability rejects ~67% of entry attempts
+
+## Iteration 6: Eliminate already_in_position + Fix prev_realized_vol
+
+**Hypothesis**: (1) `already_in_position=151` is caused by strategies returning directional actions during active episodes, which the engine rejects. (2) `volatility_decay_rate` is always 0.0 because `prev_realized_vol` is never updated, preventing Strategy B from ever triggering.
+
+**Changes**:
+- `strategy_a.rs`, `strategy_b.rs`, `strategy_c.rs`: Added Step 3.5 — when in an active episode and no close signal fires, return Hold immediately instead of running Thompson Sampling. This prevents the engine from rejecting directional actions as `already_in_position`.
+- `extractor.rs`: Fixed `prev_realized_vol` — was initialized to 0.0 and never updated. Added `current_realized_vol` computation in `process_market_event()` before `push_mid()`, storing it as `prev_realized_vol`. This enables `volatility_decay_rate` to reflect actual vol changes.
+- Updated `test_decide_active_episode_bypasses_trigger` in all three strategy test files.
+
+**Spec compliance**:
+- Close mechanisms unchanged: MAX_HOLD_TIME, OBI_REVERSAL, TRIGGER_EXIT still work via `should_close=true`.
+- No risk mechanisms disabled. Hard limits still checked before Q-values.
+- sigma_model only through posterior sampling (unchanged).
+- Strategy-separated rewards (unchanged).
+
+**Metrics** (71.8M ticks, release build, 1319s wall time):
+- Trades: 4 → 6 (+50%)
+- `already_in_position`: 151 → 0 (eliminated!)
+- Strategy B triggered: 0 → 391,468 (fixed!)
+- Entry attempts: 162 → 10, Filled: 2 → 3
+- PnL: +4,181.35 → -85.00, Sharpe: -19.805
+- `holding position` skip: 832 (new, expected — strategies hold during active episodes)
+- MAX_HOLD_TIME close: 5, TRIGGER_EXIT close: 1
+
+**Remaining bottlenecks**:
+1. Entry attempts dropped from 162 to 10 — strategies hold positions longer (holding position=832), reducing re-entry frequency. MAX_HOLD_TIME is the primary close mechanism.
+2. PnL negative: with more Strategy B triggers, many entries are unprofitable. Q-function hasn't learned to discriminate.
+3. Only 10 entry attempts from 391K Strategy B triggers + 19.8M Strategy C triggers — the Thompson Sampling penalty (dynamic_cost + self_impact + non_model + latency) may be too aggressive.
