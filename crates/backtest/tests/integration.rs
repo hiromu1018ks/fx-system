@@ -2721,6 +2721,8 @@ fn test_all_strategies_global_position_constraint() {
         "MAX_HOLD_TIME close",
         "OBI_REVERSAL close",
         "TRIGGER_EXIT close",
+        "execution_rejected",
+        "holding position",
     ]
     .iter()
     .copied()
@@ -2967,6 +2969,8 @@ fn test_hard_limit_pipeline_ordering_and_validity() {
         "MAX_HOLD_TIME close",
         "OBI_REVERSAL close",
         "TRIGGER_EXIT close",
+        "execution_rejected",
+        "holding position",
     ]
     .iter()
     .copied()

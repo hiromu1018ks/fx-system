@@ -934,6 +934,14 @@ impl BacktestEngine {
                     &self.config.risk_limits_config,
                 );
                 projector.update_limit_state(limit_state);
+
+                // Revive all culled strategies at the start of a new trading week
+                for sid in fx_core::types::StrategyId::all() {
+                    if !self.lifecycle_manager.is_alive(*sid) {
+                        self.lifecycle_manager.revive(*sid);
+                    }
+                }
+
                 self.maybe_emit_snapshot_event(
                     &mut runtime_sequencer,
                     &projector,

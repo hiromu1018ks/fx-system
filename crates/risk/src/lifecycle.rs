@@ -41,10 +41,10 @@ impl Default for LifecycleConfig {
     fn default() -> Self {
         Self {
             rolling_window: 50,
-            min_episodes_for_eval: 20,
-            death_sharpe_threshold: -0.5,
-            consecutive_death_windows: 3,
-            sharpe_annualization_factor: 252.0,
+            min_episodes_for_eval: 100,
+            death_sharpe_threshold: -1.0,
+            consecutive_death_windows: 5,
+            sharpe_annualization_factor: 1.0,
             strict_unknown_regime: true,
             unknown_regime_sharpe_multiplier: 1.5,
             auto_close_culled_positions: true,
@@ -520,9 +520,9 @@ mod tests {
     fn test_default_config() {
         let config = LifecycleConfig::default();
         assert_eq!(config.rolling_window, 50);
-        assert_eq!(config.min_episodes_for_eval, 20);
-        assert!((config.death_sharpe_threshold - (-0.5)).abs() < 1e-10);
-        assert_eq!(config.consecutive_death_windows, 3);
+        assert_eq!(config.min_episodes_for_eval, 100);
+        assert!((config.death_sharpe_threshold - (-1.0)).abs() < 1e-10);
+        assert_eq!(config.consecutive_death_windows, 5);
     }
 
     // --- Rolling Sharpe computation ---
