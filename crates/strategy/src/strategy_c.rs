@@ -36,7 +36,7 @@ pub struct StrategyCConfig {
     pub max_session_open_ms: f64,
     /// Trigger: regime KL divergence must be below this (known regime).
     pub regime_kl_threshold: f64,
-    /// Maximum holding time in milliseconds (10 minutes default).
+    /// Maximum holding time in milliseconds.
     pub max_hold_time_ms: u64,
     /// Strategy C specific decay rate λ_C (tens-of-minutes scale, slowest).
     pub decay_rate_c: f64,
@@ -74,10 +74,10 @@ impl Default for StrategyCConfig {
     fn default() -> Self {
         Self {
             session_active_threshold: 0.5,
-            obi_significance_threshold: 0.05,
-            max_session_open_ms: 3_600_000.0, // 1 hour session maturity window
-            regime_kl_threshold: 1.0,
-            max_hold_time_ms: 600_000, // 10 minutes
+            obi_significance_threshold: 0.03,
+            max_session_open_ms: 7_200_000.0, // 2 hour session maturity window
+            regime_kl_threshold: 1.2,
+            max_hold_time_ms: 180_000, // 3 minutes
             decay_rate_c: 0.00005,     // very slow decay (tens-of-minutes scale)
             lambda_reg: 0.01,
             halflife: 500,
@@ -259,6 +259,49 @@ impl StrategyC {
         }
     }
 
+    fn position_size(&self, state: &StateSnapshot) -> f64 {
+        state
+            .positions
+            .get(&StrategyId::C)
+            .map(|p| p.size)
+            .unwrap_or(0.0)
+    }
+
+    fn close_action_for_position(&self, state: &StateSnapshot) -> Action {
+        let pos_size = self.position_size(state);
+        if pos_size > f64::EPSILON {
+            Action::Sell(pos_size.abs() as u64)
+        } else if pos_size < -f64::EPSILON {
+            Action::Buy(pos_size.abs() as u64)
+        } else {
+            Action::Hold
+        }
+    }
+
+    fn signal_exit_reason(
+        &self,
+        base_features: &FeatureVector,
+        state: &StateSnapshot,
+        regime_kl: f64,
+    ) -> Option<&'static str> {
+        let pos_size = self.position_size(state);
+        if pos_size.abs() <= f64::EPSILON {
+            return None;
+        }
+
+        if pos_size > 0.0 && base_features.obi < -self.config.obi_significance_threshold {
+            return Some("OBI_REVERSAL close");
+        }
+        if pos_size < 0.0 && base_features.obi > self.config.obi_significance_threshold {
+            return Some("OBI_REVERSAL close");
+        }
+        if !self.is_triggered(base_features, regime_kl) {
+            return Some("TRIGGER_EXIT close");
+        }
+
+        None
+    }
+
     pub fn episode_state(&self) -> &EpisodeStateC {
         &self.episode
     }
@@ -397,6 +440,26 @@ impl StrategyC {
         // Step 2: Sync episode with position
         if self.episode != EpisodeStateC::Idle && !self.has_position(state) {
             self.end_episode();
+        }
+
+        if self.episode != EpisodeStateC::Idle {
+            if let Some(reason) = self.signal_exit_reason(base_features, state, regime_kl) {
+                let close_action = self.close_action_for_position(state);
+                self.end_episode();
+                return StrategyCDecision {
+                    action: close_action,
+                    q_point: 0.0,
+                    q_sampled: 0.0,
+                    posterior_std: 0.0,
+                    triggered: false,
+                    episode_active: false,
+                    should_close: true,
+                    skip_reason: Some(reason.to_string()),
+                    remaining_hold_time_ms: 0,
+                    hold_degeneration_detected: false,
+                    consistency_fallback: false,
+                };
+            }
         }
 
         // Step 3: Trigger check (only when idle)
@@ -724,7 +787,7 @@ mod tests {
     fn test_trigger_time_since_open_at_boundary() {
         let strategy = StrategyC::new(make_config());
         let mut fv = make_triggered_features();
-        fv.time_since_open_ms = 3_600_000.0; // at boundary, not strictly <
+        fv.time_since_open_ms = 7_200_000.0; // at boundary, not strictly <
         assert!(!strategy.is_triggered(&fv, 0.5));
     }
 
@@ -1345,10 +1408,10 @@ mod tests {
     fn test_config_defaults() {
         let config = StrategyCConfig::default();
         assert!((config.session_active_threshold - 0.5).abs() < 1e-15);
-        assert!((config.obi_significance_threshold - 0.05).abs() < 1e-15);
-        assert!((config.max_session_open_ms - 3_600_000.0).abs() < 1e-15);
-        assert!((config.regime_kl_threshold - 1.0).abs() < 1e-15);
-        assert_eq!(config.max_hold_time_ms, 600_000);
+        assert!((config.obi_significance_threshold - 0.03).abs() < 1e-15);
+        assert!((config.max_session_open_ms - 7_200_000.0).abs() < 1e-15);
+        assert!((config.regime_kl_threshold - 1.2).abs() < 1e-15);
+        assert_eq!(config.max_hold_time_ms, 180_000);
         assert!((config.decay_rate_c - 0.00005).abs() < 1e-15);
         assert_eq!(config.default_lot_size, 100_000);
         assert_eq!(config.max_lot_size, 1_000_000);
@@ -1603,6 +1666,40 @@ mod tests {
 
         let decision = strategy.decide(&make_zero_features(), &state, 0.5, 1.0, NOW_NS, &mut rng);
         assert_eq!(decision.remaining_hold_time_ms, 0);
+    }
+
+    #[test]
+    fn test_decision_closes_on_obi_reversal_when_active() {
+        let mut strategy = StrategyC::new(make_config());
+        strategy.start_episode(NOW_NS);
+        let state = make_state_with_position(1000.0, NOW_NS);
+        let mut features = make_triggered_features();
+        features.obi = -0.3;
+        let mut rng = thread_rng();
+
+        let decision = strategy.decide(&features, &state, 0.5, 0.0, NOW_NS + 1, &mut rng);
+
+        assert!(decision.should_close);
+        assert_eq!(decision.skip_reason.as_deref(), Some("OBI_REVERSAL close"));
+        assert!(matches!(decision.action, Action::Sell(1000)));
+        assert_eq!(strategy.episode_state(), &EpisodeStateC::Idle);
+    }
+
+    #[test]
+    fn test_decision_closes_on_trigger_loss_when_active() {
+        let mut strategy = StrategyC::new(make_config());
+        strategy.start_episode(NOW_NS);
+        let state = make_state_with_position(-1000.0, NOW_NS);
+        let mut features = make_triggered_features();
+        features.session_london = 0.0;
+        let mut rng = thread_rng();
+
+        let decision = strategy.decide(&features, &state, 0.5, 0.0, NOW_NS + 1, &mut rng);
+
+        assert!(decision.should_close);
+        assert_eq!(decision.skip_reason.as_deref(), Some("TRIGGER_EXIT close"));
+        assert!(matches!(decision.action, Action::Buy(1000)));
+        assert_eq!(strategy.episode_state(), &EpisodeStateC::Idle);
     }
 
     // === p_trend_c signal weight tests ===

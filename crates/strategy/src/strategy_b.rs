@@ -72,10 +72,10 @@ pub struct StrategyBConfig {
 impl Default for StrategyBConfig {
     fn default() -> Self {
         Self {
-            vol_spike_threshold: 2.0,
+            vol_spike_threshold: 1.4,
             vol_decaying_threshold: 0.0,
-            obi_alignment_threshold: 0.1,
-            regime_kl_threshold: 1.0,
+            obi_alignment_threshold: 0.05,
+            regime_kl_threshold: 1.2,
             max_hold_time_ms: 300_000,
             decay_rate_b: 0.0001,
             lambda_reg: 0.01,
@@ -1288,10 +1288,10 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = StrategyBConfig::default();
-        assert!((config.vol_spike_threshold - 2.0).abs() < 1e-15);
+        assert!((config.vol_spike_threshold - 1.4).abs() < 1e-15);
         assert!((config.vol_decaying_threshold - 0.0).abs() < 1e-15);
-        assert!((config.obi_alignment_threshold - 0.1).abs() < 1e-15);
-        assert!((config.regime_kl_threshold - 1.0).abs() < 1e-15);
+        assert!((config.obi_alignment_threshold - 0.05).abs() < 1e-15);
+        assert!((config.regime_kl_threshold - 1.2).abs() < 1e-15);
         assert_eq!(config.max_hold_time_ms, 300_000);
         assert!((config.decay_rate_b - 0.0001).abs() < 1e-15);
         assert_eq!(config.default_lot_size, 100_000);

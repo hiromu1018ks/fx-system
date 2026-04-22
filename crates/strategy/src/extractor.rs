@@ -231,6 +231,11 @@ impl Session {
         }
     }
 
+    fn from_timestamp_ns(timestamp_ns: u64, session_hours: &[u8; 4]) -> Self {
+        let utc_hour = ((timestamp_ns / 3_600_000_000_000) % 24) as u8;
+        Self::from_utc_hour(utc_hour, session_hours)
+    }
+
     fn one_hot(&self) -> (f64, f64, f64, f64) {
         match self {
             Session::Tokyo => (1.0, 0.0, 0.0, 0.0),
@@ -315,6 +320,7 @@ pub struct FeatureExtractor {
     last_depth_total: f64,
     prev_depth_total: f64,
     session_open_ns: u64,
+    active_session: Option<Session>,
     gap_hold: bool,
 }
 
@@ -330,6 +336,7 @@ impl FeatureExtractor {
             last_depth_total: 0.0,
             prev_depth_total: 0.0,
             session_open_ns: 0,
+            active_session: None,
             gap_hold: false,
             config,
         }
@@ -380,9 +387,13 @@ impl FeatureExtractor {
             }
         }
 
-        // Session open tracking (simple heuristic: track from first event)
-        if self.session_open_ns == 0 {
+        // Session open tracking resets on session transitions so Strategy C sees
+        // the opening window of every Tokyo/London/NY/Sydney session.
+        let session =
+            Session::from_timestamp_ns(market.timestamp_ns, &self.config.session_hours_utc);
+        if self.active_session != Some(session) {
             self.session_open_ns = market.timestamp_ns;
+            self.active_session = Some(session);
         }
 
         // Prune lagged execution stats
@@ -482,10 +493,7 @@ impl FeatureExtractor {
         };
 
         // --- Time features ---
-        let session = Session::from_utc_hour(
-            ((timestamp_ns / 3_600_000_000_000) % 24) as u8,
-            &self.config.session_hours_utc,
-        );
+        let session = Session::from_timestamp_ns(timestamp_ns, &self.config.session_hours_utc);
         let (session_tokyo, session_london, session_ny, session_sydney) = session.one_hot();
 
         let time_since_open_ms = if self.session_open_ns > 0 && timestamp_ns > self.session_open_ns
@@ -701,6 +709,10 @@ impl FeatureExtractor {
     /// Reset session open timestamp (e.g., on session change).
     pub fn reset_session_open(&mut self, timestamp_ns: u64) {
         self.session_open_ns = timestamp_ns;
+        self.active_session = Some(Session::from_timestamp_ns(
+            timestamp_ns,
+            &self.config.session_hours_utc,
+        ));
     }
 }
 

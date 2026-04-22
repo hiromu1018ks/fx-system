@@ -94,6 +94,30 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
         result.summary.max_drawdown,
         result.summary.sharpe_ratio,
     );
+    let diagnostics = output::backtest_decision_diagnostics(&result);
+    let risk_metric = output::backtest_risk_metric_summary(&result);
+    println!(
+        "  Triggered: {} | Entry attempts: {} | Filled: {} | Close trades: {}",
+        diagnostics.triggered_decisions,
+        diagnostics.entry_attempts,
+        diagnostics.filled_entries,
+        diagnostics.close_trades,
+    );
+    println!(
+        "  Sharpe basis: {} ({} returns)",
+        risk_metric.basis,
+        risk_metric.returns.len(),
+    );
+    if !diagnostics.skip_reasons.is_empty() {
+        let top_skips = diagnostics
+            .skip_reasons
+            .iter()
+            .take(3)
+            .map(|entry| format!("{}={}", entry.reason, entry.count))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("  Top skips: {}", top_skips);
+    }
 
     let output_dir = cmd.output.unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&output_dir).with_context(|| {

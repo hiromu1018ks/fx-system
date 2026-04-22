@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use fx_backtest::engine::BacktestResult;
@@ -55,7 +56,10 @@ struct BacktestBridgeJson {
     summary: BridgeSummary,
     trades: Vec<BridgeTrade>,
     returns: Vec<f64>,
+    risk_metric_returns: Vec<f64>,
+    risk_metric_return_basis: String,
     strategy_breakdown: Vec<BridgeStrategyBreakdown>,
+    decision_diagnostics: DecisionDiagnostics,
     num_features: usize,
     execution_stats: BridgeExecutionStats,
 }
@@ -65,6 +69,7 @@ struct BridgeSummary {
     total_ticks: u64,
     total_decision_ticks: u64,
     total_trades: usize,
+    close_trades: usize,
     wall_time_ms: u64,
     total_pnl: f64,
     realized_pnl: f64,
@@ -107,6 +112,99 @@ struct BridgeExecutionStats {
     total_rejections: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DecisionDiagnostics {
+    pub total_recorded_decisions: u64,
+    pub triggered_decisions: u64,
+    pub entry_attempts: u64,
+    pub filled_entries: u64,
+    pub hold_events: u64,
+    pub close_trades: u64,
+    pub skip_reasons: Vec<ReasonCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReasonCount {
+    pub reason: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RiskMetricSummary {
+    pub returns: Vec<f64>,
+    pub basis: &'static str,
+}
+
+pub fn backtest_decision_diagnostics(result: &BacktestResult) -> DecisionDiagnostics {
+    let total_recorded_decisions = result.decisions.len() as u64;
+    let triggered_decisions = result.decisions.iter().filter(|d| d.triggered).count() as u64;
+    let entry_attempts = result
+        .decisions
+        .iter()
+        .filter(|d| d.direction.is_some())
+        .count() as u64;
+    let filled_entries = result
+        .decisions
+        .iter()
+        .filter(|d| d.direction.is_some() && d.skip_reason.is_none())
+        .count() as u64;
+    let hold_events = result
+        .decisions
+        .iter()
+        .filter(|d| d.direction.is_none())
+        .count() as u64;
+    let close_trades = result
+        .trades
+        .iter()
+        .filter(|t| t.close_reason.is_some())
+        .count() as u64;
+
+    let mut skip_reason_counts: BTreeMap<String, u64> = BTreeMap::new();
+    for reason in result
+        .decisions
+        .iter()
+        .filter_map(|d| d.skip_reason.as_ref())
+        .cloned()
+    {
+        *skip_reason_counts.entry(reason).or_insert(0) += 1;
+    }
+    let mut skip_reasons: Vec<ReasonCount> = skip_reason_counts
+        .into_iter()
+        .map(|(reason, count)| ReasonCount { reason, count })
+        .collect();
+    skip_reasons.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.reason.cmp(&b.reason)));
+
+    DecisionDiagnostics {
+        total_recorded_decisions,
+        triggered_decisions,
+        entry_attempts,
+        filled_entries,
+        hold_events,
+        close_trades,
+        skip_reasons,
+    }
+}
+
+pub fn backtest_risk_metric_summary(result: &BacktestResult) -> RiskMetricSummary {
+    let close_returns: Vec<f64> = result
+        .trades
+        .iter()
+        .filter(|t| t.close_reason.is_some())
+        .map(|t| t.pnl)
+        .collect();
+    if close_returns.is_empty() {
+        RiskMetricSummary {
+            returns: result.trades.iter().map(|t| t.pnl).collect(),
+            basis: "fill_pnl",
+        }
+    } else {
+        RiskMetricSummary {
+            returns: close_returns,
+            basis: "close_trade_pnl",
+        }
+    }
+}
+
 impl BacktestBridgeJson {
     fn from_result(r: &BacktestResult) -> Self {
         let trades: Vec<BridgeTrade> = r
@@ -127,6 +225,8 @@ impl BacktestBridgeJson {
             .collect();
 
         let returns: Vec<f64> = r.trades.iter().map(|t| t.pnl).collect();
+        let risk_metric = backtest_risk_metric_summary(r);
+        let decision_diagnostics = backtest_decision_diagnostics(r);
 
         let breakdown = fx_backtest::stats::compute_strategy_breakdown(&r.trades);
         let strategy_breakdown: Vec<BridgeStrategyBreakdown> = breakdown
@@ -145,6 +245,7 @@ impl BacktestBridgeJson {
                 total_ticks: r.total_ticks,
                 total_decision_ticks: r.total_decision_ticks,
                 total_trades: r.trades.len(),
+                close_trades: decision_diagnostics.close_trades as usize,
                 wall_time_ms: r.wall_time_ms,
                 total_pnl: r.summary.total_pnl,
                 realized_pnl: r.summary.realized_pnl,
@@ -157,7 +258,10 @@ impl BacktestBridgeJson {
             },
             trades,
             returns,
+            risk_metric_returns: risk_metric.returns,
+            risk_metric_return_basis: risk_metric.basis.to_string(),
             strategy_breakdown,
+            decision_diagnostics,
             num_features: FeatureVector::DIM,
             execution_stats: BridgeExecutionStats {
                 overall_fill_rate: r.execution_stats.overall_fill_rate,
@@ -245,6 +349,7 @@ struct BacktestResultJson {
     total_ticks: u64,
     total_decision_ticks: u64,
     total_trades: usize,
+    close_trades: usize,
     wall_time_ms: u64,
     total_pnl: f64,
     realized_pnl: f64,
@@ -260,7 +365,10 @@ struct BacktestResultJson {
     summary: BridgeSummary,
     trades: Vec<BridgeTrade>,
     returns: Vec<f64>,
+    risk_metric_returns: Vec<f64>,
+    risk_metric_return_basis: String,
     strategy_breakdown: Vec<BridgeStrategyBreakdown>,
+    decision_diagnostics: DecisionDiagnostics,
     num_features: usize,
     execution_stats: BridgeExecutionStats,
 }
@@ -272,6 +380,7 @@ impl BacktestResultJson {
             total_ticks: r.total_ticks,
             total_decision_ticks: r.total_decision_ticks,
             total_trades: r.trades.len(),
+            close_trades: bridge.summary.close_trades,
             wall_time_ms: r.wall_time_ms,
             total_pnl: r.summary.total_pnl,
             realized_pnl: r.summary.realized_pnl,
@@ -292,7 +401,10 @@ impl BacktestResultJson {
             summary: bridge.summary,
             trades: bridge.trades,
             returns: bridge.returns,
+            risk_metric_returns: bridge.risk_metric_returns,
+            risk_metric_return_basis: bridge.risk_metric_return_basis,
             strategy_breakdown: bridge.strategy_breakdown,
+            decision_diagnostics: bridge.decision_diagnostics,
             num_features: bridge.num_features,
             execution_stats: bridge.execution_stats,
         }

@@ -12,7 +12,7 @@ use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::{Event, GenericEvent};
 use fx_events::header::EventHeader;
-use fx_events::projector::{LimitStateData, StateProjector};
+use fx_events::projector::{LimitStateData, StateProjector, StateSnapshot};
 use fx_events::proto;
 use fx_events::store::{EventStore, Tier3Store};
 use fx_execution::gateway::{ExecutionGateway, ExecutionGatewayConfig, ExecutionRequest};
@@ -192,6 +192,22 @@ fn generate_ticking_market_events(
     events
 }
 
+fn make_empty_snapshot(last_market_data_ns: u64) -> StateSnapshot {
+    StateSnapshot {
+        positions: HashMap::new(),
+        global_position: 0.0,
+        global_position_limit: 10.0,
+        total_unrealized_pnl: 0.0,
+        total_realized_pnl: 0.0,
+        limit_state: LimitStateData::default(),
+        state_version: 0,
+        staleness_ms: 0,
+        state_hash: "test".to_string(),
+        lot_multiplier: 1.0,
+        last_market_data_ns,
+    }
+}
+
 fn make_liquididity_shock_features() -> FeatureVector {
     FeatureVector {
         spread: 5.0,
@@ -233,6 +249,116 @@ fn make_liquididity_shock_features() -> FeatureVector {
         obi_x_vol: 0.8 * 0.15,
         spread_z_x_self_impact: 5.0 * 0.00001,
     }
+}
+
+#[test]
+fn test_feature_extractor_resets_session_open_on_session_boundary() {
+    let mut extractor = FeatureExtractor::new(FeatureExtractorConfig::default());
+    let hour_ns = 3_600_000_000_000_u64;
+    let minute_ns = 60_000_000_000_u64;
+
+    let before_london = make_market_event(
+        7 * hour_ns + 59 * minute_ns,
+        "USD/JPY",
+        110.0,
+        110.01,
+        1e6,
+        1e6,
+    );
+    extractor.process_market_event(&before_london);
+
+    let london_open_tick =
+        make_market_event(8 * hour_ns + minute_ns, "USD/JPY", 110.0, 110.01, 1e6, 1e6);
+    extractor.process_market_event(&london_open_tick);
+
+    let later_london_tick = make_market_event(
+        8 * hour_ns + 2 * minute_ns,
+        "USD/JPY",
+        110.0,
+        110.01,
+        1e6,
+        1e6,
+    );
+    extractor.process_market_event(&later_london_tick);
+
+    let snapshot = make_empty_snapshot(8 * hour_ns + 2 * minute_ns);
+    let fv = extractor.extract(
+        &later_london_tick,
+        &snapshot,
+        StrategyId::C,
+        8 * hour_ns + 2 * minute_ns,
+    );
+
+    assert!(
+        (fv.time_since_open_ms - 60_000.0).abs() < 1e-6,
+        "expected session open to reset to the first London tick, got {}ms",
+        fv.time_since_open_ms
+    );
+}
+
+#[test]
+fn test_strategy_c_requests_close_on_obi_reversal() {
+    let mut strategy = StrategyC::new(StrategyCConfig::default());
+    strategy.start_episode(NS_BASE);
+
+    let mut snapshot = make_empty_snapshot(NS_BASE);
+    snapshot.positions.insert(
+        StrategyId::C,
+        fx_events::projector::Position {
+            strategy_id: StrategyId::C,
+            size: 1_000.0,
+            entry_price: 110.0,
+            unrealized_pnl: 5.0,
+            realized_pnl: 0.0,
+            entry_timestamp_ns: NS_BASE,
+        },
+    );
+    snapshot.global_position = 1_000.0;
+    snapshot.state_version = 1;
+
+    let mut features = FeatureVector::zero();
+    features.session_london = 1.0;
+    features.obi = -0.3;
+    features.time_since_open_ms = 600_000.0;
+
+    let mut rng = SmallRng::seed_from_u64(42);
+    let decision = strategy.decide(&features, &snapshot, 0.5, 0.0, NS_BASE + 1, &mut rng);
+
+    assert!(decision.should_close);
+    assert_eq!(decision.skip_reason.as_deref(), Some("OBI_REVERSAL close"));
+    assert!(matches!(decision.action, Action::Sell(1000)));
+}
+
+#[test]
+fn test_strategy_c_requests_close_on_trigger_loss() {
+    let mut strategy = StrategyC::new(StrategyCConfig::default());
+    strategy.start_episode(NS_BASE);
+
+    let mut snapshot = make_empty_snapshot(NS_BASE);
+    snapshot.positions.insert(
+        StrategyId::C,
+        fx_events::projector::Position {
+            strategy_id: StrategyId::C,
+            size: -1_000.0,
+            entry_price: 110.0,
+            unrealized_pnl: 5.0,
+            realized_pnl: 0.0,
+            entry_timestamp_ns: NS_BASE,
+        },
+    );
+    snapshot.global_position = -1_000.0;
+    snapshot.state_version = 1;
+
+    let mut features = FeatureVector::zero();
+    features.obi = -0.3;
+    features.time_since_open_ms = 600_000.0;
+
+    let mut rng = SmallRng::seed_from_u64(7);
+    let decision = strategy.decide(&features, &snapshot, 0.5, 0.0, NS_BASE + 1, &mut rng);
+
+    assert!(decision.should_close);
+    assert_eq!(decision.skip_reason.as_deref(), Some("TRIGGER_EXIT close"));
+    assert!(matches!(decision.action, Action::Buy(1000)));
 }
 
 #[allow(dead_code)]
@@ -2593,6 +2719,8 @@ fn test_all_strategies_global_position_constraint() {
         "staleness_rejected",
         "global_position_rejected",
         "MAX_HOLD_TIME close",
+        "OBI_REVERSAL close",
+        "TRIGGER_EXIT close",
     ]
     .iter()
     .copied()
@@ -2837,6 +2965,8 @@ fn test_hard_limit_pipeline_ordering_and_validity() {
         "staleness_rejected",
         "global_position_rejected",
         "MAX_HOLD_TIME close",
+        "OBI_REVERSAL close",
+        "TRIGGER_EXIT close",
     ]
     .iter()
     .copied()

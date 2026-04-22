@@ -11,7 +11,11 @@ use crate::features::FeatureVector;
 pub const Q_STATE_SCHEMA_VERSION: u32 = 1;
 
 fn sanitize_f64(v: f64) -> f64 {
-    if v.is_nan() || v.is_infinite() { 0.0 } else { v }
+    if v.is_nan() || v.is_infinite() {
+        0.0
+    } else {
+        v
+    }
 }
 
 fn sanitize_vec(data: Vec<f64>) -> Vec<f64> {
@@ -42,7 +46,11 @@ pub struct MatrixSnapshot {
 
 impl MatrixSnapshot {
     pub fn from_column_major(rows: usize, cols: usize, data: Vec<f64>) -> Self {
-        Self { rows, cols, data: sanitize_vec(data) }
+        Self {
+            rows,
+            cols,
+            data: sanitize_vec(data),
+        }
     }
 }
 

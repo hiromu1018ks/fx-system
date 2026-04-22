@@ -72,10 +72,10 @@ pub struct StrategyAConfig {
 impl Default for StrategyAConfig {
     fn default() -> Self {
         Self {
-            spread_z_threshold: 3.0,
-            depth_drop_threshold: -0.2,
-            vol_spike_threshold: 3.0,
-            regime_kl_threshold: 1.0,
+            spread_z_threshold: 2.0,
+            depth_drop_threshold: -0.05,
+            vol_spike_threshold: 2.0,
+            regime_kl_threshold: 1.2,
             max_hold_time_ms: 30_000,
             decay_rate_a: 0.001,
             lambda_reg: 0.01,
@@ -1309,10 +1309,10 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = StrategyAConfig::default();
-        assert!((config.spread_z_threshold - 3.0).abs() < 1e-15);
-        assert!((config.depth_drop_threshold - (-0.2)).abs() < 1e-15);
-        assert!((config.vol_spike_threshold - 3.0).abs() < 1e-15);
-        assert!((config.regime_kl_threshold - 1.0).abs() < 1e-15);
+        assert!((config.spread_z_threshold - 2.0).abs() < 1e-15);
+        assert!((config.depth_drop_threshold - (-0.05)).abs() < 1e-15);
+        assert!((config.vol_spike_threshold - 2.0).abs() < 1e-15);
+        assert!((config.regime_kl_threshold - 1.2).abs() < 1e-15);
         assert_eq!(config.max_hold_time_ms, 30_000);
         assert!((config.decay_rate_a - 0.001).abs() < 1e-15);
         assert_eq!(config.default_lot_size, 100_000);

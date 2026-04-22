@@ -168,7 +168,8 @@ impl TradeSummary {
         // Max drawdown duration (time between peak and recovery)
         let (max_dd_duration_ns, _) = compute_max_drawdown_duration(trades);
 
-        // Sharpe ratio (per-trade basis, annualized)
+        // Risk-adjusted metrics use closing trades when available so sparse entry
+        // fills do not distort episode-level performance.
         let sharpe_ratio = compute_sharpe_ratio(trades);
 
         // Sortino ratio (downside deviation only)
@@ -223,14 +224,46 @@ impl TradeSummary {
 // Computation helpers
 // ---------------------------------------------------------------------------
 
-/// Sharpe ratio computed on per-trade returns.
-/// Annualized assuming ~252 trading days with the average trade frequency.
-fn compute_sharpe_ratio(trades: &[TradeRecord]) -> f64 {
+fn risk_metric_trades(trades: &[TradeRecord]) -> Vec<&TradeRecord> {
+    let close_trades: Vec<&TradeRecord> =
+        trades.iter().filter(|t| t.close_reason.is_some()).collect();
+    if close_trades.is_empty() {
+        trades.iter().collect()
+    } else {
+        close_trades
+    }
+}
+
+fn annualization_factor(trades: &[&TradeRecord]) -> f64 {
     if trades.len() < 2 {
+        return 1.0;
+    }
+
+    let start_ns = trades.first().map(|t| t.timestamp_ns).unwrap_or(0);
+    let end_ns = trades.last().map(|t| t.timestamp_ns).unwrap_or(start_ns);
+    let elapsed_ns = end_ns.saturating_sub(start_ns);
+    if elapsed_ns == 0 {
+        return 1.0;
+    }
+
+    const YEAR_NS: f64 = 365.25 * 24.0 * 60.0 * 60.0 * 1_000_000_000.0;
+    let avg_interval_ns = elapsed_ns as f64 / (trades.len() - 1) as f64;
+    if avg_interval_ns <= f64::EPSILON {
+        return 1.0;
+    }
+
+    (YEAR_NS / avg_interval_ns).max(1.0).sqrt()
+}
+
+/// Sharpe ratio computed on risk-metric returns.
+/// Uses close-trade PnL when available, otherwise falls back to fill-level PnL.
+fn compute_sharpe_ratio(trades: &[TradeRecord]) -> f64 {
+    let risk_trades = risk_metric_trades(trades);
+    if risk_trades.len() < 2 {
         return 0.0;
     }
 
-    let pnls: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
+    let pnls: Vec<f64> = risk_trades.iter().map(|t| t.pnl).collect();
     let n = pnls.len() as f64;
     let mean = pnls.iter().sum::<f64>() / n;
 
@@ -241,21 +274,17 @@ fn compute_sharpe_ratio(trades: &[TradeRecord]) -> f64 {
         return 0.0;
     }
 
-    // Annualization: assume trades occur ~every 100ms on average during
-    // 24h forex market → ~864,000 trades/year
-    let trades_per_year = 864_000.0_f64;
-    let annualization_factor = trades_per_year.sqrt();
-
-    (mean / std) * annualization_factor
+    (mean / std) * annualization_factor(&risk_trades)
 }
 
-/// Sortino ratio using downside deviation only.
+/// Sortino ratio using downside deviation only on risk-metric returns.
 fn compute_sortino_ratio(trades: &[TradeRecord]) -> f64 {
-    if trades.len() < 2 {
+    let risk_trades = risk_metric_trades(trades);
+    if risk_trades.len() < 2 {
         return 0.0;
     }
 
-    let pnls: Vec<f64> = trades.iter().map(|t| t.pnl).collect();
+    let pnls: Vec<f64> = risk_trades.iter().map(|t| t.pnl).collect();
     let n = pnls.len() as f64;
     let mean = pnls.iter().sum::<f64>() / n;
 
@@ -272,10 +301,7 @@ fn compute_sortino_ratio(trades: &[TradeRecord]) -> f64 {
         return 0.0;
     }
 
-    let trades_per_year = 864_000.0_f64;
-    let annualization_factor = trades_per_year.sqrt();
-
-    (mean / downside_std) * annualization_factor
+    (mean / downside_std) * annualization_factor(&risk_trades)
 }
 
 /// Compute max drawdown duration in nanoseconds.
@@ -484,6 +510,13 @@ mod tests {
         }
     }
 
+    fn make_close_trade(timestamp_ns: u64, pnl: f64, strategy_id: StrategyId) -> TradeRecord {
+        TradeRecord {
+            close_reason: Some("TEST_CLOSE".to_string()),
+            ..make_trade(timestamp_ns, pnl, strategy_id)
+        }
+    }
+
     // -- TradeSummary::empty --
     #[test]
     fn test_empty_summary() {
@@ -636,6 +669,35 @@ mod tests {
         ];
         let summary = TradeSummary::from_trades(&trades);
         assert_eq!(summary.sharpe_ratio, 0.0);
+    }
+
+    #[test]
+    fn test_sharpe_uses_close_trades_when_available() {
+        let trades = vec![
+            make_trade(1000, 0.0, StrategyId::A),
+            make_close_trade(2000, 5.0, StrategyId::A),
+            make_trade(3000, 0.0, StrategyId::A),
+            make_close_trade(4000, -2.0, StrategyId::A),
+        ];
+        let close_trades = vec![
+            make_close_trade(2000, 5.0, StrategyId::A),
+            make_close_trade(4000, -2.0, StrategyId::A),
+        ];
+
+        let summary = TradeSummary::from_trades(&trades);
+        let expected = compute_sharpe_ratio(&close_trades);
+        assert!((summary.sharpe_ratio - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sharpe_single_close_trade_is_zero_even_with_entry_fill() {
+        let trades = vec![
+            make_trade(1000, 0.0, StrategyId::A),
+            make_close_trade(2000, -3.0, StrategyId::A),
+        ];
+        let summary = TradeSummary::from_trades(&trades);
+        assert_eq!(summary.sharpe_ratio, 0.0);
+        assert_eq!(summary.sortino_ratio, 0.0);
     }
 
     // -- Sortino ratio --

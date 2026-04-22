@@ -929,91 +929,46 @@ impl BacktestEngine {
             // Phase 1: Close positions that exceeded per-strategy MAX_HOLD_TIME
             for &sid in &enabled_strategies {
                 if self.should_close_max_hold(sid, &projector, tick_ns) {
-                    let snap = projector.snapshot();
-                    if let Some(pos) = snap.positions.get(&sid) {
-                        if pos.is_open() {
-                            let direction = if pos.size > 0.0 {
-                                Direction::Sell
-                            } else {
-                                Direction::Buy
-                            };
-                            let lots = pos.size.abs() as u64;
+                    if let Some((direction, lots, snapshot_parent)) = self.close_strategy_position(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        &mut feature_extractor,
+                        &mut runtime_observability,
+                        &mut trades,
+                        &mut execution_events,
+                        mid_price,
+                        volatility,
+                        tick_ns,
+                        Some(event.header.event_id),
+                        sid,
+                        "MAX_HOLD_TIME",
+                        TerminalReason::MaxHoldTimeExceeded,
+                    ) {
+                        let limit_state = limit_tracker.update(
+                            tick_ns,
+                            projector.snapshot().total_realized_pnl,
+                            projector.snapshot().total_unrealized_pnl,
+                            &self.config.risk_limits_config,
+                        );
+                        projector.update_limit_state(limit_state);
+                        self.maybe_emit_snapshot_event(
+                            &mut runtime_sequencer,
+                            &projector,
+                            tick_ns,
+                            snapshot_parent,
+                            true,
+                            &mut state_snapshots_published,
+                        );
 
-                            let result = self.simulate_order(
-                                direction, lots, sid, mid_price, volatility, tick_ns,
-                            );
-
-                            if result.filled {
-                                runtime_observability.record_execution_fill(
-                                    result.fill_price - result.requested_price,
-                                    result.slippage,
-                                    None,
-                                );
-                                let (trade_pnl, exec_event) = self.process_execution_result(
-                                    &mut runtime_sequencer,
-                                    sid,
-                                    &result,
-                                    direction,
-                                    tick_ns,
-                                    Some(event.header.event_id),
-                                    &mut projector,
-                                );
-                                if let Some(ref exec_ev) = exec_event {
-                                    feature_extractor.process_execution_event(exec_ev);
-                                }
-                                let snapshot_parent = exec_event
-                                    .as_ref()
-                                    .map(|ev| ev.header.event_id)
-                                    .or(Some(event.header.event_id));
-                                if let Some(ev) = exec_event {
-                                    execution_events.push(ev);
-                                }
-                                trades.push(TradeRecord {
-                                    timestamp_ns: tick_ns,
-                                    strategy_id: sid,
-                                    direction,
-                                    lots: result.fill_size,
-                                    fill_price: result.fill_price,
-                                    slippage: result.slippage,
-                                    pnl: trade_pnl,
-                                    fill_probability: result.effective_fill_probability,
-                                    latency_ms: result.latency_ms,
-                                    close_reason: Some("MAX_HOLD_TIME".to_string()),
-                                });
-                                let limit_state = limit_tracker.update(
-                                    tick_ns,
-                                    projector.snapshot().total_realized_pnl,
-                                    projector.snapshot().total_unrealized_pnl,
-                                    &self.config.risk_limits_config,
-                                );
-                                projector.update_limit_state(limit_state);
-                                self.maybe_emit_snapshot_event(
-                                    &mut runtime_sequencer,
-                                    &projector,
-                                    tick_ns,
-                                    snapshot_parent,
-                                    true,
-                                    &mut state_snapshots_published,
-                                );
-                            }
-
-                            self.end_strategy_episode(
-                                sid,
-                                TerminalReason::MaxHoldTimeExceeded,
-                                tick_ns,
-                                projector.snapshot(),
-                            );
-
-                            decisions.push(BacktestDecision {
-                                timestamp_ns: tick_ns,
-                                strategy_id: sid,
-                                direction: Some(direction),
-                                lots,
-                                triggered: false,
-                                skip_reason: Some("MAX_HOLD_TIME close".to_string()),
-                            });
-                            total_decision_ticks += 1;
-                        }
+                        decisions.push(BacktestDecision {
+                            timestamp_ns: tick_ns,
+                            strategy_id: sid,
+                            direction: Some(direction),
+                            lots,
+                            triggered: false,
+                            skip_reason: Some("MAX_HOLD_TIME close".to_string()),
+                        });
+                        total_decision_ticks += 1;
                     }
                 }
             }
@@ -1118,6 +1073,57 @@ impl BacktestEngine {
                     &decision,
                 );
                 strategy_events_published = strategy_events_published.saturating_add(1);
+
+                if decision.should_close {
+                    let close_label = decision
+                        .skip_reason
+                        .clone()
+                        .unwrap_or_else(|| "STRATEGY_EXIT close".to_string());
+                    let trade_close_reason = close_label
+                        .strip_suffix(" close")
+                        .unwrap_or(close_label.as_str());
+                    if let Some((direction, lots, snapshot_parent)) = self.close_strategy_position(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        &mut feature_extractor,
+                        &mut runtime_observability,
+                        &mut trades,
+                        &mut execution_events,
+                        mid_price,
+                        volatility,
+                        tick_ns,
+                        Some(decision_event_id),
+                        sid,
+                        trade_close_reason,
+                        TerminalReason::PositionClosed,
+                    ) {
+                        let limit_state = limit_tracker.update(
+                            tick_ns,
+                            projector.snapshot().total_realized_pnl,
+                            projector.snapshot().total_unrealized_pnl,
+                            &self.config.risk_limits_config,
+                        );
+                        projector.update_limit_state(limit_state);
+                        self.maybe_emit_snapshot_event(
+                            &mut runtime_sequencer,
+                            &projector,
+                            tick_ns,
+                            snapshot_parent,
+                            true,
+                            &mut state_snapshots_published,
+                        );
+                        decisions.push(BacktestDecision {
+                            timestamp_ns: tick_ns,
+                            strategy_id: sid,
+                            direction: Some(direction),
+                            lots,
+                            triggered,
+                            skip_reason: Some(close_label),
+                        });
+                        total_decision_ticks += 1;
+                    }
+                    continue;
+                }
 
                 match decision.action {
                     Action::Buy(lots) | Action::Sell(lots) => {
@@ -2007,6 +2013,83 @@ impl BacktestEngine {
                 projector.snapshot(),
             );
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn close_strategy_position(
+        &mut self,
+        runtime_sequencer: &mut RuntimeSequencer,
+        projector: &mut StateProjector,
+        feature_extractor: &mut FeatureExtractor,
+        runtime_observability: &mut RuntimeObservabilityState,
+        trades: &mut Vec<TradeRecord>,
+        execution_events: &mut Vec<GenericEvent>,
+        mid_price: f64,
+        volatility: f64,
+        tick_ns: u64,
+        parent_event_id: Option<Uuid>,
+        sid: StrategyId,
+        close_reason: &str,
+        terminal_reason: TerminalReason,
+    ) -> Option<(Direction, u64, Option<Uuid>)> {
+        let snap = projector.snapshot();
+        let pos = snap.positions.get(&sid)?;
+        if !pos.is_open() {
+            return None;
+        }
+
+        let direction = if pos.size > 0.0 {
+            Direction::Sell
+        } else {
+            Direction::Buy
+        };
+        let lots = pos.size.abs() as u64;
+
+        let result = self.simulate_order(direction, lots, sid, mid_price, volatility, tick_ns);
+        let mut snapshot_parent = parent_event_id;
+
+        if result.filled {
+            runtime_observability.record_execution_fill(
+                result.fill_price - result.requested_price,
+                result.slippage,
+                None,
+            );
+            let (trade_pnl, exec_event) = self.process_execution_result(
+                runtime_sequencer,
+                sid,
+                &result,
+                direction,
+                tick_ns,
+                parent_event_id,
+                projector,
+            );
+            if let Some(ref exec_ev) = exec_event {
+                feature_extractor.process_execution_event(exec_ev);
+            }
+            snapshot_parent = exec_event
+                .as_ref()
+                .map(|ev| ev.header.event_id)
+                .or(parent_event_id);
+            if let Some(ev) = exec_event {
+                execution_events.push(ev);
+            }
+            trades.push(TradeRecord {
+                timestamp_ns: tick_ns,
+                strategy_id: sid,
+                direction,
+                lots: result.fill_size,
+                fill_price: result.fill_price,
+                slippage: result.slippage,
+                pnl: trade_pnl,
+                fill_probability: result.effective_fill_probability,
+                latency_ms: result.latency_ms,
+                close_reason: Some(close_reason.to_string()),
+            });
+        }
+
+        self.end_strategy_episode(sid, terminal_reason, tick_ns, projector.snapshot());
+
+        Some((direction, lots, snapshot_parent))
     }
 
     /// Get strategy decision for a given strategy ID.
