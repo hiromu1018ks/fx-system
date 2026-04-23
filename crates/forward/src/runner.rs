@@ -585,6 +585,48 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
             let snapshot = projector.snapshot().clone();
 
+            // Phase 1: Close positions that exceeded per-strategy MAX_HOLD_TIME
+            let max_hold_ms: HashMap<StrategyId, u64> = [
+                (StrategyId::A, 30_000),
+                (StrategyId::B, 300_000),
+                (StrategyId::C, 600_000),
+            ]
+            .into_iter()
+            .collect();
+            for &sid in &enabled_strategies {
+                let max_ns = max_hold_ms
+                    .get(&sid)
+                    .copied()
+                    .unwrap_or(300_000)
+                    * 1_000_000;
+                let should_close = snapshot
+                    .positions
+                    .get(&sid)
+                    .map(|p| {
+                        p.is_open()
+                            && p.entry_timestamp_ns > 0
+                            && tick_ns.saturating_sub(p.entry_timestamp_ns) >= max_ns
+                    })
+                    .unwrap_or(false);
+                if should_close {
+                    if let Some((_direction, _lots)) = self.close_strategy_position_forward(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        &mut paper_engine,
+                        &mut runtime_observability,
+                        &mut limit_tracker,
+                        &limits_config,
+                        tick_ns,
+                        tick.symbol.clone(),
+                        sid,
+                        "MAX_HOLD_TIME",
+                    ) {
+                        total_trades += 1;
+                    }
+                }
+            }
+            let snapshot = projector.snapshot().clone();
+
             let mut strategy_decisions = Vec::new();
             for &strategy_id in &enabled_strategies {
                 let features =
@@ -664,13 +706,38 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     fx_strategy::policy::Action::Hold => continue,
                 };
 
-                // already_in_position guard: skip if strategy already has an open position
-                let has_open_position = snapshot
+                // Signal-driven exit or already_in_position guard
+                let pos_size = snapshot
                     .positions
                     .get(&strategy_id)
-                    .map(|p| p.size.abs() > f64::EPSILON)
-                    .unwrap_or(false);
-                if has_open_position {
+                    .map(|p| p.size)
+                    .unwrap_or(0.0);
+                if pos_size.abs() > f64::EPSILON {
+                    let is_closing = match direction {
+                        Direction::Buy => pos_size < -f64::EPSILON,
+                        Direction::Sell => pos_size > f64::EPSILON,
+                    };
+                    if is_closing {
+                        // Signal-driven exit: Q-function selected opposite direction
+                        if let Some((_close_dir, _close_lots)) =
+                            self.close_strategy_position_forward(
+                                &mut runtime_sequencer,
+                                &mut projector,
+                                &mut paper_engine,
+                                &mut runtime_observability,
+                                &mut limit_tracker,
+                                &limits_config,
+                                tick_ns,
+                                tick.symbol.clone(),
+                                strategy_id,
+                                "TRIGGER_EXIT",
+                            )
+                        {
+                            total_trades += 1;
+                        }
+                        continue;
+                    }
+                    // Same direction — already in position
                     let skip_snapshot = projector.snapshot().clone();
                     self.emit_trade_skip_event(
                         &mut runtime_sequencer,
@@ -1304,7 +1371,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         symbol: String,
         total_trades: &mut u64,
     ) -> Result<()> {
-        let open_positions: Vec<(StrategyId, f64, f64)> = projector
+        let mut open_positions: Vec<(StrategyId, f64, f64)> = projector
             .snapshot()
             .positions
             .iter()
@@ -1316,6 +1383,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 }
             })
             .collect();
+        open_positions.sort_by_key(|(sid, _, _)| format!("{:?}", sid));
 
         for (strategy_id, size, entry_price) in open_positions {
             let lots = size.abs().round() as u64;
@@ -1378,6 +1446,102 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         }
 
         Ok(())
+    }
+
+    /// Close a single strategy's open position (used for MAX_HOLD_TIME and signal-driven exits).
+    fn close_strategy_position_forward(
+        &mut self,
+        sequencer: &mut RuntimeSequencer,
+        projector: &mut StateProjector,
+        paper_engine: &mut PaperExecutionEngine,
+        runtime_observability: &mut RuntimeObservabilityState,
+        limit_tracker: &mut PeriodicLimitTracker,
+        limits_config: &RiskLimitsConfig,
+        tick_ns: u64,
+        symbol: String,
+        strategy_id: StrategyId,
+        close_reason: &str,
+    ) -> Option<(Direction, u64)> {
+        let snap = projector.snapshot();
+        let pos = snap.positions.get(&strategy_id)?;
+        if !pos.is_open() {
+            return None;
+        }
+
+        let direction = if pos.size > 0.0 {
+            Direction::Sell
+        } else {
+            Direction::Buy
+        };
+        let lots = pos.size.abs().round() as u64;
+        if lots == 0 {
+            return None;
+        }
+
+        let entry_price = pos.entry_price;
+        let realized_before = projector
+            .snapshot()
+            .positions
+            .get(&strategy_id)
+            .map(|p| p.realized_pnl)
+            .unwrap_or_default();
+
+        let request = ExecutionRequest {
+            direction,
+            lots,
+            strategy_id,
+            current_mid_price: entry_price,
+            volatility: 0.0,
+            expected_profit: 0.0,
+            symbol: symbol.clone(),
+            timestamp_ns: tick_ns,
+            time_urgent: true,
+        };
+
+        let (paper_result, exec_result) = match paper_engine.simulate(&request) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(?e, ?strategy_id, "Close execution error");
+                return None;
+            }
+        };
+
+        let exec_event =
+            self.build_runtime_execution_event(sequencer, paper_engine, &request, &exec_result, None);
+        if let Err(e) = projector.process_execution_for_strategy(&exec_event, strategy_id) {
+            warn!(?e, ?strategy_id, "Projector close-out error");
+            return None;
+        }
+        self.sync_limit_state(projector, limit_tracker, limits_config, tick_ns);
+
+        let realized_after = projector
+            .snapshot()
+            .positions
+            .get(&strategy_id)
+            .map(|p| p.realized_pnl)
+            .unwrap_or_default();
+
+        if paper_result.fill_price.is_some() {
+            runtime_observability.record_execution_fill(
+                exec_result.fill_price - exec_result.requested_price,
+                exec_result.slippage,
+                None,
+            );
+            self.tracker.record_trade(realized_after - realized_before);
+            self.tracker
+                .record_execution_drift(exec_result.fill_price - exec_result.requested_price);
+        }
+
+        debug!(
+            ?strategy_id,
+            ?direction,
+            lots,
+            close_reason,
+            pnl = realized_after - realized_before,
+            "Position closed"
+        );
+
+        Some((direction, lots))
     }
 }
 
