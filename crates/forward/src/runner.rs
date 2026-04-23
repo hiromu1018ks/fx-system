@@ -664,6 +664,30 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     fx_strategy::policy::Action::Hold => continue,
                 };
 
+                // already_in_position guard: skip if strategy already has an open position
+                let has_open_position = snapshot
+                    .positions
+                    .get(&strategy_id)
+                    .map(|p| p.size.abs() > f64::EPSILON)
+                    .unwrap_or(false);
+                if has_open_position {
+                    let skip_snapshot = projector.snapshot().clone();
+                    self.emit_trade_skip_event(
+                        &mut runtime_sequencer,
+                        &mut projector,
+                        Some(decision_event_id),
+                        tick_ns,
+                        strategy_id,
+                        "already_in_position",
+                        decision.q_sampled,
+                        decision.q_point,
+                        &skip_snapshot,
+                        &regime_cache,
+                    );
+                    strategy_events_published = strategy_events_published.saturating_add(1);
+                    continue;
+                }
+
                 if lots == 0 {
                     let skip_snapshot = projector.snapshot().clone();
                     self.emit_trade_skip_event(
