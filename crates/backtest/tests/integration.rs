@@ -296,7 +296,6 @@ fn test_feature_extractor_resets_session_open_on_session_boundary() {
     );
 }
 
-
 #[allow(dead_code)]
 fn make_volatility_decay_features() -> FeatureVector {
     FeatureVector {

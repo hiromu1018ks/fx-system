@@ -3,6 +3,8 @@
 use std::io::Write;
 use std::path::Path;
 
+use fx_core::random::expand_u64_seed;
+
 /// Generate a synthetic CSV with monotonically increasing timestamps,
 /// valid bid/ask pairs, and enough ticks for strategies to evaluate.
 fn write_synthetic_csv(dir: &Path, filename: &str, n_ticks: usize) -> std::path::PathBuf {
@@ -39,7 +41,7 @@ fn test_cli_backtest_pipeline_with_synthetic_csv() {
     assert!(!events.is_empty());
 
     let mut config = fx_backtest::engine::BacktestConfig::default();
-    config.rng_seed = Some([42u8; 32]);
+    config.rng_seed = Some(expand_u64_seed(42));
     // Use only Strategy A for deterministic testing
     use std::collections::HashSet;
     config.enabled_strategies = HashSet::from([fx_core::types::StrategyId::A]);
@@ -227,13 +229,7 @@ fn crate_integration_config_load(path: &Path) -> fx_backtest::engine::BacktestCo
             config.default_lot_size = v as u64;
         }
         if let Some(v) = table.get("rng_seed").and_then(|v| v.as_integer()) {
-            let seed = v as u64;
-            let bytes = seed.to_le_bytes();
-            let mut arr = [0u8; 32];
-            for (i, chunk) in bytes.iter().cycle().take(32).enumerate() {
-                arr[i] = *chunk;
-            }
-            config.rng_seed = Some(arr);
+            config.rng_seed = Some(expand_u64_seed(v as u64));
         }
     }
     config
@@ -248,7 +244,7 @@ fn test_backtest_q_state_export_import_roundtrip() {
     let events = fx_backtest::data::ticks_to_events(&ticks);
 
     let mut config = fx_backtest::engine::BacktestConfig::default();
-    config.rng_seed = Some([13u8; 32]);
+    config.rng_seed = Some(expand_u64_seed(13));
 
     let mut trained_engine = fx_backtest::engine::BacktestEngine::new(config.clone());
     let _ = trained_engine.run_from_events(&events[..120]);
@@ -316,13 +312,13 @@ fn test_cli_backtest_reproducibility() {
 
     // Run 1
     let mut config1 = fx_backtest::engine::BacktestConfig::default();
-    config1.rng_seed = Some([7u8; 32]);
+    config1.rng_seed = Some(expand_u64_seed(7));
     let mut engine1 = fx_backtest::engine::BacktestEngine::new(config1);
     let result1 = engine1.run_from_events(&events);
 
     // Run 2 with same seed
     let mut config2 = fx_backtest::engine::BacktestConfig::default();
-    config2.rng_seed = Some([7u8; 32]);
+    config2.rng_seed = Some(expand_u64_seed(7));
     let mut engine2 = fx_backtest::engine::BacktestEngine::new(config2);
     let result2 = engine2.run_from_events(&events);
 
@@ -345,7 +341,7 @@ fn test_cli_backtest_strategy_selection() {
 
     // Run with only Strategy B
     let mut config = fx_backtest::engine::BacktestConfig::default();
-    config.rng_seed = Some([42u8; 32]);
+    config.rng_seed = Some(expand_u64_seed(42));
     use std::collections::HashSet;
     config.enabled_strategies = HashSet::from([fx_core::types::StrategyId::B]);
 

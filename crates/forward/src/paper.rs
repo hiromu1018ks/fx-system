@@ -1,4 +1,5 @@
 use anyhow::Result;
+use fx_core::random::expand_u64_seed;
 use fx_core::types::{Direction, EventTier, StreamId};
 use fx_events::event::GenericEvent;
 use fx_events::header::EventHeader;
@@ -41,7 +42,7 @@ impl PaperExecutionEngine {
     pub fn new(config: ExecutionGatewayConfig, seed: u64) -> Self {
         Self {
             gateway: ExecutionGateway::new(config),
-            rng: SmallRng::seed_from_u64(seed),
+            rng: SmallRng::from_seed(expand_u64_seed(seed)),
         }
     }
 

@@ -257,6 +257,14 @@ pub struct TriggerDiagnostics {
     pub idle_triggered: std::collections::HashMap<fx_core::types::StrategyId, u64>,
     /// Ticks where decide() was actually called (after all skip checks).
     pub decide_called: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Decisions that became actual order attempts after trigger/position checks.
+    pub order_attempted: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Order attempts that passed the full risk pipeline and reached execution.
+    pub risk_passed: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Order attempts that were actually filled.
+    pub filled: std::collections::HashMap<fx_core::types::StrategyId, u64>,
+    /// Trades that closed an existing position.
+    pub closed: std::collections::HashMap<fx_core::types::StrategyId, u64>,
 }
 
 /// Collected position data to avoid borrow conflicts.
@@ -624,17 +632,25 @@ impl BacktestEngine {
             merged_trigger_diag.triggered.insert(sid, 0);
             merged_trigger_diag.idle_triggered.insert(sid, 0);
             merged_trigger_diag.decide_called.insert(sid, 0);
+            merged_trigger_diag.order_attempted.insert(sid, 0);
+            merged_trigger_diag.risk_passed.insert(sid, 0);
+            merged_trigger_diag.filled.insert(sid, 0);
+            merged_trigger_diag.closed.insert(sid, 0);
         }
-        let mut merge_diag = |acc: &mut TriggerDiagnostics, batch: &TriggerDiagnostics| {
+        let merge_diag = |acc: &mut TriggerDiagnostics, batch: &TriggerDiagnostics| {
             for &sid in StrategyId::all() {
-                *acc.evaluated.entry(sid).or_insert(0) +=
-                    batch.evaluated.get(&sid).unwrap_or(&0);
-                *acc.triggered.entry(sid).or_insert(0) +=
-                    batch.triggered.get(&sid).unwrap_or(&0);
+                *acc.evaluated.entry(sid).or_insert(0) += batch.evaluated.get(&sid).unwrap_or(&0);
+                *acc.triggered.entry(sid).or_insert(0) += batch.triggered.get(&sid).unwrap_or(&0);
                 *acc.idle_triggered.entry(sid).or_insert(0) +=
                     batch.idle_triggered.get(&sid).unwrap_or(&0);
                 *acc.decide_called.entry(sid).or_insert(0) +=
                     batch.decide_called.get(&sid).unwrap_or(&0);
+                *acc.order_attempted.entry(sid).or_insert(0) +=
+                    batch.order_attempted.get(&sid).unwrap_or(&0);
+                *acc.risk_passed.entry(sid).or_insert(0) +=
+                    batch.risk_passed.get(&sid).unwrap_or(&0);
+                *acc.filled.entry(sid).or_insert(0) += batch.filled.get(&sid).unwrap_or(&0);
+                *acc.closed.entry(sid).or_insert(0) += batch.closed.get(&sid).unwrap_or(&0);
             }
         };
 
@@ -854,11 +870,18 @@ impl BacktestEngine {
             trigger_diag.triggered.insert(sid, 0);
             trigger_diag.idle_triggered.insert(sid, 0);
             trigger_diag.decide_called.insert(sid, 0);
+            trigger_diag.order_attempted.insert(sid, 0);
+            trigger_diag.risk_passed.insert(sid, 0);
+            trigger_diag.filled.insert(sid, 0);
+            trigger_diag.closed.insert(sid, 0);
         }
 
         // Clone to release borrow on self.config before mutating self
-        let enabled_strategies: Vec<StrategyId> =
-            self.config.enabled_strategies.iter().copied().collect();
+        let enabled_strategies: Vec<StrategyId> = StrategyId::all()
+            .iter()
+            .copied()
+            .filter(|sid| self.config.enabled_strategies.contains(sid))
+            .collect();
 
         for event in market_events {
             let tick_ns = event.header.timestamp_ns;
@@ -1059,9 +1082,15 @@ impl BacktestEngine {
                 *trigger_diag.evaluated.entry(sid).or_insert(0) += 1;
                 let regime_kl = self.regime_cache.state().kl_divergence();
                 let is_trig = match sid {
-                    StrategyId::A => self.strategy_a.is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
-                    StrategyId::B => self.strategy_b.is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
-                    StrategyId::C => self.strategy_c.is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
+                    StrategyId::A => self
+                        .strategy_a
+                        .is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
+                    StrategyId::B => self
+                        .strategy_b
+                        .is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
+                    StrategyId::C => self
+                        .strategy_c
+                        .is_triggered(&tick_contexts.get(&sid).unwrap().features, regime_kl),
                 };
                 if is_trig {
                     *trigger_diag.triggered.entry(sid).or_insert(0) += 1;
@@ -1133,8 +1162,8 @@ impl BacktestEngine {
             // Sort by Q-value descending for priority (design.md §9.5)
             strategy_decisions.sort_by(|a, b| {
                 b.2.q_sampled
-                    .partial_cmp(&a.2.q_sampled)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.2.q_sampled)
+                    .then_with(|| a.0.stable_index().cmp(&b.0.stable_index()))
             });
 
             // Phase 3: Execute strategy decisions
@@ -1245,6 +1274,8 @@ impl BacktestEngine {
                             total_decision_ticks += 1;
                             continue;
                         }
+
+                        *trigger_diag.order_attempted.entry(sid).or_insert(0) += 1;
 
                         // --- Risk pipeline (checked BEFORE execution) ---
 
@@ -1556,6 +1587,8 @@ impl BacktestEngine {
                             continue;
                         }
 
+                        *trigger_diag.risk_passed.entry(sid).or_insert(0) += 1;
+
                         let result = self.simulate_order(
                             direction,
                             effective_lots,
@@ -1566,6 +1599,7 @@ impl BacktestEngine {
                         );
 
                         if result.filled {
+                            *trigger_diag.filled.entry(sid).or_insert(0) += 1;
                             runtime_observability.record_execution_fill(
                                 result.fill_price - result.requested_price,
                                 result.slippage,
@@ -1700,6 +1734,12 @@ impl BacktestEngine {
             prev_tick_ns = tick_ns;
         }
 
+        for trade in &trades {
+            if trade.close_reason.is_some() {
+                *trigger_diag.closed.entry(trade.strategy_id).or_insert(0) += 1;
+            }
+        }
+
         // Close remaining open positions at the last mid price (END_OF_DATA)
         if let Some(last_event) = market_events.last() {
             if let Ok(last_market) = proto::MarketEventPayload::decode(last_event.payload_bytes()) {
@@ -1794,6 +1834,13 @@ impl BacktestEngine {
                 true,
                 &mut state_snapshots_published,
             );
+        }
+
+        trigger_diag.closed.clear();
+        for trade in &trades {
+            if trade.close_reason.is_some() {
+                *trigger_diag.closed.entry(trade.strategy_id).or_insert(0) += 1;
+            }
         }
 
         let wall_time_ms = wall_start.elapsed().as_millis() as u64;
@@ -3938,7 +3985,13 @@ mod tests {
         use fx_strategy::regime::RegimeConfig;
 
         let events = generate_synthetic_ticks(1_000_000_000_000_000, 500, 100, 110.0, 0.01);
-        let mut engine = BacktestEngine::new(default_config());
+        let config = BacktestConfig {
+            start_time_ns: 0,
+            end_time_ns: u64::MAX,
+            rng_seed: Some([42u8; 32]),
+            ..BacktestConfig::default()
+        };
+        let mut engine = BacktestEngine::new(config);
         assert!(!engine.regime_cache().state().is_initialized());
 
         let _result = engine.run_from_events(&events);
@@ -4700,6 +4753,63 @@ mod tests {
             .collect();
         // Even if no positions were open, the mechanism should not panic
         // If positions existed, they should be closed with WEEKEND_HALT
+    }
+
+    #[test]
+    fn test_weekend_revival_restores_grace_period_before_next_episode() {
+        let friday_ns = 1705064400_000_000_000u64; // 2024-01-12T13:00:00Z
+        let monday_ns = 1705284000_000_000_000u64; // 2024-01-15T07:00:00Z
+        let monday_events = generate_synthetic_ticks(monday_ns, 1, 1_000, 110.5, 0.01);
+
+        let config = BacktestConfig {
+            start_time_ns: 0,
+            end_time_ns: u64::MAX,
+            rng_seed: Some([42u8; 32]),
+            ..BacktestConfig::default()
+        };
+        let mut engine = BacktestEngine::new(config);
+        engine.last_tick_ns = friday_ns;
+        {
+            let status = engine.lifecycle_manager.status_mut(StrategyId::A).unwrap();
+            status.alive = false;
+            status.death_reason = Some(fx_risk::lifecycle::DeathReason::LowSharpe);
+            status.total_episodes = 8;
+            status.consecutive_bad_windows = 3;
+            status.rolling_sharpe = -5.0;
+        }
+
+        let _ = engine.run_from_events(&monday_events);
+
+        let revived = engine.lifecycle_manager.status(StrategyId::A).unwrap();
+        assert!(
+            revived.alive,
+            "Strategy A should be revived after weekend gap"
+        );
+        assert_eq!(
+            revived.total_episodes, 0,
+            "Revival should reset episode count before the next completed episode"
+        );
+
+        let state = StateProjector::new(
+            &PartitionedEventBus::new(),
+            engine.config.global_position_limit,
+            1,
+        )
+        .snapshot()
+        .clone();
+        let summary = EpisodeSummary {
+            strategy_id: StrategyId::A,
+            total_reward: -10.0,
+            return_g0: -10.0,
+            duration_ns: 1_000_000_000,
+        };
+        let _ = engine
+            .lifecycle_manager
+            .record_episode(&summary, false, &state);
+        let post_episode = engine.lifecycle_manager.status(StrategyId::A).unwrap();
+        assert!(post_episode.alive);
+        assert_eq!(post_episode.total_episodes, 1);
+        assert_eq!(post_episode.consecutive_bad_windows, 0);
     }
 
     #[test]

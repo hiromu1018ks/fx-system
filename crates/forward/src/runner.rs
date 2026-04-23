@@ -8,6 +8,7 @@ use fx_core::observability::{
     l2_distance, softmax_entropy, AnomalyConfig, ObservabilityManager, PreFailureMetrics,
     RollingStats,
 };
+use fx_core::random::expand_u64_seed;
 use fx_core::types::{Direction, EventTier, StrategyId, StreamId};
 use fx_events::bus::PartitionedEventBus;
 use fx_events::event::{Event, GenericEvent};
@@ -256,7 +257,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
         let exec_config = ExecutionGatewayConfig::default();
         let mut paper_engine = PaperExecutionEngine::new(exec_config, seed);
-        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut rng = SmallRng::from_seed(expand_u64_seed(seed));
 
         let mut feature_extractor = FeatureExtractor::new(Default::default());
         let policy_config = fx_strategy::thompson_sampling::ThompsonSamplingConfig::default();
@@ -866,6 +867,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         self.feed.disconnect().await?;
 
         let elapsed = start.elapsed();
+        let mut strategies_used: Vec<_> = self.config.enabled_strategies.iter().cloned().collect();
+        strategies_used.sort();
         let result = ForwardTestResult {
             total_ticks,
             total_decisions,
@@ -874,7 +877,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             state_snapshots_published,
             duration_secs: elapsed.as_secs_f64(),
             final_pnl: self.tracker.snapshot().cumulative_pnl,
-            strategies_used: self.config.enabled_strategies.iter().cloned().collect(),
+            strategies_used,
         };
 
         info!(

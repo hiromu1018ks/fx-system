@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fx_core::types::StrategyId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -59,6 +60,7 @@ struct BacktestBridgeJson {
     risk_metric_returns: Vec<f64>,
     risk_metric_return_basis: String,
     strategy_breakdown: Vec<BridgeStrategyBreakdown>,
+    strategy_funnel: Vec<StrategyFunnelRow>,
     decision_diagnostics: DecisionDiagnostics,
     num_features: usize,
     execution_stats: BridgeExecutionStats,
@@ -127,6 +129,19 @@ pub struct DecisionDiagnostics {
 pub struct ReasonCount {
     pub reason: String,
     pub count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyFunnelRow {
+    pub strategy: String,
+    pub evaluated: u64,
+    pub triggered: u64,
+    pub idle_triggered: u64,
+    pub decide_called: u64,
+    pub order_attempted: u64,
+    pub risk_passed: u64,
+    pub filled: u64,
+    pub closed: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +220,40 @@ pub fn backtest_risk_metric_summary(result: &BacktestResult) -> RiskMetricSummar
     }
 }
 
+pub fn backtest_strategy_funnel(result: &BacktestResult) -> Vec<StrategyFunnelRow> {
+    StrategyId::all()
+        .iter()
+        .copied()
+        .map(|sid| StrategyFunnelRow {
+            strategy: format!("{:?}", sid),
+            evaluated: *result.trigger_diagnostics.evaluated.get(&sid).unwrap_or(&0),
+            triggered: *result.trigger_diagnostics.triggered.get(&sid).unwrap_or(&0),
+            idle_triggered: *result
+                .trigger_diagnostics
+                .idle_triggered
+                .get(&sid)
+                .unwrap_or(&0),
+            decide_called: *result
+                .trigger_diagnostics
+                .decide_called
+                .get(&sid)
+                .unwrap_or(&0),
+            order_attempted: *result
+                .trigger_diagnostics
+                .order_attempted
+                .get(&sid)
+                .unwrap_or(&0),
+            risk_passed: *result
+                .trigger_diagnostics
+                .risk_passed
+                .get(&sid)
+                .unwrap_or(&0),
+            filled: *result.trigger_diagnostics.filled.get(&sid).unwrap_or(&0),
+            closed: *result.trigger_diagnostics.closed.get(&sid).unwrap_or(&0),
+        })
+        .collect()
+}
+
 impl BacktestBridgeJson {
     fn from_result(r: &BacktestResult) -> Self {
         let trades: Vec<BridgeTrade> = r
@@ -227,8 +276,10 @@ impl BacktestBridgeJson {
         let returns: Vec<f64> = r.trades.iter().map(|t| t.pnl).collect();
         let risk_metric = backtest_risk_metric_summary(r);
         let decision_diagnostics = backtest_decision_diagnostics(r);
+        let strategy_funnel = backtest_strategy_funnel(r);
 
-        let breakdown = fx_backtest::stats::compute_strategy_breakdown(&r.trades);
+        let mut breakdown = fx_backtest::stats::compute_strategy_breakdown(&r.trades);
+        breakdown.sort_by_key(|entry| entry.strategy_id.stable_index());
         let strategy_breakdown: Vec<BridgeStrategyBreakdown> = breakdown
             .iter()
             .map(|b| BridgeStrategyBreakdown {
@@ -261,6 +312,7 @@ impl BacktestBridgeJson {
             risk_metric_returns: risk_metric.returns,
             risk_metric_return_basis: risk_metric.basis.to_string(),
             strategy_breakdown,
+            strategy_funnel,
             decision_diagnostics,
             num_features: FeatureVector::DIM,
             execution_stats: BridgeExecutionStats {
@@ -368,6 +420,7 @@ struct BacktestResultJson {
     risk_metric_returns: Vec<f64>,
     risk_metric_return_basis: String,
     strategy_breakdown: Vec<BridgeStrategyBreakdown>,
+    strategy_funnel: Vec<StrategyFunnelRow>,
     decision_diagnostics: DecisionDiagnostics,
     num_features: usize,
     execution_stats: BridgeExecutionStats,
@@ -392,11 +445,11 @@ impl BacktestResultJson {
             avg_trade_duration_ns: r.summary.avg_trade_duration_ns,
             execution_fill_rate: r.execution_stats.overall_fill_rate,
             execution_avg_slippage: r.execution_stats.avg_slippage,
-            strategies: r
-                .config
-                .enabled_strategies
+            strategies: StrategyId::all()
                 .iter()
-                .map(|s| format!("{:?}", s))
+                .copied()
+                .filter(|sid| r.config.enabled_strategies.contains(sid))
+                .map(|sid| format!("{:?}", sid))
                 .collect(),
             summary: bridge.summary,
             trades: bridge.trades,
@@ -404,6 +457,7 @@ impl BacktestResultJson {
             risk_metric_returns: bridge.risk_metric_returns,
             risk_metric_return_basis: bridge.risk_metric_return_basis,
             strategy_breakdown: bridge.strategy_breakdown,
+            strategy_funnel: bridge.strategy_funnel,
             decision_diagnostics: bridge.decision_diagnostics,
             num_features: bridge.num_features,
             execution_stats: bridge.execution_stats,
@@ -670,6 +724,7 @@ mod tests {
         assert!(parsed["trades"].is_array());
         assert!(parsed["returns"].is_array());
         assert!(parsed["strategy_breakdown"].is_array());
+        assert!(parsed["strategy_funnel"].is_array());
         assert!(parsed["execution_stats"].is_object());
 
         // Verify trades

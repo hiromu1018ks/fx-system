@@ -151,8 +151,8 @@ impl GlobalPositionChecker {
             all_strategy_q.iter().map(|(&id, &q)| (id, q)).collect();
         ranked.sort_by(|a, b| {
             b.1.abs()
-                .partial_cmp(&a.1.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.1.abs())
+                .then_with(|| a.0.stable_index().cmp(&b.0.stable_index()))
         });
 
         let priority_rank = ranked
@@ -617,8 +617,7 @@ mod tests {
     fn priority_equal_q_all_full_lot() {
         let config = default_config();
         let snap = empty_snapshot();
-        // All Q equal → HashMap iteration order is non-deterministic across runs
-        // so we only verify that the order succeeds (some rank is assigned)
+        // All |Q| equal → stable StrategyId ordering should break ties deterministically.
         let q = all_q_flat(0.1);
         let result = GlobalPositionChecker::validate_order(
             &config,
@@ -630,9 +629,8 @@ mod tests {
             &q,
         );
         assert!(result.is_ok());
-        // All Q equal so B may get any rank; just verify it returns a result
         let r = result.unwrap();
-        assert!(r.priority_rank < 3);
+        assert_eq!(r.priority_rank, 1);
     }
 
     // -- check_direction_feasibility ------------------------------------------

@@ -399,7 +399,6 @@ impl StrategyB {
             };
         }
 
-
         // Step 4: Extract extended features
         let phi = self.extract_features(base_features);
 

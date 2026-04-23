@@ -74,8 +74,8 @@ impl Default for StrategyCConfig {
     fn default() -> Self {
         Self {
             session_active_threshold: 0.5,
-            obi_significance_threshold: 0.05,
-            max_session_open_ms: 3_600_000.0, // 1 hour session maturity window
+            obi_significance_threshold: 0.15,
+            max_session_open_ms: 1_200_000.0, // first 20 minutes after session open
             regime_kl_threshold: 1.0,
             max_hold_time_ms: 600_000, // 10 minutes
             decay_rate_c: 0.00005,     // very slow decay (tens-of-minutes scale)
@@ -728,7 +728,7 @@ mod tests {
     fn test_trigger_time_since_open_at_boundary() {
         let strategy = StrategyC::new(make_config());
         let mut fv = make_triggered_features();
-        fv.time_since_open_ms = 7_200_000.0; // at boundary, not strictly <
+        fv.time_since_open_ms = 1_200_000.0; // at boundary, not strictly <
         assert!(!strategy.is_triggered(&fv, 0.5));
     }
 
@@ -1330,8 +1330,8 @@ mod tests {
     fn test_config_defaults() {
         let config = StrategyCConfig::default();
         assert!((config.session_active_threshold - 0.5).abs() < 1e-15);
-        assert!((config.obi_significance_threshold - 0.05).abs() < 1e-15);
-        assert!((config.max_session_open_ms - 3_600_000.0).abs() < 1e-15);
+        assert!((config.obi_significance_threshold - 0.15).abs() < 1e-15);
+        assert!((config.max_session_open_ms - 1_200_000.0).abs() < 1e-15);
         assert!((config.regime_kl_threshold - 1.0).abs() < 1e-15);
         assert_eq!(config.max_hold_time_ms, 600_000);
         assert!((config.decay_rate_c - 0.00005).abs() < 1e-15);

@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use args::{Cli, Commands};
 use chrono::DateTime;
 use clap::Parser;
+use fx_core::random::expand_u64_seed;
 use fx_core::types::StrategyId;
 use fx_events::store::{EventStore, Tier1Store};
 use std::collections::HashSet;
@@ -49,9 +50,7 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
 
     apply_backtest_overrides(&mut config, &cmd)?;
 
-    let mut seed_bytes = [0u8; 32];
-    seed_bytes[..8].copy_from_slice(&cmd.seed.to_le_bytes());
-    config.rng_seed = Some(seed_bytes);
+    apply_backtest_seed_override(&mut config, cmd.seed);
 
     println!("Running streaming backtest on {}", cmd.data.display());
 
@@ -129,10 +128,22 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
         let eval = td.evaluated.get(sid).unwrap_or(&0);
         let trig = td.triggered.get(sid).unwrap_or(&0);
         let idle = td.idle_triggered.get(sid).unwrap_or(&0);
+        let attempted = td.order_attempted.get(sid).unwrap_or(&0);
+        let risk_passed = td.risk_passed.get(sid).unwrap_or(&0);
+        let filled = td.filled.get(sid).unwrap_or(&0);
+        let closed = td.closed.get(sid).unwrap_or(&0);
         println!(
-            "  {:?}: evaluated={}, triggered={}, idle_triggered={}, decide_called={}",
-            sid, eval, trig, idle,
+            "  {:?}: evaluated={}, triggered={}, idle_triggered={}, decide_called={}, order_attempted={}, risk_passed={}, filled={}, closed={}",
+            sid,
+            eval,
+            trig,
+            idle,
             td.decide_called.get(sid).unwrap_or(&0)
+            ,
+            attempted,
+            risk_passed,
+            filled,
+            closed
         );
     }
 
@@ -376,6 +387,15 @@ fn apply_backtest_overrides(
     }
 
     Ok(())
+}
+
+fn apply_backtest_seed_override(
+    config: &mut fx_backtest::engine::BacktestConfig,
+    seed: Option<u64>,
+) {
+    if let Some(seed) = seed {
+        config.rng_seed = Some(expand_u64_seed(seed));
+    }
 }
 
 fn resolve_cli_time_range(
@@ -691,7 +711,7 @@ mod tests {
             dump_features: None,
             import_q_state: None,
             export_q_state: None,
-            seed: 42,
+            seed: Some(42),
         };
 
         apply_backtest_overrides(&mut config, &cmd).unwrap();
@@ -700,5 +720,25 @@ mod tests {
         assert!(config.enabled_strategies.contains(&StrategyId::B));
         assert_eq!(config.start_time_ns, 1_704_067_200_000_000_000);
         assert_eq!(config.end_time_ns, 1_704_067_260_000_000_000);
+    }
+
+    #[test]
+    fn test_apply_backtest_seed_override_preserves_existing_seed_when_omitted() {
+        let mut config = fx_backtest::engine::BacktestConfig::default();
+        config.rng_seed = Some(expand_u64_seed(99));
+
+        apply_backtest_seed_override(&mut config, None);
+
+        assert_eq!(config.rng_seed, Some(expand_u64_seed(99)));
+    }
+
+    #[test]
+    fn test_apply_backtest_seed_override_replaces_existing_seed_when_provided() {
+        let mut config = fx_backtest::engine::BacktestConfig::default();
+        config.rng_seed = Some(expand_u64_seed(99));
+
+        apply_backtest_seed_override(&mut config, Some(7));
+
+        assert_eq!(config.rng_seed, Some(expand_u64_seed(7)));
     }
 }

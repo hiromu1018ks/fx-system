@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use fx_core::types::{Direction, StrategyId};
 use fx_events::projector::StateSnapshot;
@@ -97,6 +97,8 @@ pub struct StrategyLifecycle {
     pub regime_pnl: f64,
     /// Number of episodes in current regime.
     pub regime_episode_count: u32,
+    /// Recent returns used for the configured rolling Sharpe window.
+    rolling_returns: VecDeque<f64>,
 }
 
 impl Default for StrategyLifecycle {
@@ -112,6 +114,7 @@ impl Default for StrategyLifecycle {
             rolling_std_return: 0.0,
             regime_pnl: 0.0,
             regime_episode_count: 0,
+            rolling_returns: VecDeque::new(),
         }
     }
 }
@@ -331,10 +334,6 @@ impl LifecycleManager {
     ///
     /// Resets all lifecycle counters including episode count so the strategy
     /// gets a fresh grace period (`min_episodes_for_eval`) before re-evaluation.
-    /// Without resetting `total_episodes`, the Welford Sharpe computation would
-    /// produce an extremely negative value on the first post-revival episode
-    /// (near-zero std from reset stats vs preserved episode count), causing
-    /// immediate re-culling.
     pub fn revive(&mut self, strategy_id: StrategyId) {
         if let Some(lifecycle) = self.strategies.get_mut(&strategy_id) {
             lifecycle.alive = true;
@@ -347,6 +346,7 @@ impl LifecycleManager {
             lifecycle.rolling_std_return = 0.0;
             lifecycle.regime_pnl = 0.0;
             lifecycle.regime_episode_count = 0;
+            lifecycle.rolling_returns.clear();
         }
     }
 
@@ -384,19 +384,30 @@ fn update_rolling_sharpe(
     summary: &EpisodeSummary,
 ) {
     let ret = summary.return_g0;
+    let rolling_window = config.rolling_window.max(1);
+    lifecycle.rolling_returns.push_back(ret);
+    if lifecycle.rolling_returns.len() > rolling_window {
+        lifecycle.rolling_returns.pop_front();
+    }
 
-    let n = lifecycle.total_episodes;
-    let old_mean = lifecycle.rolling_mean_return;
-    let old_var = lifecycle.rolling_std_return.powi(2);
+    let n = lifecycle.rolling_returns.len();
+    let mean = lifecycle.rolling_returns.iter().sum::<f64>() / n as f64;
+    let variance = if n > 1 {
+        lifecycle
+            .rolling_returns
+            .iter()
+            .map(|value| {
+                let delta = value - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / (n - 1) as f64
+    } else {
+        0.0
+    };
 
-    // Welford online update
-    let new_mean = old_mean + (ret - old_mean) / n as f64;
-    let delta = ret - old_mean;
-    let new_m2 = (if n > 1 { (n - 1) as f64 * old_var } else { 0.0 }) + delta * (ret - new_mean);
-    let new_var = if n > 1 { new_m2 / (n - 1) as f64 } else { 0.0 };
-
-    lifecycle.rolling_mean_return = new_mean;
-    lifecycle.rolling_std_return = new_var.sqrt();
+    lifecycle.rolling_mean_return = mean;
+    lifecycle.rolling_std_return = variance.sqrt();
 
     // Compute annualized Sharpe
     // Use a small floor on std to avoid division by zero when all returns
@@ -613,6 +624,28 @@ mod tests {
 
         let status = mgr.status(StrategyId::A).unwrap();
         assert_eq!(status.total_episodes, 7);
+    }
+
+    #[test]
+    fn test_rolling_sharpe_uses_recent_window_only() {
+        let config = LifecycleConfig {
+            rolling_window: 3,
+            min_episodes_for_eval: 3,
+            sharpe_annualization_factor: 1.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = empty_state();
+
+        for _ in 0..3 {
+            mgr.record_episode(&make_summary(StrategyId::A, -10.0), false, &state);
+        }
+        assert!(mgr.status(StrategyId::A).unwrap().rolling_sharpe < 0.0);
+
+        for _ in 0..3 {
+            mgr.record_episode(&make_summary(StrategyId::A, 10.0), false, &state);
+        }
+        assert!(mgr.status(StrategyId::A).unwrap().rolling_sharpe > 0.0);
     }
 
     #[test]
@@ -1026,6 +1059,32 @@ mod tests {
         mgr.revive(StrategyId::A);
         assert_eq!(mgr.status(StrategyId::A).unwrap().total_episodes, 0);
         assert!(mgr.status(StrategyId::A).unwrap().alive);
+    }
+
+    #[test]
+    fn test_revive_restores_grace_period_even_after_bad_episode() {
+        let config = LifecycleConfig {
+            rolling_window: 3,
+            min_episodes_for_eval: 5,
+            consecutive_death_windows: 2,
+            sharpe_annualization_factor: 1.0,
+            ..default_config()
+        };
+        let mut mgr = LifecycleManager::new(config);
+        let state = empty_state();
+
+        for _ in 0..6 {
+            mgr.record_episode(&make_summary(StrategyId::A, -10.0), false, &state);
+        }
+        assert!(!mgr.is_alive(StrategyId::A));
+
+        mgr.revive(StrategyId::A);
+        mgr.record_episode(&make_summary(StrategyId::A, -10.0), false, &state);
+
+        let status = mgr.status(StrategyId::A).unwrap();
+        assert!(status.alive);
+        assert_eq!(status.total_episodes, 1);
+        assert_eq!(status.consecutive_bad_windows, 0);
     }
 
     // --- Reset ---

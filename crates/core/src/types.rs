@@ -32,4 +32,12 @@ impl StrategyId {
     pub fn all() -> &'static [StrategyId] {
         &[StrategyId::A, StrategyId::B, StrategyId::C]
     }
+
+    pub const fn stable_index(self) -> usize {
+        match self {
+            StrategyId::A => 0,
+            StrategyId::B => 1,
+            StrategyId::C => 2,
+        }
+    }
 }

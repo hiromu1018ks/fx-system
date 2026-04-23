@@ -59,9 +59,9 @@ pub struct BacktestCmd {
     #[arg(long)]
     pub export_q_state: Option<PathBuf>,
 
-    /// RNG seed for reproducibility.
-    #[arg(long, default_value_t = 42)]
-    pub seed: u64,
+    /// RNG seed for reproducibility. When omitted, preserves config/default engine behavior.
+    #[arg(long)]
+    pub seed: Option<u64>,
 }
 
 /// Forward-test subcommand arguments.
@@ -148,7 +148,7 @@ mod tests {
                 assert!(cmd.dump_features.is_none());
                 assert!(cmd.import_q_state.is_none());
                 assert!(cmd.export_q_state.is_none());
-                assert_eq!(cmd.seed, 42);
+                assert_eq!(cmd.seed, None);
             }
             _ => panic!("expected Backtest command"),
         }

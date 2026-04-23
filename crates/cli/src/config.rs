@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fx_core::random::expand_u64_seed;
 use std::path::Path;
 
 use fx_backtest::engine::BacktestConfig;
@@ -54,13 +55,7 @@ pub fn load_backtest_config(path: &Path) -> Result<BacktestConfig> {
         config.end_time_ns = v as u64;
     }
     if let Some(v) = table.get("rng_seed").and_then(|v| v.as_integer()) {
-        let seed = v as u64;
-        let bytes = seed.to_le_bytes();
-        let mut arr = [0u8; 32];
-        for (i, chunk) in bytes.iter().cycle().take(32).enumerate() {
-            arr[i] = *chunk;
-        }
-        config.rng_seed = Some(arr);
+        config.rng_seed = Some(expand_u64_seed(v as u64));
     }
 
     // Strategy A config
