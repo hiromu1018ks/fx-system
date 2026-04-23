@@ -74,15 +74,15 @@ impl Default for StrategyCConfig {
     fn default() -> Self {
         Self {
             session_active_threshold: 0.5,
-            obi_significance_threshold: 0.03,
-            max_session_open_ms: 7_200_000.0, // 2 hour session maturity window
-            regime_kl_threshold: 1.2,
-            max_hold_time_ms: 180_000, // 3 minutes
+            obi_significance_threshold: 0.05,
+            max_session_open_ms: 3_600_000.0, // 1 hour session maturity window
+            regime_kl_threshold: 1.0,
+            max_hold_time_ms: 600_000, // 10 minutes
             decay_rate_c: 0.00005,     // very slow decay (tens-of-minutes scale)
             lambda_reg: 0.01,
             halflife: 500,
             initial_sigma2: 0.01,
-            optimistic_bias: 0.3,
+            optimistic_bias: 0.01,
             non_model_uncertainty_k: 0.1,
             latency_penalty_k: 0.001,
             min_trade_frequency: 0.02,
@@ -92,7 +92,7 @@ impl Default for StrategyCConfig {
             max_lot_size: 1_000_000,
             min_lot_size: 1000,
             consistency_threshold: 0.05,
-            default_lot_size: 1_000,
+            default_lot_size: 100_000,
         }
     }
 }
@@ -259,49 +259,6 @@ impl StrategyC {
         }
     }
 
-    fn position_size(&self, state: &StateSnapshot) -> f64 {
-        state
-            .positions
-            .get(&StrategyId::C)
-            .map(|p| p.size)
-            .unwrap_or(0.0)
-    }
-
-    fn close_action_for_position(&self, state: &StateSnapshot) -> Action {
-        let pos_size = self.position_size(state);
-        if pos_size > f64::EPSILON {
-            Action::Sell(pos_size.abs() as u64)
-        } else if pos_size < -f64::EPSILON {
-            Action::Buy(pos_size.abs() as u64)
-        } else {
-            Action::Hold
-        }
-    }
-
-    fn signal_exit_reason(
-        &self,
-        base_features: &FeatureVector,
-        state: &StateSnapshot,
-        regime_kl: f64,
-    ) -> Option<&'static str> {
-        let pos_size = self.position_size(state);
-        if pos_size.abs() <= f64::EPSILON {
-            return None;
-        }
-
-        if pos_size > 0.0 && base_features.obi < -self.config.obi_significance_threshold {
-            return Some("OBI_REVERSAL close");
-        }
-        if pos_size < 0.0 && base_features.obi > self.config.obi_significance_threshold {
-            return Some("OBI_REVERSAL close");
-        }
-        if !self.is_triggered(base_features, regime_kl) {
-            return Some("TRIGGER_EXIT close");
-        }
-
-        None
-    }
-
     pub fn episode_state(&self) -> &EpisodeStateC {
         &self.episode
     }
@@ -442,26 +399,6 @@ impl StrategyC {
             self.end_episode();
         }
 
-        if self.episode != EpisodeStateC::Idle {
-            if let Some(reason) = self.signal_exit_reason(base_features, state, regime_kl) {
-                let close_action = self.close_action_for_position(state);
-                self.end_episode();
-                return StrategyCDecision {
-                    action: close_action,
-                    q_point: 0.0,
-                    q_sampled: 0.0,
-                    posterior_std: 0.0,
-                    triggered: false,
-                    episode_active: false,
-                    should_close: true,
-                    skip_reason: Some(reason.to_string()),
-                    remaining_hold_time_ms: 0,
-                    hold_degeneration_detected: false,
-                    consistency_fallback: false,
-                };
-            }
-        }
-
         // Step 3: Trigger check (only when idle)
         let is_idle = self.episode == EpisodeStateC::Idle;
         let triggered = self.is_triggered(base_features, regime_kl);
@@ -478,26 +415,6 @@ impl StrategyC {
                 should_close: false,
                 skip_reason: Some("trigger conditions not met".to_string()),
                 remaining_hold_time_ms: 0,
-                hold_degeneration_detected: false,
-                consistency_fallback: false,
-            };
-        }
-
-        // Step 3.5: Active episode with no close signal → hold position
-        // Prevents engine from rejecting directional actions as already_in_position.
-        // Close via MAX_HOLD_TIME (step 1), OBI_REVERSAL, TRIGGER_EXIT (step 2.5), or external.
-        if !is_idle {
-            self.record_trade(false);
-            return StrategyCDecision {
-                action: Action::Hold,
-                q_point: 0.0,
-                q_sampled: 0.0,
-                posterior_std: 0.0,
-                triggered: false,
-                episode_active: true,
-                should_close: false,
-                skip_reason: Some("holding position".to_string()),
-                remaining_hold_time_ms: self.remaining_hold_time_ms(now_ns),
                 hold_degeneration_detected: false,
                 consistency_fallback: false,
             };
@@ -1259,30 +1176,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_active_episode_bypasses_trigger() {
-        let mut strategy = StrategyC::new(make_config());
-        strategy.start_episode(NOW_NS);
-        let state = make_state_with_position(1000.0, NOW_NS);
-
-        let mut features = make_triggered_features();
-        // Ensure OBI does not cause OBI_REVERSAL for long position (obi must be > -0.03)
-        features.obi = 0.1;
-
-        let mut rng = thread_rng();
-        let decision = strategy.decide(
-            &features,
-            &state,
-            0.5,
-            1.0,
-            NOW_NS + 10_000_000_000,
-            &mut rng,
-        );
-        assert!(decision.episode_active);
-        assert_eq!(decision.skip_reason.as_deref(), Some("holding position"));
-        assert!(matches!(decision.action, Action::Hold));
-    }
-
-    #[test]
     fn test_decide_entry_starts_episode() {
         let mut strategy = StrategyC::new(make_config());
         let state = make_state();
@@ -1437,12 +1330,12 @@ mod tests {
     fn test_config_defaults() {
         let config = StrategyCConfig::default();
         assert!((config.session_active_threshold - 0.5).abs() < 1e-15);
-        assert!((config.obi_significance_threshold - 0.03).abs() < 1e-15);
-        assert!((config.max_session_open_ms - 7_200_000.0).abs() < 1e-15);
-        assert!((config.regime_kl_threshold - 1.2).abs() < 1e-15);
-        assert_eq!(config.max_hold_time_ms, 180_000);
+        assert!((config.obi_significance_threshold - 0.05).abs() < 1e-15);
+        assert!((config.max_session_open_ms - 3_600_000.0).abs() < 1e-15);
+        assert!((config.regime_kl_threshold - 1.0).abs() < 1e-15);
+        assert_eq!(config.max_hold_time_ms, 600_000);
         assert!((config.decay_rate_c - 0.00005).abs() < 1e-15);
-        assert_eq!(config.default_lot_size, 1_000);
+        assert_eq!(config.default_lot_size, 100_000);
         assert_eq!(config.max_lot_size, 1_000_000);
         assert_eq!(config.min_lot_size, 1000);
     }
@@ -1458,13 +1351,13 @@ mod tests {
     #[test]
     fn test_lot_sizing_full_multiplier() {
         let strategy = StrategyC::new(make_config());
-        assert_eq!(strategy.compute_lot_size(1.0), 1_000);
+        assert_eq!(strategy.compute_lot_size(1.0), 100_000);
     }
 
     #[test]
     fn test_lot_sizing_half_multiplier() {
         let strategy = StrategyC::new(make_config());
-        assert_eq!(strategy.compute_lot_size(0.5), 500);
+        assert_eq!(strategy.compute_lot_size(0.5), 50_000);
     }
 
     #[test]
@@ -1473,7 +1366,7 @@ mod tests {
             max_lot_size: 500_000,
             ..make_config()
         });
-        assert_eq!(strategy.compute_lot_size(10.0), 10_000);
+        assert_eq!(strategy.compute_lot_size(10.0), 500_000);
     }
 
     #[test]
@@ -1698,42 +1591,6 @@ mod tests {
 
         let decision = strategy.decide(&make_zero_features(), &state, 0.5, 1.0, NOW_NS, &mut rng);
         assert_eq!(decision.remaining_hold_time_ms, 0);
-    }
-
-    #[test]
-    fn test_decision_closes_on_obi_reversal_when_active() {
-        let mut strategy = StrategyC::new(make_config());
-        strategy.start_episode(NOW_NS);
-        let state = make_state_with_position(1000.0, NOW_NS);
-        let mut features = make_triggered_features();
-        features.obi = -0.3;
-        let mut rng = thread_rng();
-
-        let decision = strategy.decide(&features, &state, 0.5, 0.0, NOW_NS + 1, &mut rng);
-
-        assert!(decision.should_close);
-        assert_eq!(decision.skip_reason.as_deref(), Some("OBI_REVERSAL close"));
-        assert!(matches!(decision.action, Action::Sell(1000)));
-        assert_eq!(strategy.episode_state(), &EpisodeStateC::Idle);
-    }
-
-    #[test]
-    fn test_decision_closes_on_trigger_loss_when_active() {
-        let mut strategy = StrategyC::new(make_config());
-        strategy.start_episode(NOW_NS);
-        let state = make_state_with_position(-1000.0, NOW_NS);
-        let mut features = make_triggered_features();
-        features.session_london = 0.0;
-        // Zero OBI to avoid OBI_REVERSAL check (short position with positive OBI triggers reversal)
-        features.obi = 0.0;
-        let mut rng = thread_rng();
-
-        let decision = strategy.decide(&features, &state, 0.5, 0.0, NOW_NS + 1, &mut rng);
-
-        assert!(decision.should_close);
-        assert_eq!(decision.skip_reason.as_deref(), Some("TRIGGER_EXIT close"));
-        assert!(matches!(decision.action, Action::Buy(1000)));
-        assert_eq!(strategy.episode_state(), &EpisodeStateC::Idle);
     }
 
     // === p_trend_c signal weight tests ===

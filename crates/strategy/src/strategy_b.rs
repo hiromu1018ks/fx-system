@@ -72,16 +72,16 @@ pub struct StrategyBConfig {
 impl Default for StrategyBConfig {
     fn default() -> Self {
         Self {
-            vol_spike_threshold: 1.4,
+            vol_spike_threshold: 2.0,
             vol_decaying_threshold: 0.0,
-            obi_alignment_threshold: 0.05,
-            regime_kl_threshold: 1.2,
+            obi_alignment_threshold: 0.1,
+            regime_kl_threshold: 1.0,
             max_hold_time_ms: 300_000,
             decay_rate_b: 0.0001,
             lambda_reg: 0.01,
             halflife: 500,
             initial_sigma2: 0.01,
-            optimistic_bias: 0.3,
+            optimistic_bias: 0.01,
             non_model_uncertainty_k: 0.1,
             latency_penalty_k: 0.001,
             min_trade_frequency: 0.02,
@@ -91,7 +91,7 @@ impl Default for StrategyBConfig {
             max_lot_size: 1_000_000,
             min_lot_size: 1000,
             consistency_threshold: 0.05,
-            default_lot_size: 1_000,
+            default_lot_size: 100_000,
         }
     }
 }
@@ -399,25 +399,6 @@ impl StrategyB {
             };
         }
 
-        // Step 3.5: Active episode with no close signal → hold position
-        // Prevents engine from rejecting directional actions as already_in_position.
-        // Close only via MAX_HOLD_TIME (step 1) or external risk/execution.
-        if !is_idle {
-            self.record_trade(false);
-            return StrategyBDecision {
-                action: Action::Hold,
-                q_point: 0.0,
-                q_sampled: 0.0,
-                posterior_std: 0.0,
-                triggered: false,
-                episode_active: true,
-                should_close: false,
-                skip_reason: Some("holding position".to_string()),
-                remaining_hold_time_ms: self.remaining_hold_time_ms(now_ns),
-                hold_degeneration_detected: false,
-                consistency_fallback: false,
-            };
-        }
 
         // Step 4: Extract extended features
         let phi = self.extract_features(base_features);
@@ -1140,26 +1121,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decide_active_episode_bypasses_trigger() {
-        let mut strategy = StrategyB::new(make_config());
-        strategy.start_episode(NOW_NS);
-        let state = make_state_with_position(1000.0, NOW_NS);
-
-        let mut rng = thread_rng();
-        let decision = strategy.decide(
-            &make_zero_features(),
-            &state,
-            0.5,
-            1.0,
-            NOW_NS + 10_000_000_000,
-            &mut rng,
-        );
-        assert!(decision.episode_active);
-        assert_eq!(decision.skip_reason.as_deref(), Some("holding position"));
-        assert!(matches!(decision.action, Action::Hold));
-    }
-
-    #[test]
     fn test_decide_entry_starts_episode() {
         let mut strategy = StrategyB::new(make_config());
         let state = make_state();
@@ -1313,13 +1274,13 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = StrategyBConfig::default();
-        assert!((config.vol_spike_threshold - 1.4).abs() < 1e-15);
+        assert!((config.vol_spike_threshold - 2.0).abs() < 1e-15);
         assert!((config.vol_decaying_threshold - 0.0).abs() < 1e-15);
-        assert!((config.obi_alignment_threshold - 0.05).abs() < 1e-15);
-        assert!((config.regime_kl_threshold - 1.2).abs() < 1e-15);
+        assert!((config.obi_alignment_threshold - 0.1).abs() < 1e-15);
+        assert!((config.regime_kl_threshold - 1.0).abs() < 1e-15);
         assert_eq!(config.max_hold_time_ms, 300_000);
         assert!((config.decay_rate_b - 0.0001).abs() < 1e-15);
-        assert_eq!(config.default_lot_size, 1_000);
+        assert_eq!(config.default_lot_size, 100_000);
         assert_eq!(config.max_lot_size, 1_000_000);
         assert_eq!(config.min_lot_size, 1000);
     }
@@ -1335,13 +1296,13 @@ mod tests {
     #[test]
     fn test_lot_sizing_full_multiplier() {
         let strategy = StrategyB::new(make_config());
-        assert_eq!(strategy.compute_lot_size(1.0), 1_000);
+        assert_eq!(strategy.compute_lot_size(1.0), 100_000);
     }
 
     #[test]
     fn test_lot_sizing_half_multiplier() {
         let strategy = StrategyB::new(make_config());
-        assert_eq!(strategy.compute_lot_size(0.5), 500);
+        assert_eq!(strategy.compute_lot_size(0.5), 50_000);
     }
 
     #[test]
@@ -1350,7 +1311,7 @@ mod tests {
             max_lot_size: 500_000,
             ..make_config()
         });
-        assert_eq!(strategy.compute_lot_size(10.0), 10_000);
+        assert_eq!(strategy.compute_lot_size(10.0), 500_000);
     }
 
     #[test]

@@ -3170,7 +3170,7 @@ mod tests {
 
         assert_eq!(a_ns, 30_000_000_000u64, "StrategyA max hold = 30s");
         assert_eq!(b_ns, 300_000_000_000u64, "StrategyB max hold = 5min");
-        assert_eq!(c_ns, 180_000_000_000u64, "StrategyC max hold = 3min");
+        assert_eq!(c_ns, 600_000_000_000u64, "StrategyC max hold = 10min");
     }
 
     #[test]
