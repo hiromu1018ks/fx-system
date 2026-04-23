@@ -684,6 +684,13 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 .map(|(strategy_id, _, decision)| (*strategy_id, decision.q_point))
                 .collect();
 
+            // Sort by Q-value descending for priority (matching backtest behavior)
+            strategy_decisions.sort_by(|a, b| {
+                b.2.q_sampled
+                    .total_cmp(&a.2.q_sampled)
+                    .then_with(|| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)))
+            });
+
             for (strategy_id, features, decision) in strategy_decisions {
                 let decision_snapshot = projector.snapshot().clone();
                 let decision_event_id = self.emit_decision_event(
