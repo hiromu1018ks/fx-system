@@ -27,9 +27,11 @@ use fx_risk::global_position::GlobalPositionChecker;
 use fx_risk::kill_switch::KillSwitch;
 use fx_risk::lifecycle::{EpisodeSummary, LifecycleManager};
 use fx_risk::limits::{CloseReason, HierarchicalRiskLimiter, RiskLimitsConfig};
+use fx_strategy::bayesian_lr::QAction;
 use fx_strategy::change_point::ChangePointDetector;
 use fx_strategy::extractor::FeatureExtractor;
 use fx_strategy::features::FeatureVector;
+use fx_strategy::mc_eval::{McEvalConfig, McEvaluator, TerminalReason};
 use fx_strategy::regime::RegimeCache;
 use fx_strategy::thompson_sampling::{compute_dynamic_k, ThompsonDecision, ThompsonSamplingPolicy};
 use prost::Message;
@@ -277,6 +279,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         let mut state_snapshots_published: u64 = 0;
         let mut runtime_observability = RuntimeObservabilityState::default();
         let mut posterior_snapshots: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut mc_evaluator = McEvaluator::new(McEvalConfig {
+            reward: Default::default(),
+        });
 
         let enabled_strategies = self.get_enabled_strategies();
         let mut strategy_runtimes: HashMap<StrategyId, StrategyRuntime> = enabled_strategies
@@ -622,6 +627,18 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         "MAX_HOLD_TIME",
                     ) {
                         total_trades += 1;
+                        // End MC episode and update Q-function
+                        if mc_evaluator.has_active_episode(sid) {
+                            let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
+                            if let Some(q) = q_fn {
+                                let _result = mc_evaluator.end_episode_and_update(
+                                    sid,
+                                    TerminalReason::MaxHoldTimeExceeded,
+                                    tick_ns,
+                                    q,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -668,6 +685,27 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     tick.latency_ms,
                     &mut rng,
                 );
+                // Record MC transition if episode is active
+                if mc_evaluator.has_active_episode(strategy_id) {
+                    let q_action = match &decision.action {
+                        fx_strategy::policy::Action::Buy(_) => QAction::Buy,
+                        fx_strategy::policy::Action::Sell(_) => QAction::Sell,
+                        fx_strategy::policy::Action::Hold => QAction::Hold,
+                    };
+                    let vol_sq = if tick.mid() > 0.0 {
+                        (tick.spread() / tick.mid()).powi(2)
+                    } else {
+                        0.0
+                    };
+                    mc_evaluator.record_transition(
+                        strategy_id,
+                        tick_ns,
+                        q_action,
+                        features.flattened(),
+                        projector.snapshot(),
+                        vol_sq,
+                    );
+                }
                 total_decisions += 1;
                 strategy_decisions.push((strategy_id, features, decision));
             }
@@ -741,6 +779,18 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                             )
                         {
                             total_trades += 1;
+                            // End MC episode and update Q-function
+                            if mc_evaluator.has_active_episode(strategy_id) {
+                                let q_fn = strategy_runtimes.get_mut(&strategy_id).map(|r| r.policy.q_function_mut());
+                                if let Some(q) = q_fn {
+                                    let _result = mc_evaluator.end_episode_and_update(
+                                        strategy_id,
+                                        TerminalReason::PositionClosed,
+                                        tick_ns,
+                                        q,
+                                    );
+                                }
+                            }
                         }
                         continue;
                     }
@@ -896,6 +946,16 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     self.tracker.record_execution_drift(
                         exec_result.fill_price - exec_result.requested_price,
                     );
+                    // Start MC episode on position open
+                    if !mc_evaluator.has_active_episode(strategy_id) {
+                        let equity = projector
+                            .snapshot()
+                            .positions
+                            .get(&strategy_id)
+                            .map(|p| p.realized_pnl + p.unrealized_pnl)
+                            .unwrap_or(0.0);
+                        mc_evaluator.start_episode(strategy_id, tick_ns, equity);
+                    }
                     realized_after - realized_before
                 } else {
                     let skip_snapshot = projector.snapshot().clone();
