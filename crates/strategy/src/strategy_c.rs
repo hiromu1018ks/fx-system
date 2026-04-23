@@ -505,6 +505,19 @@ impl StrategyC {
             self.start_episode(now_ns);
         }
 
+        // Signal-driven exit: when active and Q-function selects the closing direction
+        let pos_size = state
+            .positions
+            .get(&StrategyId::C)
+            .map(|p| p.size)
+            .unwrap_or(0.0);
+        let should_close_signal = !is_idle
+            && match &effective_action {
+                Action::Buy(_) => pos_size < -f64::EPSILON,
+                Action::Sell(_) => pos_size > f64::EPSILON,
+                Action::Hold => false,
+            };
+
         // Hold degeneration monitoring
         let hold_degeneration_detected = self.check_hold_degeneration();
         if hold_degeneration_detected {
@@ -534,8 +547,12 @@ impl StrategyC {
             posterior_std: posterior_stds[&selected_q_action],
             triggered,
             episode_active: self.episode != EpisodeStateC::Idle,
-            should_close: false,
-            skip_reason: None,
+            should_close: should_close_signal,
+            skip_reason: if should_close_signal {
+                Some("TRIGGER_EXIT close".to_string())
+            } else {
+                None
+            },
             remaining_hold_time_ms: self.remaining_hold_time_ms(now_ns),
             hold_degeneration_detected,
             consistency_fallback,
