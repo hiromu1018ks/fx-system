@@ -329,13 +329,19 @@ impl LifecycleManager {
 
     /// Manually revive a culled strategy (operator action).
     ///
-    /// Resets all lifecycle counters but preserves episode history.
+    /// Resets all lifecycle counters including episode count so the strategy
+    /// gets a fresh grace period (`min_episodes_for_eval`) before re-evaluation.
+    /// Without resetting `total_episodes`, the Welford Sharpe computation would
+    /// produce an extremely negative value on the first post-revival episode
+    /// (near-zero std from reset stats vs preserved episode count), causing
+    /// immediate re-culling.
     pub fn revive(&mut self, strategy_id: StrategyId) {
         if let Some(lifecycle) = self.strategies.get_mut(&strategy_id) {
             lifecycle.alive = true;
             lifecycle.consecutive_bad_windows = 0;
             lifecycle.death_reason = None;
             lifecycle.death_timestamp_ns = None;
+            lifecycle.total_episodes = 0;
             lifecycle.rolling_sharpe = 0.0;
             lifecycle.rolling_mean_return = 0.0;
             lifecycle.rolling_std_return = 0.0;
@@ -1002,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn test_revive_preserves_episode_count() {
+    fn test_revive_resets_episode_count_for_fresh_grace_period() {
         let config = LifecycleConfig {
             min_episodes_for_eval: 5,
             consecutive_death_windows: 3,
@@ -1018,7 +1024,8 @@ mod tests {
         assert_eq!(mgr.status(StrategyId::A).unwrap().total_episodes, 8);
 
         mgr.revive(StrategyId::A);
-        assert_eq!(mgr.status(StrategyId::A).unwrap().total_episodes, 8);
+        assert_eq!(mgr.status(StrategyId::A).unwrap().total_episodes, 0);
+        assert!(mgr.status(StrategyId::A).unwrap().alive);
     }
 
     // --- Reset ---
