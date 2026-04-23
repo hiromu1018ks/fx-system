@@ -58,6 +58,10 @@ pub struct BacktestCmd {
     /// Path to write the learned Q-state snapshot after the run (.json or .bin).
     #[arg(long)]
     pub export_q_state: Option<PathBuf>,
+
+    /// RNG seed for reproducibility.
+    #[arg(long, default_value_t = 42)]
+    pub seed: u64,
 }
 
 /// Forward-test subcommand arguments.
@@ -144,6 +148,7 @@ mod tests {
                 assert!(cmd.dump_features.is_none());
                 assert!(cmd.import_q_state.is_none());
                 assert!(cmd.export_q_state.is_none());
+                assert_eq!(cmd.seed, 42);
             }
             _ => panic!("expected Backtest command"),
         }

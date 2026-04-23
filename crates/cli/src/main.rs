@@ -49,6 +49,10 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
 
     apply_backtest_overrides(&mut config, &cmd)?;
 
+    let mut seed_bytes = [0u8; 32];
+    seed_bytes[..8].copy_from_slice(&cmd.seed.to_le_bytes());
+    config.rng_seed = Some(seed_bytes);
+
     println!("Running streaming backtest on {}", cmd.data.display());
 
     let start = std::time::Instant::now();
@@ -687,6 +691,7 @@ mod tests {
             dump_features: None,
             import_q_state: None,
             export_q_state: None,
+            seed: 42,
         };
 
         apply_backtest_overrides(&mut config, &cmd).unwrap();
