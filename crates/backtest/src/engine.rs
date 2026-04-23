@@ -699,7 +699,7 @@ impl BacktestEngine {
 
         let wall_time_ms = wall_start.elapsed().as_millis() as u64;
         let summary = TradeSummary::from_trades(&all_trades);
-        let execution_stats = ExecutionStats::empty();
+        let execution_stats = self.collect_execution_stats(&all_trades);
 
         info!(
             total_ticks,
@@ -1596,6 +1596,7 @@ impl BacktestEngine {
                             mid_price,
                             volatility,
                             tick_ns,
+                            decision.q_sampled,
                         );
 
                         if result.filled {
@@ -1765,6 +1766,7 @@ impl BacktestEngine {
                         last_mid,
                         last_vol,
                         last_ns,
+                        0.0,
                     );
 
                     if result.filled {
@@ -2098,6 +2100,7 @@ impl BacktestEngine {
                 mid_price,
                 volatility,
                 tick_ns,
+                0.0,
             );
 
             if result.filled {
@@ -2174,7 +2177,7 @@ impl BacktestEngine {
         };
         let lots = pos.size.abs() as u64;
 
-        let result = self.simulate_order(direction, lots, sid, mid_price, volatility, tick_ns);
+        let result = self.simulate_order(direction, lots, sid, mid_price, volatility, tick_ns, 0.0);
         let mut snapshot_parent = parent_event_id;
 
         if result.filled {
@@ -2605,6 +2608,7 @@ impl BacktestEngine {
         mid_price: f64,
         volatility: f64,
         timestamp_ns: u64,
+        expected_profit: f64,
     ) -> ExecutionResult {
         let request = ExecutionRequest {
             direction,
@@ -2612,7 +2616,7 @@ impl BacktestEngine {
             strategy_id,
             current_mid_price: mid_price,
             volatility,
-            expected_profit: 0.0,
+            expected_profit,
             symbol: self.config.symbol.clone(),
             timestamp_ns,
             time_urgent: false,
