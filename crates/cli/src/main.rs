@@ -132,18 +132,25 @@ fn run_backtest(cmd: args::BacktestCmd) -> Result<()> {
         let risk_passed = td.risk_passed.get(sid).unwrap_or(&0);
         let filled = td.filled.get(sid).unwrap_or(&0);
         let closed = td.closed.get(sid).unwrap_or(&0);
+        let strat_skips: Vec<String> = diagnostics
+            .skip_reasons_by_strategy
+            .iter()
+            .filter(|s| s.strategy == format!("{:?}", sid))
+            .flat_map(|s| s.reasons.iter().take(3).map(|r| format!("{}={}", r.reason, r.count)))
+            .collect();
+        let skip_str = if strat_skips.is_empty() { String::new() } else { format!(" | skips: {}", strat_skips.join(", ")) };
         println!(
-            "  {:?}: evaluated={}, triggered={}, idle_triggered={}, decide_called={}, order_attempted={}, risk_passed={}, filled={}, closed={}",
+            "  {:?}: evaluated={}, triggered={}, idle_triggered={}, decide_called={}, order_attempted={}, risk_passed={}, filled={}, closed={}{}",
             sid,
             eval,
             trig,
             idle,
-            td.decide_called.get(sid).unwrap_or(&0)
-            ,
+            td.decide_called.get(sid).unwrap_or(&0),
             attempted,
             risk_passed,
             filled,
-            closed
+            closed,
+            skip_str,
         );
     }
 

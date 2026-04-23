@@ -123,6 +123,13 @@ pub struct DecisionDiagnostics {
     pub hold_events: u64,
     pub close_trades: u64,
     pub skip_reasons: Vec<ReasonCount>,
+    pub skip_reasons_by_strategy: Vec<StrategySkipReasons>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategySkipReasons {
+    pub strategy: String,
+    pub reasons: Vec<ReasonCount>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -189,6 +196,35 @@ pub fn backtest_decision_diagnostics(result: &BacktestResult) -> DecisionDiagnos
         .collect();
     skip_reasons.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.reason.cmp(&b.reason)));
 
+    let mut skip_reasons_by_strategy: Vec<StrategySkipReasons> = StrategyId::all()
+        .iter()
+        .copied()
+        .map(|sid| {
+            let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+            for reason in result
+                .decisions
+                .iter()
+                .filter(|d| d.strategy_id == sid)
+                .filter_map(|d| d.skip_reason.as_ref())
+                .cloned()
+            {
+                *counts.entry(reason).or_insert(0) += 1;
+            }
+            let mut reasons: Vec<ReasonCount> = counts
+                .into_iter()
+                .map(|(reason, count)| ReasonCount { reason, count })
+                .collect();
+            reasons.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.reason.cmp(&b.reason)));
+            StrategySkipReasons {
+                strategy: format!("{:?}", sid),
+                reasons,
+            }
+        })
+        .collect();
+
+    skip_reasons_by_strategy
+        .retain(|s| !s.reasons.is_empty());
+
     DecisionDiagnostics {
         total_recorded_decisions,
         triggered_decisions,
@@ -197,6 +233,7 @@ pub fn backtest_decision_diagnostics(result: &BacktestResult) -> DecisionDiagnos
         hold_events,
         close_trades,
         skip_reasons,
+        skip_reasons_by_strategy,
     }
 }
 
