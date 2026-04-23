@@ -468,6 +468,21 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     tick.symbol.clone(),
                     &mut total_trades,
                 )?;
+                // End MC episodes for all strategies that were force-closed
+                let terminal = match reason {
+                    CloseReason::DailyRealizedHalt => TerminalReason::DailyHardLimit,
+                    CloseReason::WeeklyHalt => TerminalReason::WeeklyHardLimit,
+                    CloseReason::MonthlyHalt => TerminalReason::MonthlyHardLimit,
+                    CloseReason::WeekendHalt => TerminalReason::WeekendHalt,
+                };
+                for &sid in &enabled_strategies {
+                    if mc_evaluator.has_active_episode(sid) {
+                        let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
+                        if let Some(q) = q_fn {
+                            let _ = mc_evaluator.end_episode_and_update(sid, terminal, tick_ns, q);
+                        }
+                    }
+                }
                 self.maybe_emit_snapshot_event(
                     &mut runtime_sequencer,
                     &projector,
@@ -1006,6 +1021,20 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 self.default_symbol(),
                 &mut total_trades,
             )?;
+            // End MC episodes for shutdown-closed positions
+            for &sid in &enabled_strategies {
+                if mc_evaluator.has_active_episode(sid) {
+                    let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
+                    if let Some(q) = q_fn {
+                        let _ = mc_evaluator.end_episode_and_update(
+                            sid,
+                            TerminalReason::PositionClosed,
+                            shutdown_ts,
+                            q,
+                        );
+                    }
+                }
+            }
             self.maybe_emit_snapshot_event(
                 &mut runtime_sequencer,
                 &projector,
