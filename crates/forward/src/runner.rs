@@ -1885,4 +1885,163 @@ mod tests {
 
         assert_eq!(r1.total_ticks, r2.total_ticks);
     }
+
+    // -- PIT / information leakage regression tests --
+
+    /// Verify that execution features are zero within the lag window when
+    /// paper execution events are fed to the FeatureExtractor, matching the
+    /// same PIT guarantee that backtest provides.
+    #[test]
+    fn test_pit_execution_features_lagged_after_paper_fill() {
+        use fx_core::types::{Direction, EventTier, StreamId};
+        use fx_execution::gateway::ExecutionGatewayConfig;
+        use fx_events::header::EventHeader;
+        use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
+        use fx_core::types::StrategyId;
+        use prost::Message;
+
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
+            execution_lag_ns: 100_000_000, // 100ms lag for test
+            ..Default::default()
+        });
+        let mut paper_engine =
+            crate::paper::PaperExecutionEngine::new(ExecutionGatewayConfig::default(), 42);
+
+        // Create a market event from tick data
+        let tick = make_tick(1_000_000, 110.0, 110.005);
+        let proto = tick.to_proto();
+        let payload = proto.encode_to_vec();
+        let header = EventHeader::new(StreamId::Market, 0, EventTier::Tier3Raw);
+        let market_event = GenericEvent::new(
+            EventHeader { timestamp_ns: tick.timestamp_ns, ..header },
+            payload,
+        );
+        extractor.process_market_event(&market_event);
+
+        // Execute a paper order
+        let request = ExecutionRequest {
+            direction: Direction::Buy,
+            lots: 100_000,
+            strategy_id: StrategyId::A,
+            current_mid_price: 110.0,
+            volatility: 0.001,
+            expected_profit: 0.0002,
+            symbol: "EUR/USD".to_string(),
+            timestamp_ns: 1_000_000,
+            time_urgent: false,
+        };
+        let (_paper_result, exec_result) = paper_engine.simulate(&request).unwrap();
+
+        // Build execution event and feed to extractor
+        let exec_event = paper_engine.build_execution_event(&request, &exec_result);
+        extractor.process_execution_event(&exec_event);
+
+        // Query features at the SAME timestamp (within lag window)
+        let snap = fx_events::projector::StateSnapshot {
+            positions: HashMap::new(),
+            global_position: 0.0,
+            global_position_limit: 10.0,
+            total_unrealized_pnl: 0.0,
+            total_realized_pnl: 0.0,
+            limit_state: fx_events::projector::LimitStateData::default(),
+            state_version: 0,
+            staleness_ms: 0,
+            state_hash: String::new(),
+            lot_multiplier: 1.0,
+            last_market_data_ns: 1_000_000,
+        };
+        let features = extractor.extract(&market_event, &snap, StrategyId::A, 1_000_000);
+
+        // PIT assertion: execution features must be zero within the lag window
+        assert!(
+            (features.recent_fill_rate - 0.0).abs() < 1e-10,
+            "PIT violation: fill rate must be 0 within lag window, got {}",
+            features.recent_fill_rate
+        );
+        assert!(
+            (features.recent_slippage - 0.0).abs() < 1e-10,
+            "PIT violation: slippage must be 0 within lag window, got {}",
+            features.recent_slippage
+        );
+        assert!(
+            (features.recent_reject_rate - 0.0).abs() < 1e-10,
+            "PIT violation: reject rate must be 0 within lag window, got {}",
+            features.recent_reject_rate
+        );
+        assert!(
+            (features.execution_drift_trend - 0.0).abs() < 1e-10,
+            "PIT violation: execution drift must be 0 within lag window, got {}",
+            features.execution_drift_trend
+        );
+    }
+
+    /// Verify that execution features become visible AFTER the lag window expires,
+    /// confirming the lag mechanism works correctly with paper execution events.
+    #[test]
+    fn test_pit_execution_features_visible_after_lag_expires() {
+        use fx_core::types::{Direction, EventTier, StreamId};
+        use fx_execution::gateway::ExecutionGatewayConfig;
+        use fx_events::header::EventHeader;
+        use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
+        use fx_core::types::StrategyId;
+        use prost::Message;
+
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
+            execution_lag_ns: 100_000_000, // 100ms lag for test
+            ..Default::default()
+        });
+        let mut paper_engine =
+            crate::paper::PaperExecutionEngine::new(ExecutionGatewayConfig::default(), 42);
+
+        // Execute at t=1,000,000 (1ms)
+        let request = ExecutionRequest {
+            direction: Direction::Buy,
+            lots: 100_000,
+            strategy_id: StrategyId::A,
+            current_mid_price: 110.0,
+            volatility: 0.001,
+            expected_profit: 0.0002,
+            symbol: "EUR/USD".to_string(),
+            timestamp_ns: 1_000_000,
+            time_urgent: false,
+        };
+        let (_paper_result, exec_result) = paper_engine.simulate(&request).unwrap();
+        let exec_event = paper_engine.build_execution_event(&request, &exec_result);
+        extractor.process_execution_event(&exec_event);
+
+        // Advance time past lag window: 200ms > 100ms lag
+        let tick_late = make_tick(200_000_000, 110.0, 110.005);
+        let proto_late = tick_late.to_proto();
+        let payload_late = proto_late.encode_to_vec();
+        let header_late = EventHeader::new(StreamId::Market, 1, EventTier::Tier3Raw);
+        let market_event_late = GenericEvent::new(
+            EventHeader { timestamp_ns: tick_late.timestamp_ns, ..header_late },
+            payload_late,
+        );
+        extractor.process_market_event(&market_event_late);
+
+        let snap = fx_events::projector::StateSnapshot {
+            positions: HashMap::new(),
+            global_position: 0.0,
+            global_position_limit: 10.0,
+            total_unrealized_pnl: 0.0,
+            total_realized_pnl: 0.0,
+            limit_state: fx_events::projector::LimitStateData::default(),
+            state_version: 0,
+            staleness_ms: 0,
+            state_hash: String::new(),
+            lot_multiplier: 1.0,
+            last_market_data_ns: 200_000_000,
+        };
+        let features = extractor.extract(&market_event_late, &snap, StrategyId::A, 200_000_000);
+
+        // After lag expires, fill rate should be visible (if the order was filled)
+        if exec_result.fill_status == fx_execution::gateway::FillOutcome::Filled {
+            assert!(
+                features.recent_fill_rate > 0.0,
+                "PIT: fill rate should be visible after lag expires, got {}",
+                features.recent_fill_rate
+            );
+        }
+    }
 }
