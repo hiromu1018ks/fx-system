@@ -1636,4 +1636,52 @@ mod tests {
             p
         );
     }
+
+    /// Diagnostic: verify Strategy A trigger conditions require genuine liquidity shock.
+    /// This test documents WHY Strategy A is inactive under normal market conditions:
+    /// all four conditions (spread_z > 2, depth_drop < -0.1, vol_ratio > 2, regime_kl < 1)
+    /// must be met simultaneously — designed for rare events only.
+    #[test]
+    fn test_strategy_a_trigger_requires_genuine_shock() {
+        let strategy = StrategyA::new(make_config());
+
+        // Normal market conditions: should NOT trigger
+        let normal = FeatureVector {
+            spread_zscore: 0.5,
+            depth_change_rate: -0.02,
+            volatility_ratio: 1.1,
+            ..make_zero_features()
+        };
+        assert!(!strategy.is_triggered(&normal, 0.5), "normal conditions should not trigger A");
+
+        // Moderate stress: spread widening but no depth drop
+        let moderate_spread = FeatureVector {
+            spread_zscore: 2.5,
+            depth_change_rate: -0.05,
+            volatility_ratio: 1.5,
+            ..make_zero_features()
+        };
+        assert!(
+            !strategy.is_triggered(&moderate_spread, 0.5),
+            "moderate stress without full shock should not trigger A"
+        );
+
+        // Genuine liquidity shock: all conditions met
+        let shock = FeatureVector {
+            spread_zscore: 3.0,
+            depth_change_rate: -0.3,
+            volatility_ratio: 3.0,
+            ..make_zero_features()
+        };
+        assert!(
+            strategy.is_triggered(&shock, 0.5),
+            "genuine liquidity shock should trigger A"
+        );
+
+        // Shock with unknown regime: should NOT trigger
+        assert!(
+            !strategy.is_triggered(&shock, 1.5),
+            "shock in unknown regime (kl > 1.0) should not trigger A"
+        );
+    }
 }
