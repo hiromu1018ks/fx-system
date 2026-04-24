@@ -27,6 +27,11 @@ pub struct GlobalPositionConfig {
     pub lot_unit_size: f64,
     /// Minimum lot size below which a reduced order is blocked.
     pub min_lot_size: f64,
+    /// Utilization ratio below which priority-based lot reduction is skipped.
+    /// When `|current_global_position| / global_limit < soft_cap_threshold`,
+    /// all strategies receive their full requested lot regardless of rank.
+    /// Default: 0.7 (reduction only activates above 70% utilization).
+    pub soft_cap_threshold: f64,
 }
 
 impl Default for GlobalPositionConfig {
@@ -41,6 +46,7 @@ impl Default for GlobalPositionConfig {
             floor_correlation: 1.5,
             lot_unit_size: 100_000.0,
             min_lot_size: 1_000.0,
+            soft_cap_threshold: 0.7,
         }
     }
 }
@@ -161,8 +167,13 @@ impl GlobalPositionChecker {
             .unwrap_or(ranked.len());
         let total_strategies = ranked.len();
 
-        // Priority-based lot reduction
-        let effective_lot = if priority_rank == 0 {
+        // Priority-based lot reduction (soft-cap: only when near the limit)
+        let utilization = if global_limit > 0.0 {
+            current_pos.abs() / global_limit
+        } else {
+            1.0
+        };
+        let effective_lot = if priority_rank == 0 || utilization < config.soft_cap_threshold {
             requested_lot
         } else {
             let factor = Self::compute_priority_lot_factor(priority_rank);
@@ -536,7 +547,8 @@ mod tests {
     #[test]
     fn priority_rank_1_half_lot() {
         let config = default_config();
-        let snap = empty_snapshot();
+        // utilization = 8.0/10.0 = 0.8 > soft_cap_threshold(0.7) → reduction active
+        let snap = snapshot_with_global(8.0);
         // Strategy B is rank 1
         let q = all_q(0.5, 0.1, 0.05);
         let result = GlobalPositionChecker::validate_order(
@@ -557,7 +569,8 @@ mod tests {
     #[test]
     fn priority_rank_2_quarter_lot() {
         let config = default_config();
-        let snap = empty_snapshot();
+        // utilization = 8.0/10.0 = 0.8 > soft_cap_threshold(0.7) → reduction active
+        let snap = snapshot_with_global(8.0);
         // Strategy C is rank 2
         let q = all_q(0.5, 0.1, 0.05);
         let result = GlobalPositionChecker::validate_order(
@@ -579,7 +592,8 @@ mod tests {
     fn priority_blocked_below_min_lot() {
         let mut config = default_config();
         config.min_lot_size = 30_000.0;
-        let snap = empty_snapshot();
+        // utilization = 8.0/10.0 = 0.8 > soft_cap_threshold(0.7) → reduction active
+        let snap = snapshot_with_global(8.0);
         // Strategy C is rank 2 → 100k * 0.25 = 25k < 30k → blocked
         let q = all_q(0.5, 0.1, 0.05);
         let result = GlobalPositionChecker::validate_order(
@@ -592,6 +606,133 @@ mod tests {
             &q,
         );
         assert!(result.is_err());
+    }
+
+    // -- Soft-cap tests --------------------------------------------------------
+
+    #[test]
+    fn soft_cap_low_utilization_full_lot_rank_1() {
+        let config = default_config();
+        // utilization = 0.0/10.0 = 0.0 < soft_cap_threshold(0.7) → no reduction
+        let snap = empty_snapshot();
+        let q = all_q(0.5, 0.1, 0.05);
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::B,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.priority_rank, 1);
+        assert!(
+            (r.effective_lot - 100_000.0).abs() < f64::EPSILON,
+            "low utilization: rank 1 should get full lot, got {}",
+            r.effective_lot
+        );
+    }
+
+    #[test]
+    fn soft_cap_low_utilization_full_lot_rank_2() {
+        let config = default_config();
+        // utilization = 3.0/10.0 = 0.3 < soft_cap_threshold(0.7) → no reduction
+        let snap = snapshot_with_global(3.0);
+        let q = all_q(0.5, 0.1, 0.05);
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::C,
+            Direction::Buy,
+            100_000.0,
+            0.05,
+            &q,
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.priority_rank, 2);
+        assert!(
+            (r.effective_lot - 100_000.0).abs() < f64::EPSILON,
+            "low utilization: rank 2 should get full lot, got {}",
+            r.effective_lot
+        );
+    }
+
+    #[test]
+    fn soft_cap_boundary_threshold() {
+        let mut config = default_config();
+        config.soft_cap_threshold = 0.5;
+        // utilization = 5.0/10.0 = 0.5 → exactly at threshold, reduction active
+        let snap = snapshot_with_global(5.0);
+        let q = all_q(0.5, 0.1, 0.05);
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::B,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(
+            (r.effective_lot - 50_000.0).abs() < f64::EPSILON,
+            "at threshold boundary: rank 1 should get reduced lot, got {}",
+            r.effective_lot
+        );
+    }
+
+    #[test]
+    fn soft_cap_just_below_threshold_full_lot() {
+        let mut config = default_config();
+        config.soft_cap_threshold = 0.5;
+        // utilization = 4.9/10.0 = 0.49 < 0.5 → below threshold, no reduction
+        let snap = snapshot_with_global(4.9);
+        let q = all_q(0.5, 0.1, 0.05);
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::B,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(
+            (r.effective_lot - 100_000.0).abs() < f64::EPSILON,
+            "just below threshold: rank 1 should get full lot, got {}",
+            r.effective_lot
+        );
+    }
+
+    #[test]
+    fn soft_cap_disabled_always_reduces() {
+        let mut config = default_config();
+        config.soft_cap_threshold = 0.0;
+        // utilization = 0.0/10.0 = 0.0, but threshold = 0.0 → 0.0 < 0.0 is false → reduction active
+        let snap = empty_snapshot();
+        let q = all_q(0.5, 0.1, 0.05);
+        let result = GlobalPositionChecker::validate_order(
+            &config,
+            &snap,
+            StrategyId::B,
+            Direction::Buy,
+            100_000.0,
+            0.1,
+            &q,
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert!(
+            (r.effective_lot - 50_000.0).abs() < f64::EPSILON,
+            "threshold=0: should always reduce, got {}",
+            r.effective_lot
+        );
     }
 
     #[test]
@@ -979,11 +1120,12 @@ mod tests {
         );
     }
 
-    /// §9.5: 下位戦略のロット削減（0.5^n）を確認
+    /// §9.5: 下位戦略のロット削減（0.5^n）を確認（high utilization時）
     #[test]
     fn s9_5_lower_priority_strategies_get_reduced_lots() {
         let config = default_config();
-        let snap = empty_snapshot();
+        // utilization = 8.0/10.0 = 0.8 > soft_cap_threshold(0.7) → reduction active
+        let snap = snapshot_with_global(8.0);
         let q = all_q(0.5, 0.1, 0.05);
 
         // Strategy B: rank 1 → 50%

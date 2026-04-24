@@ -4651,6 +4651,7 @@ mod tests {
                 strategy_max_positions: std::collections::HashMap::new(),
                 lot_unit_size: 0.01,
                 min_lot_size: 0.01,
+                soft_cap_threshold: 0.7,
             },
             ..default_config()
         };

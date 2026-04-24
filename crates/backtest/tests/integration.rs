@@ -1318,9 +1318,10 @@ fn test_multi_strategy_global_limit_blocks_excess() {
 fn test_multi_strategy_priority_lot_reduction() {
     let global_config = GlobalPositionConfig::default();
 
+    // Use high utilization (8.0/10.0 = 0.8 > soft_cap_threshold 0.7) to activate reduction
     let snap = fx_events::projector::StateSnapshot {
         positions: HashMap::new(),
-        global_position: 0.0,
+        global_position: 8.0,
         global_position_limit: 10.0,
         total_unrealized_pnl: 0.0,
         total_realized_pnl: 0.0,
