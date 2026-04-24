@@ -39,3 +39,9 @@ config/
 # Large files
 *.tar.gz
 USDJPY_Ticks_2024.04.20_2026.04.20.csv
+
+# Runtime state files
+closed
+filled
+order_attempted
+risk_passed

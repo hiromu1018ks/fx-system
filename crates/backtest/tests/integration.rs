@@ -3803,16 +3803,7 @@ fn test_learning_off_freezes_q_function() {
     use fx_backtest::engine::{generate_synthetic_ticks, BacktestConfig, BacktestEngine};
 
     let ns_base = 1_700_000_000_000_000u64;
-    let events = generate_synthetic_ticks(ns_base, 2000, 100, 110.0, 0.005);
-
-    // Run with learning ON (baseline)
-    let config_on = BacktestConfig {
-        rng_seed: Some([42u8; 32]),
-        learning_enabled: true,
-        ..BacktestConfig::default()
-    };
-    let mut engine_on = BacktestEngine::new(config_on);
-    let stats_on = engine_on.run_from_events(&events);
+    let events = generate_synthetic_ticks(ns_base, 50_000, 100, 110.0, 0.05);
 
     // Run with learning OFF
     let config_off = BacktestConfig {
@@ -3821,20 +3812,142 @@ fn test_learning_off_freezes_q_function() {
         ..BacktestConfig::default()
     };
     let mut engine_off = BacktestEngine::new(config_off);
+    let initial_off_q_state = engine_off.export_q_state();
     let stats_off = engine_off.run_from_events(&events);
 
-    // Both should complete without error regardless of trade count
-    assert_eq!(stats_on.total_ticks, stats_off.total_ticks);
+    assert_eq!(
+        engine_off.export_q_state(),
+        initial_off_q_state,
+        "learning OFF must preserve the imported/initial Q-state exactly"
+    );
+
+    for sid in [StrategyId::A, StrategyId::B, StrategyId::C] {
+        let off_status = engine_off.lifecycle_manager().status(sid).unwrap();
+        assert_eq!(
+            off_status.total_episodes, 0,
+            "learning OFF must not mutate lifecycle episode counts for {:?}",
+            sid
+        );
+        assert!(
+            off_status.alive,
+            "learning OFF must not cull strategies during frozen evaluation for {:?}",
+            sid
+        );
+    }
 
     // Learning OFF should be deterministic: two runs with same seed produce
-    // identical results (Q-function never changes).
+    // identical results because the policy state never changes.
     let config_off2 = BacktestConfig {
         rng_seed: Some([42u8; 32]),
         learning_enabled: false,
         ..BacktestConfig::default()
     };
     let mut engine_off2 = BacktestEngine::new(config_off2);
+    let initial_off2_q_state = engine_off2.export_q_state();
     let stats_off2 = engine_off2.run_from_events(&events);
+    assert_eq!(stats_off.total_ticks, stats_off2.total_ticks);
     assert_eq!(stats_off.trades.len(), stats_off2.trades.len());
     assert_eq!(stats_off.decisions.len(), stats_off2.decisions.len());
+    assert_eq!(
+        engine_off2.export_q_state(),
+        initial_off2_q_state,
+        "repeated frozen runs must leave Q-state unchanged"
+    );
+}
+
+#[test]
+fn test_imported_q_state_supports_warm_continuing_and_frozen_runs() {
+    use fx_backtest::engine::{generate_synthetic_ticks, BacktestConfig, BacktestEngine};
+
+    let test = generate_synthetic_ticks(1_700_100_000_000_000, 20_000, 100, 110.2, 0.05);
+    let permissive_strategy_c = StrategyCConfig {
+        session_active_threshold: -1.0,
+        obi_significance_threshold: 0.0,
+        max_session_open_ms: f64::MAX,
+        regime_kl_threshold: f64::MAX,
+        max_hold_time_ms: 1_000,
+        ..StrategyCConfig::default()
+    };
+    let permissive_risk_limits = RiskLimitsConfig {
+        max_daily_loss_mtm: -1_000_000.0,
+        max_daily_loss_realized: -1_000_000.0,
+        max_weekly_loss: -1_000_000.0,
+        max_monthly_loss: -1_000_000.0,
+        ..RiskLimitsConfig::default()
+    };
+    let base_config = BacktestConfig {
+        rng_seed: Some([7u8; 32]),
+        enabled_strategies: std::iter::once(StrategyId::C).collect(),
+        strategy_c_config: permissive_strategy_c,
+        risk_limits_config: permissive_risk_limits,
+        ..BacktestConfig::default()
+    };
+    let mut trained_q_state = BacktestEngine::new(BacktestConfig {
+        learning_enabled: true,
+        ..base_config.clone()
+    })
+    .export_q_state();
+    let mut pretrained_strategy_c = StrategyC::new(base_config.strategy_c_config.clone());
+    let warm_start_phi = vec![1.0; fx_strategy::strategy_c::STRATEGY_C_FEATURE_DIM];
+    for _ in 0..128 {
+        pretrained_strategy_c
+            .q_function_mut()
+            .update(QAction::Buy, &warm_start_phi, 10.0);
+        pretrained_strategy_c
+            .q_function_mut()
+            .update(QAction::Hold, &warm_start_phi, -10.0);
+    }
+    trained_q_state
+        .strategies
+        .iter_mut()
+        .find(|snapshot| snapshot.strategy_id == StrategyId::C)
+        .unwrap()
+        .q_function = pretrained_strategy_c.q_function().snapshot();
+
+    let mut warm_learning = BacktestEngine::new(BacktestConfig {
+        learning_enabled: true,
+        ..base_config.clone()
+    });
+    warm_learning.import_q_state(&trained_q_state).unwrap();
+    let warm_learning_initial = warm_learning.export_q_state();
+    let warm_learning_result = warm_learning.run_from_events(&test);
+
+    let mut warm_frozen = BacktestEngine::new(BacktestConfig {
+        learning_enabled: false,
+        ..base_config
+    });
+    warm_frozen.import_q_state(&trained_q_state).unwrap();
+    let warm_frozen_initial = warm_frozen.export_q_state();
+    let warm_frozen_result = warm_frozen.run_from_events(&test);
+
+    assert_eq!(
+        warm_learning_result.total_ticks,
+        warm_frozen_result.total_ticks
+    );
+    assert_eq!(
+        warm_learning_initial, warm_frozen_initial,
+        "warm continuing and warm frozen runs must start from the same imported Q-state"
+    );
+    assert_eq!(
+        warm_frozen.export_q_state(),
+        warm_frozen_initial,
+        "warm frozen run must keep the imported Q-state unchanged"
+    );
+    for sid in [StrategyId::A, StrategyId::B, StrategyId::C] {
+        assert_eq!(
+            warm_frozen
+                .lifecycle_manager()
+                .status(sid)
+                .unwrap()
+                .total_episodes,
+            0,
+            "warm frozen run must not mutate lifecycle state for {:?}",
+            sid
+        );
+        assert!(
+            warm_frozen.lifecycle_manager().status(sid).unwrap().alive,
+            "warm frozen run must not cull strategies during evaluation for {:?}",
+            sid
+        );
+    }
 }

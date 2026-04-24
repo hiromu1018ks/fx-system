@@ -103,9 +103,10 @@ pub struct BacktestConfig {
     pub lifecycle_config: LifecycleConfig,
     /// Regime management configuration.
     pub regime_config: RegimeConfig,
-    /// When false, Q-function updates are disabled (frozen evaluation mode).
-    /// Thompson Sampling still samples from the posterior for decisions,
-    /// but the posterior is never updated from MC returns.
+    /// When false, policy adaptation is disabled (frozen evaluation mode).
+    /// Thompson Sampling still samples from the current posterior for decisions,
+    /// but neither the posterior nor lifecycle culling state is updated from
+    /// evaluation-period episodes.
     pub learning_enabled: bool,
 }
 
@@ -2466,8 +2467,8 @@ impl BacktestEngine {
         }
     }
 
-    /// End an MC episode, update the Q-function, reset strategy episode state,
-    /// and record the episode with the LifecycleManager for strategy culling evaluation.
+    /// End an MC episode, optionally update adaptive policy state, and reset
+    /// strategy episode state.
     fn end_strategy_episode(
         &mut self,
         sid: StrategyId,
@@ -2484,23 +2485,24 @@ impl BacktestEngine {
                     StrategyId::C => self.strategy_c.q_function_mut(),
                 };
                 McEvaluator::update_from_result(q_fn, &episode_result);
-            }
 
-            // Record episode with LifecycleManager for strategy culling evaluation
-            let summary = EpisodeSummary {
-                strategy_id: episode_result.strategy_id,
-                total_reward: episode_result.total_reward,
-                return_g0: episode_result.return_g0,
-                duration_ns: episode_result.duration_ns,
-            };
-            let is_unknown_regime = self.regime_cache.state().is_unknown();
-            if let Some(_close_cmd) =
-                self.lifecycle_manager
-                    .record_episode(&summary, is_unknown_regime, snapshot)
-            {
-                // If the strategy was culled, its positions will be closed on
-                // the next tick via the lifecycle check in Phase 2/3.
-                info!(strategy = ?sid, "Strategy culled by LifecycleManager");
+                // Record episode with LifecycleManager only when adaptation is
+                // enabled; frozen evaluation must not mutate strategy liveness.
+                let summary = EpisodeSummary {
+                    strategy_id: episode_result.strategy_id,
+                    total_reward: episode_result.total_reward,
+                    return_g0: episode_result.return_g0,
+                    duration_ns: episode_result.duration_ns,
+                };
+                let is_unknown_regime = self.regime_cache.state().is_unknown();
+                if let Some(_close_cmd) =
+                    self.lifecycle_manager
+                        .record_episode(&summary, is_unknown_regime, snapshot)
+                {
+                    // If the strategy was culled, its positions will be closed on
+                    // the next tick via the lifecycle check in Phase 2/3.
+                    info!(strategy = ?sid, "Strategy culled by LifecycleManager");
+                }
             }
         }
         match sid {

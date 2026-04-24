@@ -1,365 +1,602 @@
-# 取引量改善・評価信頼性改善まとめ
+# FXシステムのこれからやること
 
-## 概要
+## この資料の目的
 
-Lifecycle の即時再 culling 問題は解消され、バックテストは「ほぼ停止状態」から回復した。
-その後の Ralph loop により、signal-driven exit、skip reason の可視化、forward 側の
-MC episode 学習経路、決定性改善なども前進した。
+この資料は、次の3つを**専門知識がなくても追いやすい言葉**で整理したものです。
 
-ただし、現状はまだ以下が残る。
-
-- entry 後の funnel が細い
-- Strategy A の寄与が薄い
-- execution / exit semantics が完全には統一されていない
-- PIT / リーク観点の forward 回帰保証が薄い
-- multi-seed の統計評価がまだ限定的
-
-本ドキュメントは、ここまでの調査・レビュー・PIT 点検を **1 本に統合** したものである。
+1. ここまでに何が改善されたか
+2. これから何を直し、何を確かめるべきか
+3. 本番運用に進むなら、どんな順番で進めるべきか
 
 ---
 
-## 現状の要点
+## まず結論
 
-- 取引数は 4 trades の異常状態からは回復した
-- B/C の `MAX_HOLD_TIME` 依存は当初より大きく低下した
-- skip reason と execution stats の観測性は改善した
-- forward 側でも signal-driven exit / MC episode 更新が入った
-- 同 seed 再現性は以前より改善している
+今の状態を一言でいうと、こうです。
 
-一方で、次はまだ残る。
+- **大きな実装バグはかなり直った**
+- **でも、まだ「本当に勝てるか」は証明できていない**
+- その最大の理由は、**今のバックテストが「学習しながら同じ期間を評価している」**から
 
-- Strategy A は依然として寄与が薄い
-- `triggered` に対して `filled` が少なく、entry 後の funnel は依然として細い
-- `execution_rejected` / `global_position_rejected` / `already_in_position` が主要な詰まり候補
-- entry 側の execution 入力整合は進んだが、**close / force-close 側は未完了**
-- 「残りは model quality だけ」と言い切るには implementation rough edge が残る
+つまり、今は
 
----
+- 「システムが壊れていないか」
+- 「売買フローがまともに動くか」
+- 「どこで詰まっているか」
 
-## 何が本当に改善されたか
+はかなり見えるようになりました。
 
-以下は、実装として実際に前進した点である。
+一方で、
 
-1. backtest entry の `expected_profit` が `decision.q_sampled` ベースへ改善された
-2. per-strategy skip reason / execution stats の可視化が強化された
-3. strategy 側に signal-driven exit (`TRIGGER_EXIT`) が追加された
-4. forward runner に `already_in_position` guard が追加された
-5. forward 側に signal-driven exit と `MAX_HOLD_TIME` 制御が追加された
-6. forward の strategy execution order / close ordering の決定性が改善された
-7. forward に MC episode evaluation と Q-function 更新が追加された
-8. risk limit / shutdown close 後も MC episode を終了し学習するようになった
+- 「未見データでも通用するか」
+- 「本番で安定して勝てるか」
 
-これらは実質的な前進であり、特に「保有しても学習されない」「終了しても学習されない」経路が閉じた点は大きい。
+は、まだこれから確認する段階です。
 
 ---
 
-## まだ残っている implementation 課題
+## ここまでに改善されたこと
 
-## 1. Execution semantics: close 側の market context は統一済み、`expected_profit` は未統一
+最近の修正で、特に大きかったのは次の点です。
 
-Ralph loop により、**entry order** では backtest / forward とも
-`expected_profit` に `decision.q_sampled` を渡す方向へ進んだ。
-また、forward runner の **close / force-close** で `current_mid_price: entry_price`
-と `volatility: 0.0` になっていた問題は修正された（commit 19ca659）。
-現在は close 経路でも実際の tick mid_price と volatility を使用している。
+### 1. 戦略が週末後に即死し続ける問題を修正
 
-しかし、**close / force-close 系の `expected_profit: 0.0`** は残っている。
-`time_urgent: true` のため order type selection には影響しないが、
-proto event の記録値としては意味づけが粗いまま。
+以前は、戦略が一度停止すると週末後に復活してもすぐ再停止しやすく、結果としてほとんど取引できていませんでした。  
+この問題は修正済みです。
 
-### 改善案
+### 2. exit（手仕舞い）が時間切れ頼みだった状態を改善
 
-1. close 系の `expected_profit` に unrealized PnL estimate（lagged）を入れる
-2. backtest / forward 共通の `ExecutionRequest` 生成ヘルパーを作る
-3. `q_sampled` をそのまま入れるのではなく、
-   `expected_edge - dynamic_cost` を価格単位に変換した値へ寄せる
-4. `time_urgent` を entry / close 両方で一貫した方針にする
-5. backtest 側の close 経路も forward と同じく `mid_price` / `volatility` の整合性を確認
+以前は、ほぼ全部の取引が `MAX_HOLD_TIME` で強制終了していました。  
+今は `TRIGGER_EXIT` による自然なクローズが増え、exit の質は前より良くなっています。
 
-### 期待効果
+### 3. どこで取引が止まっているか見えるようになった
 
-- exit execution の一貫性向上
-- fill / slippage モデルの妥当性向上
-- backtest と forward の比較可能性向上
+今は少なくとも、各戦略について
 
----
+- 何回シグナルが出たか
+- 何回発注しようとしたか
+- 何回 risk check を通ったか
+- 何回約定したか
+- 何回クローズできたか
 
-## 2. GlobalPositionChecker → soft-cap 化 + forward effective_lot 対応済み
+を追えるようになりました。
 
-soft-cap threshold（default 0.7）を導入し（commit 251d9b0）、
-利用率が 70% 未満では全戦略が full lot を受け取る。
-また、forward runner が `effective_lot` を使うよう修正（commit d0b77d4）。
-backtest と forward の間で global position の挙動が一致するようになった。
+### 4. close の扱いが不正確だった問題を修正
 
-### 残課題
+今回の修正で、
 
-1. `requested_lots -> effective_lots` の縮小率を strategy 別に記録する
-2. same-direction accumulation と offsetting の挙動をテストで固定する
+- **約定していない close を「close 成功」と数えてしまう問題**
+- **risk/shutdown 時に、実際には閉じていない戦略まで学習終了扱いにする問題**
+
+を直しました。
+
+### 5. execution config が無視される不具合を修正
+
+`ExecutionGateway::new(config)` が、渡された設定の多くを使わず default を使っていた問題も修正済みです。  
+これは検証の前提を壊す不具合だったので、重要です。
 
 ---
 
-## 3. Execution rejection の観測がまだ粗い
+## 今わかっている現状
 
-skip reason と execution stats は改善したが、現状でも `execution_rejected` は
-大きなボトルネック候補である。
-どの条件で reject が増えているかを説明できる粒度の診断はまだ足りない。
+今の問題は、大きく3種類に分けられます。
 
-### 改善案
+| 分類 | 内容 | 今の判断 |
+|---|---|---|
+| 実装の問題 | バグや backtest/forward の食い違い | 主要部分はかなり修正済み |
+| モデルの問題 | Q関数が未学習、trigger 条件が厳しすぎるなど | まだ大きい |
+| 評価方法の問題 | 学習と評価が同じ期間に混ざっている | まだ未解決 |
 
-1. strategy 別に以下を出力する
-   - `order_type`
-   - `effective_fill_probability`
-   - `last_look_fill_prob`
-   - `lp_id`
-   - `volatility`
-   - `requested_lots`
-   - `effective_lots`
-   - `reject_reason`
-2. `triggered -> order_attempted -> risk_passed -> filled -> closed` を strategy 別に常設する
-3. console 出力と JSON 出力の元データを統一する
-4. execution diagnostics の整合性をテストで固定する
+特に大事なのは3つです。
 
-### 期待効果
+### A. Strategy A / B がほぼ動いていない
 
-- reject の支配要因を定量化できる
-- calibration の効き目を再現可能に比較できる
+直近の代表バックテストでは、実質的に **Strategy C だけが動いている** 状態です。  
+これは「全部の戦略が活躍している状態」ではありません。
 
----
+### B. risk 制限で止まりやすい
 
-## 4. Exit 品質は改善したが、まだ監視が必要
+`daily_realized_halt` が大量に出ており、早い段階で負けるとその日の取引がかなり止まります。  
+これは**バグとは限らず、守りの設定が厳しい**可能性があります。
 
-当初は、平均ホールド時間分析でほぼ全件が `MAX_HOLD_TIME` 到達クローズだった。
-Ralph loop 後、この依存は大きく下がった。
+### C. まだ未見データ性能は証明できていない
 
-これは前進だが、exit 品質の議論はまだ終わっていない。
-`MAX_HOLD_TIME` 偏重が減っても、`already_in_position` が大きいままなら
-機会損失は依然として残る。
+ここが一番重要です。  
+今のバックテストは、**2年間のデータを流しながら、その2年間で学習もしています**。
 
-### 改善案
+これは、
 
-1. `already_in_position` の回数を strategy 別・時間帯別に出す
-2. hold 中に逃した trigger 数を定量化する
-3. `MAX_HOLD_TIME` を safety valve として再校正する
-4. exit 条件を `q_sampled` / `q_point` / alpha 消失 / volatility 条件で検証する
+- 未来を見ている不正なテストではない
+- でも、**本当の意味での「未見データテスト」でもない**
 
-### 期待効果
-
-- 保有中の機会損失の可視化
-- exit の意味的品質向上
+という状態です。
 
 ---
 
-## 5. Strategy A → 診断完了：design choice による稀有事象戦略
+## 今のバックテストの何が問題なのか
 
-Strategy A（Liquidity Shock Reversion）の不活性は **コードバグではなく設計上の選択**。
-トリガー条件は4つ全ての同時成立が必要（commit 0051e6e でテスト証明）：
-- `spread_zscore > 2.0`（スプレッド急拡大）
-- `depth_change_rate < -0.1`（10%以上の板薄）
-- `volatility_ratio > 2.0`（2倍以上のボラティリティ急増）
-- `regime_kl < 1.0`（既知レジーム）
+わかりやすく言うと、今のバックテストは
 
-通常市場・中程度ストレスでは発火せず、真の流動性ショック時のみ設計通り動作。
-不活性は model quality / data distribution の問題であり、コード品質の問題ではない。
+> 問題集を解きながら、その問題集で勉強もしている
 
-### 残課題
+ような状態です。
 
-1. 実データでの `spread_z`, `depth_drop`, `vol_spike` の同時成立頻度を実証する
-2. A の trigger 閾値を実データ分布に基づいて再校正するには offline training が必要
+これだと、
 
----
+- 「その場でだんだん慣れていく」結果は見える
+- でも「初見の問題に強いか」は分からない
 
-## 6. Q 関数未学習状態は依然として PnL 分散を増幅する
+です。
 
-取引量の主因ではないが、PnL の大きなぶれは依然として未学習状態の Thompson Sampling に依存している。
+なので、今のバックテスト結果は
 
-### 改善案
+- **運用シミュレーションとしては意味がある**
+- **汎化性能の証明としては弱い**
 
-1. Python 学習済みモデルから ONNX / Q-state を export し import 可能にする
-2. `--import-q-state` のような明示的初期化経路を作る
-3. 未学習・事前学習済み・オンライン継続学習の 3 条件を比較する
-
-### 期待効果
-
-- PnL / Sharpe の seed 依存を緩和
-- early-stage の取引品質向上
+と考えるべきです。
 
 ---
 
-## 7. 実験設計は改善したが、まだ十分ではない
+## これから必ずやるべきこと
 
-multi-seed の証拠は出始めたが、5 seed 程度では真の期待値を語るにはまだ薄い。
+優先順に書きます。
 
-### 改善案
+## 優先度A: まず評価方法を正す
 
-1. 複数 seed で backtest / forward 比較を行い、平均 PnL / Sharpe / fills の信頼区間を出す
-2. 変更前後比較は単一 seed ではなく seed sweep で行う
-3. `filled`, `fill_rate`, `global_position_rejected`, `execution_rejected`,
-   `MAX_HOLD_TIME close`, `already_in_position` を主要 KPI にする
-4. run ごとに seed・config hash・git SHA を成果物へ保存する
+これは最優先です。  
+ここを直さないと、「改善した」と言っても説得力が弱いままです。
 
-### 期待効果
+### 目的
 
-- 「たまたま勝った / 負けた」を排除できる
-- 改善効果を統計的に比較できる
+- **システムの本当の実力を測ること**
+- **「その場で学習して良くなった」のと「最初から通用した」のを分けること**
 
----
+### なぜ必要か
 
-## 8. 完全な再現性の残課題
+今のままだと、学習しながら同じ期間を評価しているため、
 
-seed 指定と順序安定化は改善したが、なお完全な比較実験のためには
-入力・順序・集計・artifact の全経路で再現性を担保する必要がある。
+- 地力があるのか
+- その期間にたまたま適応できただけなのか
 
-### 改善案
+が混ざってしまいます。  
+本番で継続学習を使うとしても、**評価方法が曖昧だと改善の善し悪しを誤判定しやすい**です。
 
-1. strategy 実行順・tie-break・集計順が常に決定的であることを継続確認する
-2. JSON / console / artifact の並び順を固定する
-3. 非決定的コンテナが残る箇所は BTreeMap / IndexMap への置換を検討する
+### やること
 
-### 期待効果
+1. **学習期間と評価期間を分ける**
+   - 例: 前半1年で学習、後半1年では学習せず成績だけ測る
+2. **walk-forward テストを入れる**
+   - 例: 3か月学習 → 次の1か月を評価、を繰り返す
+3. **評価期間では Q 関数を凍結するモードを作る**
+   - 「この期間は学習しない」を明示できるようにする
 
-- seed sweep や差分比較の信頼性向上
+### これで分かること
 
----
-
-## 9. PIT / 情報リーク観点の評価
-
-現時点のコードからは、**明確な look-ahead leak は見えていない**。
-特に以下は維持されている。
-
-1. `FeatureExtractor` は execution 関連特徴量に強制 lag をかけている
-2. `pnl_unrealized` は lagged state snapshot ベースで参照されている
-3. forward の MC transition は execution 前の features/snapshot で記録されている
-4. risk/shutdown close 後の episode 終了は、terminal reward を後から学習しているだけであり、
-   それ自体は PIT 違反ではない
-
-一方で、**PIT 設計を証明する回帰テストは forward 側で弱い**。
-
-### 改善案
-
-1. forward E2E で、execution 直後の tick では lagged execution features がまだ見えないことを検証する
-2. signal-driven exit 後の同 tick / 直後 tick で post-close 情報が特徴量へ混入しないことを検証する
-3. risk/shutdown forced close 後の MC update が、次 tick 以前の意思決定にだけ影響することを検証する
-4. `expected_profit = q_sampled` は leak ではないが意味づけが粗いため、
-   execution 入力としての単位整合を見直す
-
-### 期待効果
-
-- PIT 安全性の回帰保証強化
-- forward の新規 close 経路に対する安心感の向上
-- 「リークはない」という主張をテストで裏づけられる
+- 本当に未見データに強いか
+- ある改善が「その場だけ効いた」のか「汎用的に効いた」のか
 
 ---
 
-## 10. Ralph loop 後に残った implementation 粗さ
+## 優先度B: モデルを初期状態のまま使わない
 
-Ralph loop の成果は大きいが、**残課題が完全に model quality だけとは言い切れない**。
-主に以下が残る。
+今は Q 関数がほぼ未学習のまま走り始めるため、seed による振れが大きいです。  
+これが PnL のばらつきの大きな原因です。
 
-1. close / force-close 側の `expected_profit` が未統一
-2. forward runner の close ロジック重複が大きく、再不整合のリスクがある
-3. summary/documentation が実装完了状態とずれる可能性がある
+### 目的
 
-### 改善案
+- **開始直後の性能を安定させること**
+- **seed による成績のブレを減らすこと**
 
-1. close 系すべてを共通ヘルパーへ寄せる
-2. entry / close / force-close で execution semantics を 1 箇所に集約する
-3. summary は「何が構造バグで、何が model quality か」を分けて記述する
+### なぜ必要か
 
-### 期待効果
+今は「戦略が弱い」のか「まだ学んでいないだけ」なのかが分かりにくい状態です。  
+事前学習を入れると、**モデルの素の性能**と**学習不足による弱さ**を切り分けやすくなります。
 
-- 再発防止
-- レビュー容易性向上
-- 完了宣言の精度向上
+### やること
 
----
+1. Python 側で事前学習する
+2. 学習済み Q-state を export する
+3. backtest / forward で import してから開始する
+4. 次の3条件を比較する
+   - 未学習のまま開始
+   - 事前学習して開始
+   - 事前学習 + 運用中も継続学習
 
-## 優先順位
+### これで分かること
 
-## P0: まず直すべきもの
-
-1. close / force-close を含む execution semantics を完全統一する
-2. GlobalPositionChecker の常時 lot 縮小を soft-cap 化する
-3. execution / risk / skip reason の診断を strategy 別に増やす
-4. forward の PIT 回帰テストを追加する
-
-## P1: 次にやるべきもの
-
-1. `already_in_position` と hold 中機会損失を定量化する
-2. `MAX_HOLD_TIME` を再校正する
-3. Strategy A の trigger 条件を実データ分布で再検証する
-4. close ロジックを共通化して重複を解消する
-
-## P2: 安定運用・評価品質のために必要なもの
-
-1. Q-state 事前学習 / import
-2. 複数 seed の統計評価
-3. 再現性と artifact 整合性の強化
+- 「単に未学習で弱いだけ」なのか
+- 「学習してもなお弱い」のか
 
 ---
 
-## やってはいけない対処
+## 優先度C: Strategy A / B が動かない理由を数字で確認する
 
-以下は一時的に取引数を増やしても、問題の所在を隠すので避けるべきである。
+今は A / B がほぼ働いていません。  
+ここを「たぶん条件が厳しい」で終わらせず、**実データで本当に条件が出ていないのか** を確認する必要があります。
 
-1. trigger 閾値を一律に緩めるだけ
-2. fill probability を根拠なく底上げするだけ
-3. risk 制約を無条件で緩和するだけ
-4. 単一 seed の勝ち run を根拠に「改善した」と判断すること
+### 目的
+
+- **使えていない戦略を放置しないこと**
+- **A / B が本当に必要か判断できるようにすること**
+
+### なぜ必要か
+
+戦略が動かない理由が
+
+- 条件が厳しすぎるのか
+- 市場に合っていないのか
+- そもそもその戦略が不要なのか
+
+で、取るべき対策が変わります。  
+数字で確認しないと、**不要な戦略に時間を使い続ける**危険があります。
+
+### やること
+
+1. 実データで各特徴量の分布を集計する
+   - spread
+   - depth change
+   - volatility ratio
+2. trigger 条件が何回成立したか数える
+3. 閾値を変えた場合に成立回数がどう変わるか調べる
+
+### 注意
+
+ここでやってはいけないのは、**根拠なく閾値を緩めること**です。  
+取引数だけ増えても、質が悪ければ意味がありません。
 
 ---
 
-## 検証指標
+## 優先度D: risk 側の止まり方を確認する
 
-改善ごとに最低限、以下を比較する。
+`daily_realized_halt` が多いなら、
 
-| 指標 | 見る理由 |
-|------|----------|
-| trades / fills / closes | volume が本当に増えたか |
-| fill rate | execution 側の詰まりが改善したか |
-| global_position_rejected | position 制約が過剰でないか |
-| execution_rejected | execution モデルの詰まりが改善したか |
-| MAX_HOLD_TIME close 比率 | exit が時間切れ依存から脱したか |
-| already_in_position | 保有中の機会損失が減ったか |
-| strategy 別 funnel | どの戦略がどこで止まっているか |
-| close 側 expected_profit 整合 | entry/exit の execution semantics が揃ったか |
-| forward PIT regression | 新しい close 経路でリークがないことを証明できているか |
-| multi-seed mean / CI | 改善が統計的に有意か |
+- 本当に守りが必要な良い停止なのか
+- 閾値が厳しすぎるだけなのか
+
+を分けて見ないといけません。
+
+### 目的
+
+- **risk 制限が正しく働いているか確認すること**
+- **守りすぎなのか、必要な停止なのかを区別すること**
+
+### なぜ必要か
+
+止まる回数が多いだけでは、良いのか悪いのか判断できません。  
+本当に危ない日に止めているなら正しい動きですが、普通の日まで過剰に止めているなら機会損失です。  
+つまり、**halt の多さだけでは結論を出せない**からです。
+
+### やること
+
+1. halt が出た日の損益推移を確認する
+2. halt 前にどんな取引が続いていたかを見る
+3. 閾値を変えた場合の影響を、別実験として比較する
+
+### 注意
+
+risk 制限は「邪魔なもの」ではありません。  
+**安易に緩めるのは危険**です。  
+まずは「正しく止めているのか」を見るべきです。
 
 ---
 
-## 結論
+## 優先度E: execution rejection をもっと詳しく見る
 
-### コード品質問題（全て修正済み）
+今は `execution_rejected` が見えてはいますが、まだ粗いです。
 
-Ralph loop（10コミット）により、以下の構造的・観測性の問題は解消した。
+### 目的
 
-| 修正内容 | コミット | 分類 |
-|----------|----------|------|
-| close側 `current_mid_price`/`volatility` を実際のtick値に修正 | 19ca659 | backtest/forward不一致 |
-| GlobalPositionChecker soft-cap (0.7) 導入 | 251d9b0 | 常時lot縮小の構造的過剰抑制 |
-| forward で `effective_lot` を使用 | d0b77d4 | backtest/forward不一致 |
-| forward で execution event を FeatureExtractor に供給 | f3875eb | backtest/forward不一致 |
-| forward PIT 回帰テスト追加 | 5e66bb9 | PIT安全性 |
-| 戦略別 entry funnel + skip理由追跡 | 9870875 | 観測性 |
-| 再現性テスト全フィールド比較 | 53b3c81 | 再現性 |
-| close理由（MAX_HOLD_TIME/TRIGGER_EXIT/risk/shutdown）追跡 | 276c8d3 | 観測性 |
-| Strategy A トリガー条件診断テスト | 0051e6e | 戦略A不活性証明 |
-| multi-seed (5 seed) 一貫性テスト | 24c08d8 | multi-seed評価 |
+- **約定しない理由を特定すること**
+- **設定の問題とモデルの問題を分けること**
 
-### 残る model/data 課題（コード品質ではない）
+### なぜ必要か
 
-以下は外部データ・offline training・実際のバックテスト実行が必要であり、
-コード変更では対応不可。これらは明確に model/data limits である。
+シグナルが出ても約定しなければ利益は出ません。  
+しかも reject の原因が見えないと、spread、lot、volatility、order type のどれを直すべきか判断できません。  
+つまり、**entry 後の細い funnel を改善するための必須情報**です。
 
-| 課題 | 理由 | 必要なもの |
-|------|------|-----------|
-| Q-state 事前学習 | 未学習 Thompson Sampling の初期分散が大きい | Python offline training → ONNX import |
-| Strategy A trigger 校正 | 4条件同時成立が実データ分布に対して厳しすぎる可能性 | 実データでの spread_z/depth_drop/vol_ratio 同時分布分析 |
-| multi-seed 統計的有意性 | 5 seed のテストは構造検証のみで、PnL/Sharpe の信頼区間なし | 実データでの seed sweep と信頼区間計算 |
-| MAX_HOLD_TIME 適正値 | 現在の30s/300s/600sが最適かの検証 | 実データでの hold time 分布分析 |
-| execution rejection calibration | fill probability / slippage モデルの妥当性 | 実執行データとの比較 |
+### やること
 
-### 結論
+1. reject の理由をもっと細かく記録する
+2. order type、fill probability、volatility、lots などを一緒に保存する
+3. 戦略別に reject の多い条件を比べる
 
-コード品質の観点から、取引量と評価信頼性を阻害する構造的問題は全て解消した。
-残る課題は全て model/data limits であり、コード品質の問題ではない。
+### これで分かること
+
+- どの条件で約定しにくいのか
+- モデルが悪いのか、設定が悪いのか
+
+---
+
+## 未見データ性能のテストはどう進めるべきか
+
+専門用語を使わずに言うと、次の3段階が分かりやすいです。
+
+### テスト1: 期間を分ける
+
+- 2024年前半で学習
+- 2024年後半では学習せず評価
+
+まずはこれで十分です。
+
+**目的:** 「初見の期間でも通用するか」を見ること。  
+**なぜ必要か:** 学習しながらの成績だけでは、実力より良く見えることがあるためです。
+
+### テスト2: 何回か期間をずらして繰り返す
+
+- 3か月学習 → 次の1か月評価
+- これを何回も繰り返す
+
+これが walk-forward です。  
+たまたま特定期間だけ良かった、を避けやすくなります。
+
+**目的:** 特定の相場だけでなく、いろいろな相場で通用するかを見ること。  
+**なぜ必要か:** 1回だけの train/test 分離では、たまたま相性の良い期間に当たる可能性があるためです。
+
+### テスト3: 複数 seed で比較する
+
+1つの seed だけだと偶然が混ざります。  
+最低でも複数 seed で回して、
+
+- 平均 PnL
+- 平均 Sharpe
+- fill rate
+- 戦略別の triggered / filled / closed
+
+を比べるべきです。
+
+**目的:** 偶然の勝ち負けを減らして、平均的な傾向を見ること。  
+**なぜ必要か:** Thompson Sampling のように乱数の影響がある仕組みでは、1回の結果だけだと判断を誤りやすいためです。
+
+---
+
+## 本番に行くまでのロードマップ
+
+ここでは、無理のない順番を示します。
+
+## Step 1. 評価方法を整える
+
+やること:
+
+- 学習期間と評価期間を分ける
+- frozen evaluation（評価中は学習しない）を作る
+- walk-forward を回せるようにする
+
+目的:
+
+- **未見データ性能を正しく測ること**
+- **改善の効果を比較できるようにすること**
+
+なぜ必要か:
+
+- 評価方法が曖昧だと、今後どの改善が効いたのか判断できないから
+- 本番前に「通用する条件」と「通用しない条件」を見つけたいから
+
+完了条件:
+
+- 「未見データ区間だけ」の成績を出せる
+- 同じ条件で繰り返し比較できる
+
+## Step 2. 事前学習を入れる
+
+やること:
+
+- Python で Q-state を作る
+- Rust 側で読み込む
+- 事前学習あり/なしを比較する
+
+目的:
+
+- **運用開始直後の弱さを減らすこと**
+- **初期性能を現実的な水準に近づけること**
+
+なぜ必要か:
+
+- 本番では、起動直後から極端に不安定だと困るから
+- 未学習のままだと、モデルの良し悪しより「まだ学んでいないこと」の影響が大きすぎるから
+
+完了条件:
+
+- seed による成績の振れが小さくなる
+- 初期の無駄な負けが減る
+
+## Step 3. 戦略ごとの役割を確認する
+
+やること:
+
+- A / B / C が実際にどれだけ動くか確認する
+- A / B が本当に必要かを判断する
+- 動かないなら閾値か設計を見直す
+
+目的:
+
+- **各戦略の存在意義を明確にすること**
+- **死んでいる戦略を減らすこと**
+
+なぜ必要か:
+
+- 動かない戦略を残すと、複雑さだけ増えて保守が難しくなるから
+- どの戦略が利益・安定性に効いているか説明できないまま本番に行くのは危険だから
+
+完了条件:
+
+- 「どの戦略が何の役割を持つか」を説明できる
+- 死んでいる戦略を放置しない
+
+## Step 4. paper trading を長めに回す
+
+やること:
+
+- forward で数日〜数週間連続運転
+- 日次で
+  - trades
+  - fill rate
+  - halt 回数
+  - max drawdown
+  - 戦略別 funnel
+  を確認する
+
+目的:
+
+- **本番に近い形で壊れず回るか確認すること**
+- **backtest では見えにくい運用上の問題をあぶり出すこと**
+
+なぜ必要か:
+
+- 長時間運転しないと、再接続、状態ずれ、日跨ぎ、週跨ぎなどの問題は見つかりにくいから
+- 「勝てるか」だけでなく「安全に回せるか」が本番前には重要だから
+
+完了条件:
+
+- システムが止まらない
+- 異常値が継続的に出ない
+- バックテストと forward の挙動差が説明できる
+
+## Step 5. 小さく本番に近づける
+
+やること:
+
+- まずは最小ロット、強いリスク制御つきで始める
+- paper と同じ監視項目を本番でも継続する
+- 設定変更は一度に一つだけにする
+
+目的:
+
+- **本番移行時の事故を小さくすること**
+- **問題が出たときに原因を特定しやすくすること**
+
+なぜ必要か:
+
+- いきなり大きなロットで始めると、想定外の不具合がそのまま損失に直結するから
+- 変更を一度にたくさん入れると、何が効いたのか分からなくなるから
+
+完了条件:
+
+- 想定外の挙動がない
+- 損失の出方が想定の範囲に収まる
+- 運用手順が人間にも回せる
+
+---
+
+## 直近でやるべき実務タスク
+
+「次に何をやるか」を短く言うと、この順です。
+
+| タスク | 目的 | なぜ必要か |
+|---|---|---|
+| backtest に学習OFFモードを入れる | 評価中に学習を止められるようにする | 未見データ性能を測る土台が必要だから |
+| train/test 分離バックテストを作る | 学習期間と評価期間を分ける | 同一区間学習のままだと成績を過大評価しやすいから |
+| walk-forward 実験を回す | 複数の相場局面で強さを見る | たまたま良い期間だけだった、を防ぐため |
+| Python で Q-state 事前学習を作る | 初期性能を上げる | 未学習の弱さとモデル自体の弱さを分けたいから |
+| A / B の trigger 条件を実データで点検する | 動かない戦略の理由を特定する | 戦略の改善か削除かを判断したいから |
+| risk halt と execution reject の詳細分析を足す | どこで止まっているかを詳しく知る | 取引数と約定率のボトルネックを特定したいから |
+| forward を長期間回して監視する | 実運用に近い状態で安定性を見る | backtest では出にくい運用上の不具合を見つけたいから |
+
+---
+
+## やってはいけないこと
+
+次は避けるべきです。
+
+| やってはいけないこと | なぜダメか |
+|---|---|
+| 単に閾値を緩めて取引数だけ増やす | 取引数は増えても、質の悪い取引まで増える可能性があるから |
+| risk 制限を雑に弱める | 一時的に見た目の成績が良くなっても、実運用の安全性を壊すから |
+| 1つの seed で勝っただけで改善と言う | 偶然の可能性を排除できないから |
+| 同じ期間で学習して同じ期間で評価した結果を、そのまま本番期待値だと思う | 実力より良く見えてしまう可能性があるから |
+
+---
+
+## Ralph loop でこの資料を使うときのルール
+
+この資料を Ralph loop で使うときは、**一度に全部やろうとしない**ことが大事です。  
+毎 iteration でやるのは、**一番重要な仮説を1つだけ選んで、実装か検証のどちらかを完了させる**ことです。
+
+### この資料のどこを優先して見るか
+
+Ralph loop では、基本的に次の順で見てください。
+
+1. **「これから必ずやるべきこと」**
+2. **「未見データ性能のテストはどう進めるべきか」**
+3. **「本番に行くまでのロードマップ」**
+4. **「直近でやるべき実務タスク」**
+5. **「やってはいけないこと」**
+
+### 1 iteration でやること
+
+1 iteration では、次のどちらか1つに絞ります。
+
+1. **実装の iteration**
+   - 例: 学習OFFモードを追加する
+   - 例: train/test 分離を実装する
+   - 例: execution reject の詳細ログを追加する
+2. **検証の iteration**
+   - 例: walk-forward を1セット回す
+   - 例: 複数 seed 比較を回す
+   - 例: Strategy A/B の trigger 成立頻度を集計する
+
+### 良い iteration の条件
+
+良い iteration は、次の条件を満たします。
+
+- 変更または検証対象が **1つの仮説に対応**している
+- 終了時に **何が分かったかを1文で言える**
+- 次の判断に必要な **数字かテスト結果** が残る
+
+### 悪い iteration の例
+
+- 閾値調整、risk 緩和、logging 追加を同時にやる
+- seed を1つだけ見て「改善した」と判断する
+- 実装だけして、何が改善したか測らない
+- 結果が悪かったときに原因候補を切り分けない
+
+### iteration の完了条件
+
+その iteration は、次のどれかを満たしたら完了です。
+
+1. **コード変更 + テスト/実行結果 + 結論** が揃った
+2. **検証実行 + 数字 + 次の判断** が揃った
+3. **その仮説は誤りだと分かった** と明確に言えた
+
+### loop 全体の停止条件
+
+次のどれかに当たったら、いったん loop を止めてよいです。
+
+1. 残課題の中心が **実装バグではなく model/data 側** になった
+2. 次の改善に **offline training / 実データ分析 / 運用要件の決定** が必要になった
+3. 直近の複数 iteration で、主要指標に意味のある改善が出ない
+4. これ以上やると **risk を弱めるだけ** になりそう
+
+### loop の評価軸
+
+各 iteration の評価では、少なくとも次を確認します。
+
+- trades / fills / closes
+- fill rate
+- strategy 別 triggered / order_attempted / risk_passed / filled / closed
+- execution_rejected
+- daily_realized_halt
+- A / B / C のどれが動いたか
+- 学習ON / 学習OFF のどちらを見ているか
+
+---
+
+## 最後に
+
+今のシステムは、以前よりかなりまともになっています。  
+ですが、まだ「本番投入してよい」と言える段階ではありません。
+
+次の本当の勝負は、
+
+- **未見データで通用するか**
+- **事前学習で安定するか**
+- **paper trading で壊れずに回るか**
+
+の3点です。
+
+なので、これからは
+
+**実装を直すフェーズ** から  
+**評価方法を正して、未見データと運用に耐えるかを確かめるフェーズ**
+
+へ移るべきです。

@@ -63,7 +63,7 @@ pub struct BacktestCmd {
     #[arg(long)]
     pub seed: Option<u64>,
 
-    /// Disable Q-function learning (frozen evaluation mode).
+    /// Disable adaptive policy updates during backtest (frozen evaluation mode).
     #[arg(long)]
     pub no_learn: bool,
 }
