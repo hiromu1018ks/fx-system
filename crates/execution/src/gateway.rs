@@ -122,14 +122,19 @@ pub struct ExecutionGateway {
 impl ExecutionGateway {
     pub fn new(config: ExecutionGatewayConfig) -> Self {
         let known_lps = config.known_lps.clone();
+        let last_look = config.last_look.clone();
+        let fill_probability = config.fill_probability.clone();
+        let slippage = config.slippage.clone();
+        let order_type = config.order_type.clone();
+        let lp_monitor = config.lp_monitor.clone();
         let recalibration = config.recalibration.clone();
         Self {
             _config: config,
-            last_look_model: LastLookModel::new(LastLookConfig::default()),
-            fill_prob_model: FillProbabilityModel::new(FillProbabilityConfig::default()),
-            slippage_model: SlippageModel::new(SlippageConfig::default()),
-            order_type_selector: OrderTypeSelector::new(OrderTypeConfig::default()),
-            lp_monitor: LpRiskMonitor::new(LpMonitorConfig::default(), known_lps),
+            last_look_model: LastLookModel::new(last_look),
+            fill_prob_model: FillProbabilityModel::new(fill_probability),
+            slippage_model: SlippageModel::new(slippage),
+            order_type_selector: OrderTypeSelector::new(order_type),
+            lp_monitor: LpRiskMonitor::new(lp_monitor, known_lps),
             recalibration_manager: LpRecalibrationManager::new(recalibration),
             order_counter: 0,
         }
@@ -604,6 +609,54 @@ mod tests {
         req.time_urgent = true;
         let eval = gw.evaluate(&req).unwrap();
         assert_eq!(eval.order_type, OtcOrderType::Market);
+    }
+
+    #[test]
+    fn new_uses_provided_execution_config() {
+        let mut gw = ExecutionGateway::new(ExecutionGatewayConfig {
+            last_look: LastLookConfig {
+                prior_alpha: 1.0,
+                prior_beta: 9.0,
+                vol_adjustment_factor: 0.0,
+            },
+            fill_probability: FillProbabilityConfig {
+                market_fill_prob: 0.25,
+                ..FillProbabilityConfig::default()
+            },
+            slippage: SlippageConfig {
+                vol_coeff: 0.25,
+                ..SlippageConfig::default()
+            },
+            order_type: OrderTypeConfig {
+                profit_threshold: 10.0,
+                fill_prob_threshold: 0.99,
+            },
+            lp_monitor: LpMonitorConfig::default(),
+            ..ExecutionGatewayConfig::default()
+        });
+        let req = make_request();
+        let eval = gw.evaluate(&req).unwrap();
+
+        assert!(
+            eval.last_look_fill_prob < 0.2,
+            "gateway should use configured last-look prior, got {}",
+            eval.last_look_fill_prob
+        );
+        assert!(
+            eval.fill_probability <= 0.25,
+            "gateway should use configured market fill probability, got {}",
+            eval.fill_probability
+        );
+        assert_eq!(
+            eval.order_type,
+            OtcOrderType::Market,
+            "gateway should use configured order-type thresholds"
+        );
+        assert!(
+            eval.expected_slippage > 0.02,
+            "gateway should use configured slippage model, got {}",
+            eval.expected_slippage
+        );
     }
 
     // --- Simulate Execution ---

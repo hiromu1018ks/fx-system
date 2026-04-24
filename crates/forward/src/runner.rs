@@ -521,16 +521,18 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         funnel.record_close(close_label);
                     }
                 }
-                // End MC episodes for all strategies that were force-closed
+                // End MC episodes only for strategies that were actually force-closed
                 let terminal = match reason {
                     CloseReason::DailyRealizedHalt => TerminalReason::DailyHardLimit,
                     CloseReason::WeeklyHalt => TerminalReason::WeeklyHardLimit,
                     CloseReason::MonthlyHalt => TerminalReason::MonthlyHardLimit,
                     CloseReason::WeekendHalt => TerminalReason::WeekendHalt,
                 };
-                for &sid in &enabled_strategies {
+                for &sid in &closed_from_risk {
                     if mc_evaluator.has_active_episode(sid) {
-                        let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
+                        let q_fn = strategy_runtimes
+                            .get_mut(&sid)
+                            .map(|r| r.policy.q_function_mut());
                         if let Some(q) = q_fn {
                             let _ = mc_evaluator.end_episode_and_update(sid, terminal, tick_ns, q);
                         }
@@ -667,11 +669,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             .into_iter()
             .collect();
             for &sid in &enabled_strategies {
-                let max_ns = max_hold_ms
-                    .get(&sid)
-                    .copied()
-                    .unwrap_or(300_000)
-                    * 1_000_000;
+                let max_ns = max_hold_ms.get(&sid).copied().unwrap_or(300_000) * 1_000_000;
                 let should_close = snapshot
                     .positions
                     .get(&sid)
@@ -696,6 +694,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         "MAX_HOLD_TIME",
                         tick_mid,
                         tick_vol,
+                        0.0,
                     ) {
                         total_trades += 1;
                         if let Some(funnel) = strategy_funnels.get_mut(&sid) {
@@ -703,7 +702,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         }
                         // End MC episode and update Q-function
                         if mc_evaluator.has_active_episode(sid) {
-                            let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
+                            let q_fn = strategy_runtimes
+                                .get_mut(&sid)
+                                .map(|r| r.policy.q_function_mut());
                             if let Some(q) = q_fn {
                                 let _result = mc_evaluator.end_episode_and_update(
                                     sid,
@@ -843,8 +844,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     };
                     if is_closing {
                         // Signal-driven exit: Q-function selected opposite direction
-                        if let Some((_close_dir, _close_lots)) =
-                            self.close_strategy_position_forward(
+                        if let Some((_close_dir, _close_lots)) = self
+                            .close_strategy_position_forward(
                                 &mut runtime_sequencer,
                                 &mut projector,
                                 &mut paper_engine,
@@ -858,6 +859,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                                 "TRIGGER_EXIT",
                                 tick_mid,
                                 tick_vol,
+                                decision.q_sampled,
                             )
                         {
                             total_trades += 1;
@@ -866,7 +868,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                             }
                             // End MC episode and update Q-function
                             if mc_evaluator.has_active_episode(strategy_id) {
-                                let q_fn = strategy_runtimes.get_mut(&strategy_id).map(|r| r.policy.q_function_mut());
+                                let q_fn = strategy_runtimes
+                                    .get_mut(&strategy_id)
+                                    .map(|r| r.policy.q_function_mut());
                                 if let Some(q) = q_fn {
                                     let _result = mc_evaluator.end_episode_and_update(
                                         strategy_id,
@@ -1143,10 +1147,12 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     funnel.record_close("shutdown");
                 }
             }
-            // End MC episodes for shutdown-closed positions
-            for &sid in &enabled_strategies {
+            // End MC episodes only for strategies that were actually shutdown-closed
+            for &sid in &closed_from_shutdown {
                 if mc_evaluator.has_active_episode(sid) {
-                    let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
+                    let q_fn = strategy_runtimes
+                        .get_mut(&sid)
+                        .map(|r| r.policy.q_function_mut());
                     if let Some(q) = q_fn {
                         let _ = mc_evaluator.end_episode_and_update(
                             sid,
@@ -1583,6 +1589,84 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         projector.update_limit_state(limit_state);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn execute_close_order_forward(
+        &mut self,
+        sequencer: &mut RuntimeSequencer,
+        projector: &mut StateProjector,
+        paper_engine: &mut PaperExecutionEngine,
+        runtime_observability: &mut RuntimeObservabilityState,
+        limit_tracker: &mut PeriodicLimitTracker,
+        limits_config: &RiskLimitsConfig,
+        feature_extractor: &mut FeatureExtractor,
+        tick_ns: u64,
+        symbol: &str,
+        strategy_id: StrategyId,
+        direction: Direction,
+        lots: u64,
+        mid_price: f64,
+        volatility: f64,
+        expected_profit: f64,
+    ) -> Result<Option<(Direction, u64)>> {
+        if lots == 0 {
+            return Ok(None);
+        }
+
+        let realized_before = projector
+            .snapshot()
+            .positions
+            .get(&strategy_id)
+            .map(|position| position.realized_pnl)
+            .unwrap_or_default();
+        let request = ExecutionRequest {
+            direction,
+            lots,
+            strategy_id,
+            current_mid_price: mid_price,
+            volatility,
+            expected_profit,
+            symbol: symbol.to_string(),
+            timestamp_ns: tick_ns,
+            time_urgent: true,
+        };
+        let (paper_result, exec_result) = paper_engine.simulate(&request)?;
+        let exec_event = self.build_runtime_execution_event(
+            sequencer,
+            paper_engine,
+            &request,
+            &exec_result,
+            None,
+        );
+        feature_extractor.process_execution_event(&exec_event);
+        projector
+            .process_execution_for_strategy(&exec_event, strategy_id)
+            .map_err(|error| {
+                anyhow::anyhow!("Projector close-out error for {:?}: {}", strategy_id, error)
+            })?;
+        self.sync_limit_state(projector, limit_tracker, limits_config, tick_ns);
+
+        if paper_result.fill_price.is_none() {
+            return Ok(None);
+        }
+
+        let realized_after = projector
+            .snapshot()
+            .positions
+            .get(&strategy_id)
+            .map(|position| position.realized_pnl)
+            .unwrap_or_default();
+        runtime_observability.record_execution_fill(
+            exec_result.fill_price - exec_result.requested_price,
+            exec_result.slippage,
+            None,
+        );
+        self.tracker.record_trade(realized_after - realized_before);
+        self.tracker
+            .record_execution_drift(exec_result.fill_price - exec_result.requested_price);
+
+        Ok(Some((direction, lots)))
+    }
+
     fn force_close_open_positions(
         &mut self,
         sequencer: &mut RuntimeSequencer,
@@ -1615,63 +1699,30 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
         for (strategy_id, size) in open_positions {
             let lots = size.abs().round() as u64;
-            if lots == 0 {
-                continue;
-            }
-
             let direction = if size > 0.0 {
                 Direction::Sell
             } else {
                 Direction::Buy
             };
-            let realized_before = projector
-                .snapshot()
-                .positions
-                .get(&strategy_id)
-                .map(|position| position.realized_pnl)
-                .unwrap_or_default();
-            let request = ExecutionRequest {
+            if let Some((_direction, _lots)) = self.execute_close_order_forward(
+                sequencer,
+                projector,
+                paper_engine,
+                runtime_observability,
+                limit_tracker,
+                limits_config,
+                feature_extractor,
+                tick_ns,
+                &symbol,
+                strategy_id,
                 direction,
                 lots,
-                strategy_id,
-                current_mid_price: mid_price,
+                mid_price,
                 volatility,
-                expected_profit: 0.0,
-                symbol: symbol.clone(),
-                timestamp_ns: tick_ns,
-                time_urgent: true,
-            };
-            let (paper_result, exec_result) = paper_engine.simulate(&request)?;
-            let exec_event = self.build_runtime_execution_event(
-                sequencer,
-                paper_engine,
-                &request,
-                &exec_result,
-                None,
-            );
-            feature_extractor.process_execution_event(&exec_event);
-            if let Err(error) = projector.process_execution_for_strategy(&exec_event, strategy_id) {
-                warn!(?error, ?strategy_id, "Projector close-out error");
-                continue;
-            }
-            self.sync_limit_state(projector, limit_tracker, limits_config, tick_ns);
-            let realized_after = projector
-                .snapshot()
-                .positions
-                .get(&strategy_id)
-                .map(|position| position.realized_pnl)
-                .unwrap_or_default();
-            if paper_result.fill_price.is_some() {
+                0.0,
+            )? {
                 *total_trades += 1;
                 closed_strategies.push(strategy_id);
-                runtime_observability.record_execution_fill(
-                    exec_result.fill_price - exec_result.requested_price,
-                    exec_result.slippage,
-                    None,
-                );
-                self.tracker.record_trade(realized_after - realized_before);
-                self.tracker
-                    .record_execution_drift(exec_result.fill_price - exec_result.requested_price);
             }
         }
 
@@ -1694,6 +1745,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         close_reason: &str,
         mid_price: f64,
         volatility: f64,
+        expected_profit: f64,
     ) -> Option<(Direction, u64)> {
         let snap = projector.snapshot();
         let pos = snap.positions.get(&strategy_id)?;
@@ -1707,74 +1759,40 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             Direction::Buy
         };
         let lots = pos.size.abs().round() as u64;
-        if lots == 0 {
-            return None;
-        }
-
-        let realized_before = projector
-            .snapshot()
-            .positions
-            .get(&strategy_id)
-            .map(|p| p.realized_pnl)
-            .unwrap_or_default();
-
-        let request = ExecutionRequest {
+        let close_result = match self.execute_close_order_forward(
+            sequencer,
+            projector,
+            paper_engine,
+            runtime_observability,
+            limit_tracker,
+            limits_config,
+            feature_extractor,
+            tick_ns,
+            &symbol,
+            strategy_id,
             direction,
             lots,
-            strategy_id,
-            current_mid_price: mid_price,
+            mid_price,
             volatility,
-            expected_profit: 0.0,
-            symbol: symbol.clone(),
-            timestamp_ns: tick_ns,
-            time_urgent: true,
-        };
-
-        let (paper_result, exec_result) = match paper_engine.simulate(&request) {
-            Ok(r) => r,
+            expected_profit,
+        ) {
+            Ok(Some(result)) => result,
+            Ok(None) => return None,
             Err(e) => {
                 warn!(?e, ?strategy_id, "Close execution error");
                 return None;
             }
         };
 
-        let exec_event =
-            self.build_runtime_execution_event(sequencer, paper_engine, &request, &exec_result, None);
-        feature_extractor.process_execution_event(&exec_event);
-        if let Err(e) = projector.process_execution_for_strategy(&exec_event, strategy_id) {
-            warn!(?e, ?strategy_id, "Projector close-out error");
-            return None;
-        }
-        self.sync_limit_state(projector, limit_tracker, limits_config, tick_ns);
-
-        let realized_after = projector
-            .snapshot()
-            .positions
-            .get(&strategy_id)
-            .map(|p| p.realized_pnl)
-            .unwrap_or_default();
-
-        if paper_result.fill_price.is_some() {
-            runtime_observability.record_execution_fill(
-                exec_result.fill_price - exec_result.requested_price,
-                exec_result.slippage,
-                None,
-            );
-            self.tracker.record_trade(realized_after - realized_before);
-            self.tracker
-                .record_execution_drift(exec_result.fill_price - exec_result.requested_price);
-        }
-
         debug!(
             ?strategy_id,
             ?direction,
             lots,
             close_reason,
-            pnl = realized_after - realized_before,
             "Position closed"
         );
 
-        Some((direction, lots))
+        Some(close_result)
     }
 }
 
@@ -1783,6 +1801,16 @@ mod tests {
     use super::*;
     use crate::config::*;
     use crate::feed::DataSourceConfig;
+    use fx_core::types::{Direction, EventTier, StreamId};
+    use fx_events::event::GenericEvent;
+    use fx_events::header::EventHeader;
+    use fx_events::projector::StateSnapshot;
+    use fx_execution::gateway::{
+        ExecutionGatewayConfig, ExecutionResult, FillOutcome, OrderEvaluation,
+    };
+    use fx_execution::otc_model::OtcOrderType;
+    use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
+    use prost::Message;
     use std::collections::VecDeque;
     use std::time::Duration;
 
@@ -1889,6 +1917,116 @@ mod tests {
         }
     }
 
+    fn make_market_event(tick: &TickData, sequence_id: u64) -> GenericEvent {
+        let proto = tick.to_proto();
+        let payload = proto.encode_to_vec();
+        let header = EventHeader::new(StreamId::Market, sequence_id, EventTier::Tier3Raw);
+        GenericEvent::new(
+            EventHeader {
+                timestamp_ns: tick.timestamp_ns,
+                ..header
+            },
+            payload,
+        )
+    }
+
+    fn make_empty_snapshot(now_ns: u64) -> StateSnapshot {
+        StateSnapshot {
+            positions: HashMap::new(),
+            global_position: 0.0,
+            global_position_limit: 10.0,
+            total_unrealized_pnl: 0.0,
+            total_realized_pnl: 0.0,
+            limit_state: fx_events::projector::LimitStateData::default(),
+            state_version: 0,
+            staleness_ms: 0,
+            state_hash: String::new(),
+            lot_multiplier: 1.0,
+            last_market_data_ns: now_ns,
+        }
+    }
+
+    fn high_fill_execution_config() -> ExecutionGatewayConfig {
+        let mut config = ExecutionGatewayConfig::default();
+        config.last_look.prior_alpha = 100.0;
+        config.last_look.prior_beta = 1.0;
+        config.fill_probability.market_fill_prob = 1.0;
+        config.fill_probability.limit_fill_prob_base = 1.0;
+        config
+    }
+
+    fn low_fill_execution_config() -> ExecutionGatewayConfig {
+        let mut config = ExecutionGatewayConfig::default();
+        config.last_look.prior_alpha = 1.0;
+        config.last_look.prior_beta = 1_000.0;
+        config.fill_probability.market_fill_prob = 0.0;
+        config.fill_probability.limit_fill_prob_base = 0.0;
+        config.fill_probability.hidden_liquidity_loc = 0.0;
+        config.fill_probability.hidden_liquidity_scale = 0.0;
+        config
+    }
+
+    fn seed_open_position(
+        runner: &ForwardTestRunner<StubFeed>,
+        sequencer: &mut RuntimeSequencer,
+        projector: &mut StateProjector,
+        feature_extractor: &mut FeatureExtractor,
+        paper_engine: &PaperExecutionEngine,
+        strategy_id: StrategyId,
+        timestamp_ns: u64,
+        mid_price: f64,
+    ) {
+        let request = ExecutionRequest {
+            direction: Direction::Buy,
+            lots: 100_000,
+            strategy_id,
+            current_mid_price: mid_price,
+            volatility: 0.001,
+            expected_profit: 0.0002,
+            symbol: "EUR/USD".to_string(),
+            timestamp_ns,
+            time_urgent: false,
+        };
+        let exec_result = ExecutionResult {
+            order_id: "TEST-ENTRY".to_string(),
+            filled: true,
+            fill_price: mid_price,
+            fill_size: 100_000.0,
+            slippage: 0.0,
+            fill_probability: 1.0,
+            effective_fill_probability: 1.0,
+            last_look_rejection_prob: 0.0,
+            price_improvement: 0.0,
+            order_type: OtcOrderType::Market,
+            fill_status: FillOutcome::Filled,
+            reject_reason: None,
+            lp_id: "TEST_LP".to_string(),
+            requested_price: mid_price,
+            requested_size: 100_000.0,
+            latency_ms: 0.0,
+            evaluation: OrderEvaluation {
+                order_type: OtcOrderType::Market,
+                fill_probability: 1.0,
+                effective_fill_probability: 1.0,
+                expected_slippage: 0.0,
+                last_look_fill_prob: 1.0,
+                lp_id: "TEST_LP".to_string(),
+                limit_price_distance: 0.0,
+            },
+        };
+        let exec_event = runner.build_runtime_execution_event(
+            sequencer,
+            paper_engine,
+            &request,
+            &exec_result,
+            None,
+        );
+        feature_extractor.process_execution_event(&exec_event);
+        projector
+            .process_execution_for_strategy(&exec_event, strategy_id)
+            .expect("seed entry should open a position");
+    }
+
     #[tokio::test]
     async fn test_runner_processes_ticks() {
         let ticks: Vec<TickData> = (0..10)
@@ -1980,13 +2118,22 @@ mod tests {
         // Per-strategy funnel must be identical
         assert_eq!(r1.strategy_funnels.len(), r2.strategy_funnels.len());
         for (sid, f1) in &r1.strategy_funnels {
-            let f2 = r2.strategy_funnels.get(sid).unwrap_or_else(|| {
-                panic!("strategy {} missing in second run", sid)
-            });
+            let f2 = r2
+                .strategy_funnels
+                .get(sid)
+                .unwrap_or_else(|| panic!("strategy {} missing in second run", sid));
             assert_eq!(f1.triggered, f2.triggered, "triggered mismatch for {}", sid);
-            assert_eq!(f1.order_attempted, f2.order_attempted, "order_attempted mismatch for {}", sid);
+            assert_eq!(
+                f1.order_attempted, f2.order_attempted,
+                "order_attempted mismatch for {}",
+                sid
+            );
             assert_eq!(f1.filled, f2.filled, "filled mismatch for {}", sid);
-            assert_eq!(f1.skip_reasons, f2.skip_reasons, "skip_reasons mismatch for {}", sid);
+            assert_eq!(
+                f1.skip_reasons, f2.skip_reasons,
+                "skip_reasons mismatch for {}",
+                sid
+            );
         }
     }
 
@@ -2034,12 +2181,20 @@ mod tests {
         // With 200 ticks and 3 strategies, some trades should happen
         // but this depends on the strategy configs, so just verify consistency
         for r in &results {
-            assert!(r.total_decisions > 0, "decisions should be > 0 for seed {}", r.final_pnl);
+            assert!(
+                r.total_decisions > 0,
+                "decisions should be > 0 for seed {}",
+                r.final_pnl
+            );
         }
 
         // All runs should have funnel data for all strategies
         for r in &results {
-            assert_eq!(r.strategy_funnels.len(), 3, "all strategies should have funnel data");
+            assert_eq!(
+                r.strategy_funnels.len(),
+                3,
+                "all strategies should have funnel data"
+            );
         }
     }
 
@@ -2050,13 +2205,6 @@ mod tests {
     /// same PIT guarantee that backtest provides.
     #[test]
     fn test_pit_execution_features_lagged_after_paper_fill() {
-        use fx_core::types::{Direction, EventTier, StreamId};
-        use fx_execution::gateway::ExecutionGatewayConfig;
-        use fx_events::header::EventHeader;
-        use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
-        use fx_core::types::StrategyId;
-        use prost::Message;
-
         let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
             execution_lag_ns: 100_000_000, // 100ms lag for test
             ..Default::default()
@@ -2066,13 +2214,7 @@ mod tests {
 
         // Create a market event from tick data
         let tick = make_tick(1_000_000, 110.0, 110.005);
-        let proto = tick.to_proto();
-        let payload = proto.encode_to_vec();
-        let header = EventHeader::new(StreamId::Market, 0, EventTier::Tier3Raw);
-        let market_event = GenericEvent::new(
-            EventHeader { timestamp_ns: tick.timestamp_ns, ..header },
-            payload,
-        );
+        let market_event = make_market_event(&tick, 0);
         extractor.process_market_event(&market_event);
 
         // Execute a paper order
@@ -2094,19 +2236,7 @@ mod tests {
         extractor.process_execution_event(&exec_event);
 
         // Query features at the SAME timestamp (within lag window)
-        let snap = fx_events::projector::StateSnapshot {
-            positions: HashMap::new(),
-            global_position: 0.0,
-            global_position_limit: 10.0,
-            total_unrealized_pnl: 0.0,
-            total_realized_pnl: 0.0,
-            limit_state: fx_events::projector::LimitStateData::default(),
-            state_version: 0,
-            staleness_ms: 0,
-            state_hash: String::new(),
-            lot_multiplier: 1.0,
-            last_market_data_ns: 1_000_000,
-        };
+        let snap = make_empty_snapshot(1_000_000);
         let features = extractor.extract(&market_event, &snap, StrategyId::A, 1_000_000);
 
         // PIT assertion: execution features must be zero within the lag window
@@ -2136,13 +2266,6 @@ mod tests {
     /// confirming the lag mechanism works correctly with paper execution events.
     #[test]
     fn test_pit_execution_features_visible_after_lag_expires() {
-        use fx_core::types::{Direction, EventTier, StreamId};
-        use fx_execution::gateway::ExecutionGatewayConfig;
-        use fx_events::header::EventHeader;
-        use fx_strategy::extractor::{FeatureExtractor, FeatureExtractorConfig};
-        use fx_core::types::StrategyId;
-        use prost::Message;
-
         let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
             execution_lag_ns: 100_000_000, // 100ms lag for test
             ..Default::default()
@@ -2168,28 +2291,10 @@ mod tests {
 
         // Advance time past lag window: 200ms > 100ms lag
         let tick_late = make_tick(200_000_000, 110.0, 110.005);
-        let proto_late = tick_late.to_proto();
-        let payload_late = proto_late.encode_to_vec();
-        let header_late = EventHeader::new(StreamId::Market, 1, EventTier::Tier3Raw);
-        let market_event_late = GenericEvent::new(
-            EventHeader { timestamp_ns: tick_late.timestamp_ns, ..header_late },
-            payload_late,
-        );
+        let market_event_late = make_market_event(&tick_late, 1);
         extractor.process_market_event(&market_event_late);
 
-        let snap = fx_events::projector::StateSnapshot {
-            positions: HashMap::new(),
-            global_position: 0.0,
-            global_position_limit: 10.0,
-            total_unrealized_pnl: 0.0,
-            total_realized_pnl: 0.0,
-            limit_state: fx_events::projector::LimitStateData::default(),
-            state_version: 0,
-            staleness_ms: 0,
-            state_hash: String::new(),
-            lot_multiplier: 1.0,
-            last_market_data_ns: 200_000_000,
-        };
+        let snap = make_empty_snapshot(200_000_000);
         let features = extractor.extract(&market_event_late, &snap, StrategyId::A, 200_000_000);
 
         // After lag expires, fill rate should be visible (if the order was filled)
@@ -2200,5 +2305,328 @@ mod tests {
                 features.recent_fill_rate
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_pit_signal_driven_close_features_lagged_same_tick() {
+        let config = make_config(&["A"]);
+        let limits_config = RiskLimitsConfig {
+            max_daily_loss_mtm: -config.risk_config.max_daily_loss_mtm,
+            max_daily_loss_realized: -config.risk_config.max_daily_loss_realized,
+            max_weekly_loss: -config.risk_config.max_weekly_loss,
+            max_monthly_loss: -config.risk_config.max_monthly_loss,
+            daily_mtm_lot_fraction: config.risk_config.daily_mtm_lot_fraction,
+            daily_mtm_q_threshold: config.risk_config.daily_mtm_q_threshold,
+        };
+        let feed = StubFeed::new(vec![]);
+        let mut runner = ForwardTestRunner::new(feed, config.clone());
+        let bus = PartitionedEventBus::new();
+        let mut projector = StateProjector::new(&bus, config.risk_config.max_position_lots, 1);
+        let mut paper_engine =
+            crate::paper::PaperExecutionEngine::new(high_fill_execution_config(), 42);
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
+            execution_lag_ns: 100_000_000,
+            ..Default::default()
+        });
+        let mut sequencer = RuntimeSequencer::new(1);
+        let mut runtime_observability = RuntimeObservabilityState::default();
+        let mut limit_tracker = PeriodicLimitTracker::default();
+
+        seed_open_position(
+            &runner,
+            &mut sequencer,
+            &mut projector,
+            &mut extractor,
+            &paper_engine,
+            StrategyId::A,
+            1,
+            110.0,
+        );
+
+        let tick = make_tick(1_000_000, 110.0, 110.005);
+        let market_event = make_market_event(&tick, 1);
+        extractor.process_market_event(&market_event);
+
+        let closed = runner.close_strategy_position_forward(
+            &mut sequencer,
+            &mut projector,
+            &mut paper_engine,
+            &mut runtime_observability,
+            &mut limit_tracker,
+            &limits_config,
+            &mut extractor,
+            tick.timestamp_ns,
+            tick.symbol.clone(),
+            StrategyId::A,
+            "TRIGGER_EXIT",
+            tick.mid(),
+            tick.spread() / tick.mid(),
+            0.1,
+        );
+        assert!(
+            closed.is_some(),
+            "close path should close the seeded position"
+        );
+
+        let features = extractor.extract(
+            &market_event,
+            projector.snapshot(),
+            StrategyId::A,
+            tick.timestamp_ns,
+        );
+        assert!(
+            (features.recent_fill_rate - 0.0).abs() < 1e-10,
+            "PIT violation after signal-driven close: fill rate must stay hidden within lag window, got {}",
+            features.recent_fill_rate
+        );
+        assert!(
+            (features.recent_slippage - 0.0).abs() < 1e-10,
+            "PIT violation after signal-driven close: slippage must stay hidden within lag window, got {}",
+            features.recent_slippage
+        );
+        assert!(
+            (features.recent_reject_rate - 0.0).abs() < 1e-10,
+            "PIT violation after signal-driven close: reject rate must stay hidden within lag window, got {}",
+            features.recent_reject_rate
+        );
+        assert!(
+            (features.execution_drift_trend - 0.0).abs() < 1e-10,
+            "PIT violation after signal-driven close: execution drift must stay hidden within lag window, got {}",
+            features.execution_drift_trend
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pit_force_close_features_lagged_same_tick() {
+        let config = make_config(&["A"]);
+        let limits_config = RiskLimitsConfig {
+            max_daily_loss_mtm: -config.risk_config.max_daily_loss_mtm,
+            max_daily_loss_realized: -config.risk_config.max_daily_loss_realized,
+            max_weekly_loss: -config.risk_config.max_weekly_loss,
+            max_monthly_loss: -config.risk_config.max_monthly_loss,
+            daily_mtm_lot_fraction: config.risk_config.daily_mtm_lot_fraction,
+            daily_mtm_q_threshold: config.risk_config.daily_mtm_q_threshold,
+        };
+        let feed = StubFeed::new(vec![]);
+        let mut runner = ForwardTestRunner::new(feed, config.clone());
+        let bus = PartitionedEventBus::new();
+        let mut projector = StateProjector::new(&bus, config.risk_config.max_position_lots, 1);
+        let mut paper_engine =
+            crate::paper::PaperExecutionEngine::new(high_fill_execution_config(), 42);
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
+            execution_lag_ns: 100_000_000,
+            ..Default::default()
+        });
+        let mut sequencer = RuntimeSequencer::new(1);
+        let mut runtime_observability = RuntimeObservabilityState::default();
+        let mut limit_tracker = PeriodicLimitTracker::default();
+        let mut total_trades = 0;
+
+        seed_open_position(
+            &runner,
+            &mut sequencer,
+            &mut projector,
+            &mut extractor,
+            &paper_engine,
+            StrategyId::A,
+            1,
+            110.0,
+        );
+
+        let tick = make_tick(1_000_000, 110.0, 110.005);
+        let market_event = make_market_event(&tick, 1);
+        extractor.process_market_event(&market_event);
+
+        let closed = runner
+            .force_close_open_positions(
+                &mut sequencer,
+                &mut projector,
+                &mut paper_engine,
+                &mut runtime_observability,
+                &mut limit_tracker,
+                &limits_config,
+                &mut extractor,
+                tick.timestamp_ns,
+                tick.symbol.clone(),
+                &mut total_trades,
+                tick.mid(),
+                tick.spread() / tick.mid(),
+            )
+            .expect("force-close path should succeed");
+        assert_eq!(
+            closed,
+            vec![StrategyId::A],
+            "force-close should close the seeded position"
+        );
+
+        let features = extractor.extract(
+            &market_event,
+            projector.snapshot(),
+            StrategyId::A,
+            tick.timestamp_ns,
+        );
+        assert!(
+            (features.recent_fill_rate - 0.0).abs() < 1e-10,
+            "PIT violation after forced close: fill rate must stay hidden within lag window, got {}",
+            features.recent_fill_rate
+        );
+        assert!(
+            (features.recent_slippage - 0.0).abs() < 1e-10,
+            "PIT violation after forced close: slippage must stay hidden within lag window, got {}",
+            features.recent_slippage
+        );
+        assert!(
+            (features.recent_reject_rate - 0.0).abs() < 1e-10,
+            "PIT violation after forced close: reject rate must stay hidden within lag window, got {}",
+            features.recent_reject_rate
+        );
+        assert!(
+            (features.execution_drift_trend - 0.0).abs() < 1e-10,
+            "PIT violation after forced close: execution drift must stay hidden within lag window, got {}",
+            features.execution_drift_trend
+        );
+    }
+
+    #[tokio::test]
+    async fn test_signal_driven_close_rejection_does_not_report_close() {
+        let config = make_config(&["A"]);
+        let limits_config = RiskLimitsConfig {
+            max_daily_loss_mtm: -config.risk_config.max_daily_loss_mtm,
+            max_daily_loss_realized: -config.risk_config.max_daily_loss_realized,
+            max_weekly_loss: -config.risk_config.max_weekly_loss,
+            max_monthly_loss: -config.risk_config.max_monthly_loss,
+            daily_mtm_lot_fraction: config.risk_config.daily_mtm_lot_fraction,
+            daily_mtm_q_threshold: config.risk_config.daily_mtm_q_threshold,
+        };
+        let feed = StubFeed::new(vec![]);
+        let mut runner = ForwardTestRunner::new(feed, config.clone());
+        let bus = PartitionedEventBus::new();
+        let mut projector = StateProjector::new(&bus, config.risk_config.max_position_lots, 1);
+        let mut paper_engine =
+            crate::paper::PaperExecutionEngine::new(low_fill_execution_config(), 42);
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
+            execution_lag_ns: 100_000_000,
+            ..Default::default()
+        });
+        let mut sequencer = RuntimeSequencer::new(1);
+        let mut runtime_observability = RuntimeObservabilityState::default();
+        let mut limit_tracker = PeriodicLimitTracker::default();
+
+        seed_open_position(
+            &runner,
+            &mut sequencer,
+            &mut projector,
+            &mut extractor,
+            &paper_engine,
+            StrategyId::A,
+            1,
+            110.0,
+        );
+
+        let tick = make_tick(1_000_000, 110.0, 110.005);
+        let closed = runner.close_strategy_position_forward(
+            &mut sequencer,
+            &mut projector,
+            &mut paper_engine,
+            &mut runtime_observability,
+            &mut limit_tracker,
+            &limits_config,
+            &mut extractor,
+            tick.timestamp_ns,
+            tick.symbol.clone(),
+            StrategyId::A,
+            "TRIGGER_EXIT",
+            tick.mid(),
+            tick.spread() / tick.mid(),
+            0.1,
+        );
+
+        assert!(
+            closed.is_none(),
+            "rejected signal-driven close must not be reported as a close"
+        );
+        assert!(
+            projector
+                .snapshot()
+                .positions
+                .get(&StrategyId::A)
+                .map(|p| p.is_open())
+                .unwrap_or(false),
+            "position should remain open after rejected close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_force_close_reports_only_filled_closes() {
+        let config = make_config(&["A"]);
+        let limits_config = RiskLimitsConfig {
+            max_daily_loss_mtm: -config.risk_config.max_daily_loss_mtm,
+            max_daily_loss_realized: -config.risk_config.max_daily_loss_realized,
+            max_weekly_loss: -config.risk_config.max_weekly_loss,
+            max_monthly_loss: -config.risk_config.max_monthly_loss,
+            daily_mtm_lot_fraction: config.risk_config.daily_mtm_lot_fraction,
+            daily_mtm_q_threshold: config.risk_config.daily_mtm_q_threshold,
+        };
+        let feed = StubFeed::new(vec![]);
+        let mut runner = ForwardTestRunner::new(feed, config.clone());
+        let bus = PartitionedEventBus::new();
+        let mut projector = StateProjector::new(&bus, config.risk_config.max_position_lots, 1);
+        let mut paper_engine =
+            crate::paper::PaperExecutionEngine::new(low_fill_execution_config(), 42);
+        let mut extractor = FeatureExtractor::new(FeatureExtractorConfig {
+            execution_lag_ns: 100_000_000,
+            ..Default::default()
+        });
+        let mut sequencer = RuntimeSequencer::new(1);
+        let mut runtime_observability = RuntimeObservabilityState::default();
+        let mut limit_tracker = PeriodicLimitTracker::default();
+        let mut total_trades = 0;
+
+        seed_open_position(
+            &runner,
+            &mut sequencer,
+            &mut projector,
+            &mut extractor,
+            &paper_engine,
+            StrategyId::A,
+            1,
+            110.0,
+        );
+
+        let tick = make_tick(1_000_000, 110.0, 110.005);
+        let closed = runner
+            .force_close_open_positions(
+                &mut sequencer,
+                &mut projector,
+                &mut paper_engine,
+                &mut runtime_observability,
+                &mut limit_tracker,
+                &limits_config,
+                &mut extractor,
+                tick.timestamp_ns,
+                tick.symbol.clone(),
+                &mut total_trades,
+                tick.mid(),
+                tick.spread() / tick.mid(),
+            )
+            .expect("force-close path should execute without crashing");
+
+        assert!(
+            closed.is_empty(),
+            "rejected force-close must not be reported as a filled close"
+        );
+        assert_eq!(
+            total_trades, 0,
+            "rejected force-close must not count as a trade"
+        );
+        assert!(
+            projector
+                .snapshot()
+                .positions
+                .get(&StrategyId::A)
+                .map(|p| p.is_open())
+                .unwrap_or(false),
+            "position should remain open after rejected force-close"
+        );
     }
 }

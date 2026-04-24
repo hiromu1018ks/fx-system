@@ -1025,6 +1025,7 @@ impl BacktestEngine {
                         sid,
                         "MAX_HOLD_TIME",
                         TerminalReason::MaxHoldTimeExceeded,
+                        0.0,
                     ) {
                         let limit_state = limit_tracker.update(
                             tick_ns,
@@ -1205,6 +1206,7 @@ impl BacktestEngine {
                         sid,
                         trade_close_reason,
                         TerminalReason::PositionClosed,
+                        decision.q_sampled,
                     ) {
                         let limit_state = limit_tracker.update(
                             tick_ns,
@@ -2139,14 +2141,13 @@ impl BacktestEngine {
                     latency_ms: result.latency_ms,
                     close_reason: Some(reason.to_string()),
                 });
+                self.end_strategy_episode(
+                    pos_snap.strategy_id,
+                    terminal_reason,
+                    tick_ns,
+                    projector.snapshot(),
+                );
             }
-
-            self.end_strategy_episode(
-                pos_snap.strategy_id,
-                terminal_reason,
-                tick_ns,
-                projector.snapshot(),
-            );
         }
     }
 
@@ -2166,6 +2167,7 @@ impl BacktestEngine {
         sid: StrategyId,
         close_reason: &str,
         terminal_reason: TerminalReason,
+        expected_profit: f64,
     ) -> Option<(Direction, u64, Option<Uuid>)> {
         let snap = projector.snapshot();
         let pos = snap.positions.get(&sid)?;
@@ -2180,47 +2182,57 @@ impl BacktestEngine {
         };
         let lots = pos.size.abs() as u64;
 
-        let result = self.simulate_order(direction, lots, sid, mid_price, volatility, tick_ns, 0.0, true);
-        let mut snapshot_parent = parent_event_id;
+        let result = self.simulate_order(
+            direction,
+            lots,
+            sid,
+            mid_price,
+            volatility,
+            tick_ns,
+            expected_profit,
+            true,
+        );
 
-        if result.filled {
-            runtime_observability.record_execution_fill(
-                result.fill_price - result.requested_price,
-                result.slippage,
-                None,
-            );
-            let (trade_pnl, exec_event) = self.process_execution_result(
-                runtime_sequencer,
-                sid,
-                &result,
-                direction,
-                tick_ns,
-                parent_event_id,
-                projector,
-            );
-            if let Some(ref exec_ev) = exec_event {
-                feature_extractor.process_execution_event(exec_ev);
-            }
-            snapshot_parent = exec_event
-                .as_ref()
-                .map(|ev| ev.header.event_id)
-                .or(parent_event_id);
-            if let Some(ev) = exec_event {
-                execution_events.push(ev);
-            }
-            trades.push(TradeRecord {
-                timestamp_ns: tick_ns,
-                strategy_id: sid,
-                direction,
-                lots: result.fill_size,
-                fill_price: result.fill_price,
-                slippage: result.slippage,
-                pnl: trade_pnl,
-                fill_probability: result.effective_fill_probability,
-                latency_ms: result.latency_ms,
-                close_reason: Some(close_reason.to_string()),
-            });
+        if !result.filled {
+            return None;
         }
+
+        runtime_observability.record_execution_fill(
+            result.fill_price - result.requested_price,
+            result.slippage,
+            None,
+        );
+        let (trade_pnl, exec_event) = self.process_execution_result(
+            runtime_sequencer,
+            sid,
+            &result,
+            direction,
+            tick_ns,
+            parent_event_id,
+            projector,
+        );
+        if let Some(ref exec_ev) = exec_event {
+            feature_extractor.process_execution_event(exec_ev);
+        }
+        let snapshot_parent = exec_event
+            .as_ref()
+            .map(|ev| ev.header.event_id)
+            .or(parent_event_id);
+        if let Some(ev) = exec_event {
+            execution_events.push(ev);
+        }
+        trades.push(TradeRecord {
+            timestamp_ns: tick_ns,
+            strategy_id: sid,
+            direction,
+            lots: result.fill_size,
+            fill_price: result.fill_price,
+            slippage: result.slippage,
+            pnl: trade_pnl,
+            fill_probability: result.effective_fill_probability,
+            latency_ms: result.latency_ms,
+            close_reason: Some(close_reason.to_string()),
+        });
 
         self.end_strategy_episode(sid, terminal_reason, tick_ns, projector.snapshot());
 
