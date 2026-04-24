@@ -305,6 +305,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             })
             .collect();
 
+        let mut last_mid_price: f64 = 0.0;
+        let mut last_volatility: f64 = 0.0;
+
         loop {
             if let Some(dl) = deadline {
                 if Instant::now() >= dl {
@@ -323,6 +326,14 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
             total_ticks += 1;
             let tick_ns = tick.timestamp_ns;
+            let tick_mid = tick.mid();
+            let tick_vol = if tick_mid > 0.0 {
+                tick.spread() / tick_mid
+            } else {
+                0.0
+            };
+            last_mid_price = tick_mid;
+            last_volatility = tick_vol;
             market_sequence_id = market_sequence_id.saturating_add(1);
             let market_event = self.tick_to_event(&tick, market_sequence_id);
 
@@ -467,6 +478,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     tick_ns,
                     tick.symbol.clone(),
                     &mut total_trades,
+                    tick_mid,
+                    tick_vol,
                 )?;
                 // End MC episodes for all strategies that were force-closed
                 let terminal = match reason {
@@ -640,6 +653,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         tick.symbol.clone(),
                         sid,
                         "MAX_HOLD_TIME",
+                        tick_mid,
+                        tick_vol,
                     ) {
                         total_trades += 1;
                         // End MC episode and update Q-function
@@ -791,6 +806,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                                 tick.symbol.clone(),
                                 strategy_id,
                                 "TRIGGER_EXIT",
+                                tick_mid,
+                                tick_vol,
                             )
                         {
                             total_trades += 1;
@@ -1020,6 +1037,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 shutdown_ts,
                 self.default_symbol(),
                 &mut total_trades,
+                last_mid_price,
+                last_volatility,
             )?;
             // End MC episodes for shutdown-closed positions
             for &sid in &enabled_strategies {
@@ -1466,22 +1485,24 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         tick_ns: u64,
         symbol: String,
         total_trades: &mut u64,
+        mid_price: f64,
+        volatility: f64,
     ) -> Result<()> {
-        let mut open_positions: Vec<(StrategyId, f64, f64)> = projector
+        let mut open_positions: Vec<(StrategyId, f64)> = projector
             .snapshot()
             .positions
             .iter()
             .filter_map(|(strategy_id, position)| {
                 if position.is_open() {
-                    Some((*strategy_id, position.size, position.entry_price))
+                    Some((*strategy_id, position.size))
                 } else {
                     None
                 }
             })
             .collect();
-        open_positions.sort_by_key(|(sid, _, _)| format!("{:?}", sid));
+        open_positions.sort_by_key(|(sid, _)| format!("{:?}", sid));
 
-        for (strategy_id, size, entry_price) in open_positions {
+        for (strategy_id, size) in open_positions {
             let lots = size.abs().round() as u64;
             if lots == 0 {
                 continue;
@@ -1502,8 +1523,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 direction,
                 lots,
                 strategy_id,
-                current_mid_price: entry_price,
-                volatility: 0.0,
+                current_mid_price: mid_price,
+                volatility,
                 expected_profit: 0.0,
                 symbol: symbol.clone(),
                 timestamp_ns: tick_ns,
@@ -1557,6 +1578,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         symbol: String,
         strategy_id: StrategyId,
         close_reason: &str,
+        mid_price: f64,
+        volatility: f64,
     ) -> Option<(Direction, u64)> {
         let snap = projector.snapshot();
         let pos = snap.positions.get(&strategy_id)?;
@@ -1574,7 +1597,6 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             return None;
         }
 
-        let entry_price = pos.entry_price;
         let realized_before = projector
             .snapshot()
             .positions
@@ -1586,8 +1608,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             direction,
             lots,
             strategy_id,
-            current_mid_price: entry_price,
-            volatility: 0.0,
+            current_mid_price: mid_price,
+            volatility,
             expected_profit: 0.0,
             symbol: symbol.clone(),
             timestamp_ns: tick_ns,
