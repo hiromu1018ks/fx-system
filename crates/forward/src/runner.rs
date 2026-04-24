@@ -1940,7 +1940,24 @@ mod tests {
         let mut runner2 = ForwardTestRunner::new(feed2, config);
         let r2 = runner2.run(12345).await.unwrap();
 
+        // Full reproducibility: all aggregate fields must match
         assert_eq!(r1.total_ticks, r2.total_ticks);
+        assert_eq!(r1.total_decisions, r2.total_decisions);
+        assert_eq!(r1.total_trades, r2.total_trades);
+        assert_eq!(r1.strategy_events_published, r2.strategy_events_published);
+        assert_eq!(r1.state_snapshots_published, r2.state_snapshots_published);
+
+        // Per-strategy funnel must be identical
+        assert_eq!(r1.strategy_funnels.len(), r2.strategy_funnels.len());
+        for (sid, f1) in &r1.strategy_funnels {
+            let f2 = r2.strategy_funnels.get(sid).unwrap_or_else(|| {
+                panic!("strategy {} missing in second run", sid)
+            });
+            assert_eq!(f1.triggered, f2.triggered, "triggered mismatch for {}", sid);
+            assert_eq!(f1.order_attempted, f2.order_attempted, "order_attempted mismatch for {}", sid);
+            assert_eq!(f1.filled, f2.filled, "filled mismatch for {}", sid);
+            assert_eq!(f1.skip_reasons, f2.skip_reasons, "skip_reasons mismatch for {}", sid);
+        }
     }
 
     // -- PIT / information leakage regression tests --
