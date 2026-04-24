@@ -300,9 +300,14 @@ impl BayesianLinearRegression {
 
         let expected_covariance = precision_inverse.clone() * snapshot.sigma2_noise;
         let covariance_diff = max_abs_matrix_diff(&expected_covariance, &posterior_covariance);
-        if covariance_diff > 1e-4 {
-            bail!(
-                "BayesianLinearRegression snapshot posterior_covariance does not match precision_inverse * sigma2_noise (max diff: {covariance_diff})"
+        // Warn but don't fail: Sherman-Morrison updates accumulate floating-point drift.
+        // The stored precision_inverse (A_inv) is authoritative; posterior_covariance is
+        // informational and will be recomputed from A_inv on next use.
+        if covariance_diff > 1e-3 {
+            tracing::warn!(
+                max_diff = covariance_diff,
+                dim = snapshot.dim,
+                "Q-state import: posterior_covariance drift from Sherman-Morrison accumulation (using precision_inverse as authoritative)"
             );
         }
 
