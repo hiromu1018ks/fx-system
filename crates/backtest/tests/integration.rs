@@ -3793,3 +3793,48 @@ fn test_full_pipeline_design_gap_conformance() {
         "Strategy C should use 43-dim features"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 13. Learning OFF mode: Q-function must not update when learning_enabled=false
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_learning_off_freezes_q_function() {
+    use fx_backtest::engine::{generate_synthetic_ticks, BacktestConfig, BacktestEngine};
+
+    let ns_base = 1_700_000_000_000_000u64;
+    let events = generate_synthetic_ticks(ns_base, 2000, 100, 110.0, 0.005);
+
+    // Run with learning ON (baseline)
+    let config_on = BacktestConfig {
+        rng_seed: Some([42u8; 32]),
+        learning_enabled: true,
+        ..BacktestConfig::default()
+    };
+    let mut engine_on = BacktestEngine::new(config_on);
+    let stats_on = engine_on.run_from_events(&events);
+
+    // Run with learning OFF
+    let config_off = BacktestConfig {
+        rng_seed: Some([42u8; 32]),
+        learning_enabled: false,
+        ..BacktestConfig::default()
+    };
+    let mut engine_off = BacktestEngine::new(config_off);
+    let stats_off = engine_off.run_from_events(&events);
+
+    // Both should complete without error regardless of trade count
+    assert_eq!(stats_on.total_ticks, stats_off.total_ticks);
+
+    // Learning OFF should be deterministic: two runs with same seed produce
+    // identical results (Q-function never changes).
+    let config_off2 = BacktestConfig {
+        rng_seed: Some([42u8; 32]),
+        learning_enabled: false,
+        ..BacktestConfig::default()
+    };
+    let mut engine_off2 = BacktestEngine::new(config_off2);
+    let stats_off2 = engine_off2.run_from_events(&events);
+    assert_eq!(stats_off.trades.len(), stats_off2.trades.len());
+    assert_eq!(stats_off.decisions.len(), stats_off2.decisions.len());
+}

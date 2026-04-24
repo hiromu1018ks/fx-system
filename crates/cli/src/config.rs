@@ -57,6 +57,9 @@ pub fn load_backtest_config(path: &Path) -> Result<BacktestConfig> {
     if let Some(v) = table.get("rng_seed").and_then(|v| v.as_integer()) {
         config.rng_seed = Some(expand_u64_seed(v as u64));
     }
+    if let Some(v) = table.get("learning_enabled").and_then(|v| v.as_bool()) {
+        config.learning_enabled = v;
+    }
 
     // Strategy A config
     if let Some(sa) = table.get("strategy_a").and_then(|v| v.as_table()) {

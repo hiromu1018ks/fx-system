@@ -394,6 +394,10 @@ fn apply_backtest_overrides(
         config.end_time_ns = end_time_ns;
     }
 
+    if cmd.no_learn {
+        config.learning_enabled = false;
+    }
+
     Ok(())
 }
 
@@ -721,6 +725,7 @@ mod tests {
             import_q_state: None,
             export_q_state: None,
             seed: Some(42),
+            no_learn: false,
         };
 
         apply_backtest_overrides(&mut config, &cmd).unwrap();

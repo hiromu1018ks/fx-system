@@ -103,6 +103,10 @@ pub struct BacktestConfig {
     pub lifecycle_config: LifecycleConfig,
     /// Regime management configuration.
     pub regime_config: RegimeConfig,
+    /// When false, Q-function updates are disabled (frozen evaluation mode).
+    /// Thompson Sampling still samples from the posterior for decisions,
+    /// but the posterior is never updated from MC returns.
+    pub learning_enabled: bool,
 }
 
 impl Default for BacktestConfig {
@@ -130,6 +134,7 @@ impl Default for BacktestConfig {
             },
             lifecycle_config: LifecycleConfig::default(),
             regime_config: RegimeConfig::default(),
+            learning_enabled: true,
         }
     }
 }
@@ -1705,8 +1710,8 @@ impl BacktestEngine {
                     }
                 }
 
-                // Phase 4: Record MC transition for active episodes
-                if self.mc_evaluator.has_active_episode(sid) {
+                // Phase 4: Record MC transition for active episodes (learning only)
+                if self.config.learning_enabled && self.mc_evaluator.has_active_episode(sid) {
                     let ctx = tick_contexts.get(&sid).unwrap();
                     let phi = self.extract_strategy_features(sid, &ctx.features);
                     let snap = projector.snapshot();
@@ -2472,12 +2477,14 @@ impl BacktestEngine {
     ) {
         if self.mc_evaluator.has_active_episode(sid) {
             let episode_result = self.mc_evaluator.end_episode(sid, reason, tick_ns);
-            let q_fn = match sid {
-                StrategyId::A => self.strategy_a.q_function_mut(),
-                StrategyId::B => self.strategy_b.q_function_mut(),
-                StrategyId::C => self.strategy_c.q_function_mut(),
-            };
-            McEvaluator::update_from_result(q_fn, &episode_result);
+            if self.config.learning_enabled {
+                let q_fn = match sid {
+                    StrategyId::A => self.strategy_a.q_function_mut(),
+                    StrategyId::B => self.strategy_b.q_function_mut(),
+                    StrategyId::C => self.strategy_c.q_function_mut(),
+                };
+                McEvaluator::update_from_result(q_fn, &episode_result);
+            }
 
             // Record episode with LifecycleManager for strategy culling evaluation
             let summary = EpisodeSummary {

@@ -62,6 +62,10 @@ pub struct BacktestCmd {
     /// RNG seed for reproducibility. When omitted, preserves config/default engine behavior.
     #[arg(long)]
     pub seed: Option<u64>,
+
+    /// Disable Q-function learning (frozen evaluation mode).
+    #[arg(long)]
+    pub no_learn: bool,
 }
 
 /// Forward-test subcommand arguments.
