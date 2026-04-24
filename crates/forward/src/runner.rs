@@ -863,7 +863,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 }
 
                 // Check global position constraint (static method)
-                if GlobalPositionChecker::validate_order(
+                let effective_lots = match GlobalPositionChecker::validate_order(
                     &position_config,
                     &snapshot,
                     strategy_id,
@@ -871,9 +871,28 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     lots as f64,
                     decision.q_sampled,
                     &all_q,
-                )
-                .is_err()
-                {
+                ) {
+                    Ok(r) => r.effective_lot.max(0.0) as u64,
+                    Err(_) => {
+                        let skip_snapshot = projector.snapshot().clone();
+                        self.emit_trade_skip_event(
+                            &mut runtime_sequencer,
+                            &mut projector,
+                            Some(decision_event_id),
+                            tick_ns,
+                            strategy_id,
+                            "global_position_rejected",
+                            decision.q_sampled,
+                            decision.q_point,
+                            &skip_snapshot,
+                            &regime_cache,
+                        );
+                        strategy_events_published = strategy_events_published.saturating_add(1);
+                        continue;
+                    }
+                };
+
+                if effective_lots == 0 {
                     let skip_snapshot = projector.snapshot().clone();
                     self.emit_trade_skip_event(
                         &mut runtime_sequencer,
@@ -881,7 +900,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         Some(decision_event_id),
                         tick_ns,
                         strategy_id,
-                        "global_position_rejected",
+                        "zero_effective_lot",
                         decision.q_sampled,
                         decision.q_point,
                         &skip_snapshot,
@@ -901,7 +920,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
                 let request = ExecutionRequest {
                     direction,
-                    lots,
+                    lots: effective_lots,
                     strategy_id,
                     current_mid_price: mid_price,
                     volatility,
