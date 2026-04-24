@@ -475,6 +475,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     &mut runtime_observability,
                     &mut limit_tracker,
                     &limits_config,
+                    &mut feature_extractor,
                     tick_ns,
                     tick.symbol.clone(),
                     &mut total_trades,
@@ -649,6 +650,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         &mut runtime_observability,
                         &mut limit_tracker,
                         &limits_config,
+                        &mut feature_extractor,
                         tick_ns,
                         tick.symbol.clone(),
                         sid,
@@ -802,6 +804,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                                 &mut runtime_observability,
                                 &mut limit_tracker,
                                 &limits_config,
+                                &mut feature_extractor,
                                 tick_ns,
                                 tick.symbol.clone(),
                                 strategy_id,
@@ -966,6 +969,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     &exec_result,
                     Some(decision_event_id),
                 );
+                feature_extractor.process_execution_event(&exec_event);
                 if let Err(e) = projector.process_execution_for_strategy(&exec_event, strategy_id) {
                     warn!("Projector execution error: {}", e);
                 }
@@ -1053,6 +1057,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 &mut runtime_observability,
                 &mut limit_tracker,
                 &limits_config,
+                &mut feature_extractor,
                 shutdown_ts,
                 self.default_symbol(),
                 &mut total_trades,
@@ -1501,6 +1506,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         runtime_observability: &mut RuntimeObservabilityState,
         limit_tracker: &mut PeriodicLimitTracker,
         limits_config: &RiskLimitsConfig,
+        feature_extractor: &mut FeatureExtractor,
         tick_ns: u64,
         symbol: String,
         total_trades: &mut u64,
@@ -1557,6 +1563,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 &exec_result,
                 None,
             );
+            feature_extractor.process_execution_event(&exec_event);
             if let Err(error) = projector.process_execution_for_strategy(&exec_event, strategy_id) {
                 warn!(?error, ?strategy_id, "Projector close-out error");
                 continue;
@@ -1593,6 +1600,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         runtime_observability: &mut RuntimeObservabilityState,
         limit_tracker: &mut PeriodicLimitTracker,
         limits_config: &RiskLimitsConfig,
+        feature_extractor: &mut FeatureExtractor,
         tick_ns: u64,
         symbol: String,
         strategy_id: StrategyId,
@@ -1645,6 +1653,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
 
         let exec_event =
             self.build_runtime_execution_event(sequencer, paper_engine, &request, &exec_result, None);
+        feature_extractor.process_execution_event(&exec_event);
         if let Err(e) = projector.process_execution_for_strategy(&exec_event, strategy_id) {
             warn!(?e, ?strategy_id, "Projector close-out error");
             return None;
