@@ -330,6 +330,7 @@ fn run_recorded_forward(
             duration_secs: elapsed.as_secs_f64(),
             final_pnl: snapshot.cumulative_pnl,
             strategies_used: vec![],
+            strategy_funnels: std::collections::HashMap::new(),
         };
         println!(
             "Forward test interrupted after {:.1}s: {} trades, PnL: {:.2}",
@@ -485,6 +486,7 @@ fn run_external_forward(
             duration_secs: elapsed.as_secs_f64(),
             final_pnl: snapshot.cumulative_pnl,
             strategies_used: vec![],
+            strategy_funnels: std::collections::HashMap::new(),
         };
         println!(
             "Forward test interrupted after {:.1}s: {} trades, PnL: {:.2}",

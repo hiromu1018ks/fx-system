@@ -46,6 +46,23 @@ use crate::feed::MarketFeed;
 use crate::paper::PaperExecutionEngine;
 use crate::tracker::PerformanceTracker;
 
+/// Per-strategy funnel diagnostics for entry path analysis.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StrategyFunnel {
+    pub triggered: u64,
+    pub order_attempted: u64,
+    pub risk_passed: u64,
+    pub filled: u64,
+    pub closed: u64,
+    pub skip_reasons: HashMap<String, u64>,
+}
+
+impl StrategyFunnel {
+    fn record_skip(&mut self, reason: &str) {
+        *self.skip_reasons.entry(reason.to_string()).or_insert(0) += 1;
+    }
+}
+
 /// Summary of a forward test run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardTestResult {
@@ -57,6 +74,7 @@ pub struct ForwardTestResult {
     pub duration_secs: f64,
     pub final_pnl: f64,
     pub strategies_used: Vec<String>,
+    pub strategy_funnels: HashMap<String, StrategyFunnel>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -284,6 +302,10 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         });
 
         let enabled_strategies = self.get_enabled_strategies();
+        let mut strategy_funnels: HashMap<StrategyId, StrategyFunnel> = enabled_strategies
+            .iter()
+            .map(|&sid| (sid, StrategyFunnel::default()))
+            .collect();
         let mut strategy_runtimes: HashMap<StrategyId, StrategyRuntime> = enabled_strategies
             .iter()
             .copied()
@@ -783,6 +805,11 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     fx_strategy::policy::Action::Hold => continue,
                 };
 
+                // Funnel: triggered (non-Hold decision)
+                if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                    funnel.triggered += 1;
+                }
+
                 // Signal-driven exit or already_in_position guard
                 let pos_size = snapshot
                     .positions
@@ -830,6 +857,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         continue;
                     }
                     // Same direction — already in position
+                    if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                        funnel.record_skip("already_in_position");
+                    }
                     let skip_snapshot = projector.snapshot().clone();
                     self.emit_trade_skip_event(
                         &mut runtime_sequencer,
@@ -848,6 +878,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 }
 
                 if lots == 0 {
+                    if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                        funnel.record_skip("zero_effective_lot");
+                    }
                     let skip_snapshot = projector.snapshot().clone();
                     self.emit_trade_skip_event(
                         &mut runtime_sequencer,
@@ -877,6 +910,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 ) {
                     Ok(r) => r.effective_lot.max(0.0) as u64,
                     Err(_) => {
+                        if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                            funnel.record_skip("global_position_rejected");
+                        }
                         let skip_snapshot = projector.snapshot().clone();
                         self.emit_trade_skip_event(
                             &mut runtime_sequencer,
@@ -896,6 +932,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 };
 
                 if effective_lots == 0 {
+                    if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                        funnel.record_skip("zero_effective_lot");
+                    }
                     let skip_snapshot = projector.snapshot().clone();
                     self.emit_trade_skip_event(
                         &mut runtime_sequencer,
@@ -921,6 +960,11 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     0.0
                 };
 
+                // Funnel: order_attempted (passed all pre-execution checks)
+                if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                    funnel.order_attempted += 1;
+                }
+
                 let request = ExecutionRequest {
                     direction,
                     lots: effective_lots,
@@ -943,6 +987,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     Ok(r) => r,
                     Err(e) => {
                         warn!("Paper execution error: {}", e);
+                        if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                            funnel.record_skip("execution_rejected");
+                        }
                         let skip_snapshot = projector.snapshot().clone();
                         self.emit_trade_skip_event(
                             &mut runtime_sequencer,
@@ -992,6 +1039,10 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 // Record episode in lifecycle
                 let pnl = if paper_result.fill_price.is_some() {
                     total_trades += 1;
+                    // Funnel: filled
+                    if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                        funnel.filled += 1;
+                    }
                     runtime_observability.record_execution_fill(
                         exec_result.fill_price - exec_result.requested_price,
                         exec_result.slippage,
@@ -1099,6 +1150,11 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         let elapsed = start.elapsed();
         let mut strategies_used: Vec<_> = self.config.enabled_strategies.iter().cloned().collect();
         strategies_used.sort();
+        let strategy_funnels: HashMap<String, StrategyFunnel> = strategy_funnels
+            .into_iter()
+            .map(|(sid, funnel)| (format!("{:?}", sid), funnel))
+            .collect();
+
         let result = ForwardTestResult {
             total_ticks,
             total_decisions,
@@ -1108,6 +1164,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             duration_secs: elapsed.as_secs_f64(),
             final_pnl: self.tracker.snapshot().cumulative_pnl,
             strategies_used,
+            strategy_funnels,
         };
 
         info!(

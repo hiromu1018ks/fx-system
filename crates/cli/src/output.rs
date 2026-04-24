@@ -660,6 +660,7 @@ mod tests {
             duration_secs: 60.0,
             final_pnl: 250.0,
             strategies_used: vec!["A".to_string(), "C".to_string()],
+            strategy_funnels: std::collections::HashMap::new(),
         };
         let output = ForwardResultJson::from_result(&result);
         let json = serde_json::to_string(&output).unwrap();
@@ -679,6 +680,7 @@ mod tests {
             duration_secs: 60.0,
             final_pnl: 250.0,
             strategies_used: vec!["A".to_string()],
+            strategy_funnels: std::collections::HashMap::new(),
         };
         write_forward_result(&result, dir.path()).unwrap();
 

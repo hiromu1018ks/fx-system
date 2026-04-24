@@ -5,6 +5,7 @@
 //!
 //! plus alert system, comparison engine, reproducibility, and report generation.
 
+use std::collections::HashMap;
 use fx_events::event::GenericEvent;
 use fx_forward::alert::{
     Alert, AlertEvaluator, AlertSeverity, AlertSystem, AlertType, LogAlertChannel,
@@ -447,6 +448,7 @@ fn test_report_generator_json_output() {
             duration_secs: 10.0,
             final_pnl: 50.0,
             strategies_used: vec!["A".to_string(), "B".to_string()],
+            strategy_funnels: HashMap::new(),
         },
         performance: PerformanceSnapshot::default(),
         comparison: None,
@@ -486,6 +488,7 @@ fn test_report_generator_csv_output() {
             duration_secs: 10.0,
             final_pnl: 50.0,
             strategies_used: vec!["A".to_string()],
+            strategy_funnels: HashMap::new(),
         },
         performance: PerformanceSnapshot::default(),
         comparison: None,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -150,6 +151,7 @@ mod tests {
                 duration_secs: 60.0,
                 final_pnl: 50.0,
                 strategies_used: vec!["A".to_string()],
+                strategy_funnels: HashMap::new(),
             },
             performance: PerformanceSnapshot::default(),
             comparison: None,
