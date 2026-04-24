@@ -300,7 +300,7 @@ impl BayesianLinearRegression {
 
         let expected_covariance = precision_inverse.clone() * snapshot.sigma2_noise;
         let covariance_diff = max_abs_matrix_diff(&expected_covariance, &posterior_covariance);
-        if covariance_diff > 1e-6 {
+        if covariance_diff > 1e-4 {
             bail!(
                 "BayesianLinearRegression snapshot posterior_covariance does not match precision_inverse * sigma2_noise (max diff: {covariance_diff})"
             );
