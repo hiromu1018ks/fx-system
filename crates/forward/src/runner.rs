@@ -46,7 +46,7 @@ use crate::feed::MarketFeed;
 use crate::paper::PaperExecutionEngine;
 use crate::tracker::PerformanceTracker;
 
-/// Per-strategy funnel diagnostics for entry path analysis.
+/// Per-strategy funnel diagnostics for entry path and exit quality analysis.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrategyFunnel {
     pub triggered: u64,
@@ -55,11 +55,17 @@ pub struct StrategyFunnel {
     pub filled: u64,
     pub closed: u64,
     pub skip_reasons: HashMap<String, u64>,
+    pub close_reasons: HashMap<String, u64>,
 }
 
 impl StrategyFunnel {
     fn record_skip(&mut self, reason: &str) {
         *self.skip_reasons.entry(reason.to_string()).or_insert(0) += 1;
+    }
+
+    fn record_close(&mut self, reason: &str) {
+        *self.close_reasons.entry(reason.to_string()).or_insert(0) += 1;
+        self.closed += 1;
     }
 }
 
@@ -490,7 +496,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             let (limit_result, close_reason) =
                 HierarchicalRiskLimiter::evaluate(&limits_config, &snapshot.limit_state);
             if let Some(reason) = close_reason {
-                self.force_close_open_positions(
+                let closed_from_risk = self.force_close_open_positions(
                     &mut runtime_sequencer,
                     &mut projector,
                     &mut paper_engine,
@@ -504,6 +510,17 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                     tick_mid,
                     tick_vol,
                 )?;
+                let close_label = match reason {
+                    CloseReason::DailyRealizedHalt => "risk_daily_realized",
+                    CloseReason::WeeklyHalt => "risk_weekly",
+                    CloseReason::MonthlyHalt => "risk_monthly",
+                    CloseReason::WeekendHalt => "risk_weekend",
+                };
+                for closed_sid in &closed_from_risk {
+                    if let Some(funnel) = strategy_funnels.get_mut(closed_sid) {
+                        funnel.record_close(close_label);
+                    }
+                }
                 // End MC episodes for all strategies that were force-closed
                 let terminal = match reason {
                     CloseReason::DailyRealizedHalt => TerminalReason::DailyHardLimit,
@@ -681,6 +698,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                         tick_vol,
                     ) {
                         total_trades += 1;
+                        if let Some(funnel) = strategy_funnels.get_mut(&sid) {
+                            funnel.record_close("MAX_HOLD_TIME");
+                        }
                         // End MC episode and update Q-function
                         if mc_evaluator.has_active_episode(sid) {
                             let q_fn = strategy_runtimes.get_mut(&sid).map(|r| r.policy.q_function_mut());
@@ -841,6 +861,9 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                             )
                         {
                             total_trades += 1;
+                            if let Some(funnel) = strategy_funnels.get_mut(&strategy_id) {
+                                funnel.record_close("TRIGGER_EXIT");
+                            }
                             // End MC episode and update Q-function
                             if mc_evaluator.has_active_episode(strategy_id) {
                                 let q_fn = strategy_runtimes.get_mut(&strategy_id).map(|r| r.policy.q_function_mut());
@@ -1101,7 +1124,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             .any(|position| position.is_open())
         {
             let shutdown_ts = projector.snapshot().last_market_data_ns.max(1);
-            self.force_close_open_positions(
+            let closed_from_shutdown = self.force_close_open_positions(
                 &mut runtime_sequencer,
                 &mut projector,
                 &mut paper_engine,
@@ -1115,6 +1138,11 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 last_mid_price,
                 last_volatility,
             )?;
+            for closed_sid in &closed_from_shutdown {
+                if let Some(funnel) = strategy_funnels.get_mut(closed_sid) {
+                    funnel.record_close("shutdown");
+                }
+            }
             // End MC episodes for shutdown-closed positions
             for &sid in &enabled_strategies {
                 if mc_evaluator.has_active_episode(sid) {
@@ -1569,7 +1597,8 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
         total_trades: &mut u64,
         mid_price: f64,
         volatility: f64,
-    ) -> Result<()> {
+    ) -> Result<Vec<StrategyId>> {
+        let mut closed_strategies = Vec::new();
         let mut open_positions: Vec<(StrategyId, f64)> = projector
             .snapshot()
             .positions
@@ -1634,6 +1663,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
                 .unwrap_or_default();
             if paper_result.fill_price.is_some() {
                 *total_trades += 1;
+                closed_strategies.push(strategy_id);
                 runtime_observability.record_execution_fill(
                     exec_result.fill_price - exec_result.requested_price,
                     exec_result.slippage,
@@ -1645,7 +1675,7 @@ impl<F: MarketFeed> ForwardTestRunner<F> {
             }
         }
 
-        Ok(())
+        Ok(closed_strategies)
     }
 
     /// Close a single strategy's open position (used for MAX_HOLD_TIME and signal-driven exits).
